@@ -1,9 +1,10 @@
 package com.enderthor.kvpartner.data
 
+import com.enderthor.kvpartner.engine.GhostPick
 import kotlinx.serialization.Serializable
 
 /** Current schema version. Bump this and add a branch in [migrateToLatest] when defaults change. */
-const val CONFIG_VERSION = 1
+const val CONFIG_VERSION = 2
 
 /** Controls which gap metric is displayed on the data fields. */
 enum class GapDisplay { TIME, DISTANCE, BOTH }
@@ -21,6 +22,14 @@ data class KVPartnerConfig(
     val targetSpeedMs: Double = 0.0,
     /** Which gap metric to display on the fields. */
     val gapDisplay: GapDisplay = GapDisplay.BOTH,
+    /** Whether the Race Your Own feature is enabled. */
+    val raceEnabled: Boolean = true,
+    /** Whether to automatically record each ride as a GPS track for future ghost comparison. */
+    val autoRecord: Boolean = true,
+    /** Which past ghost to use when multiple recorded tracks cover the same segment. */
+    val ghostPick: GhostPick = GhostPick.BEST,
+    /** Whether to emit an in-ride alert when the rider enters a recorded segment. */
+    val segmentEntryAlert: Boolean = false,
 ) {
     /**
      * Returns the target speed if valid (> 0), or null when no target is configured.
@@ -40,7 +49,11 @@ fun paceMinKmToMs(minPerKm: Double): Double = if (minPerKm > 0) 1000.0 / (minPer
 
 /**
  * Applies any pending schema migrations and returns an up-to-date [KVPartnerConfig].
- * In v1 this is an identity. Future versions add `if (version < N) { … copy(…) }` branches.
+ * Add `if (version < N) { return copy(…, version = N) }` branches when bumping CONFIG_VERSION.
  * Always called after JSON decoding so every consumer always sees the current schema.
  */
-fun KVPartnerConfig.migrateToLatest(): KVPartnerConfig = this
+fun KVPartnerConfig.migrateToLatest(): KVPartnerConfig {
+    // v1 → v2: race fields added with defaults; just stamp the version.
+    if (version < 2) return copy(version = 2)
+    return this
+}

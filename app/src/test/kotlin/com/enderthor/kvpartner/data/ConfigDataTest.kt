@@ -1,7 +1,10 @@
 package com.enderthor.kvpartner.data
 
+import com.enderthor.kvpartner.engine.GhostPick
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ConfigDataTest {
@@ -17,4 +20,14 @@ class ConfigDataTest {
         val config = KVPartnerConfig()
         assertEquals(config, config.migrateToLatest())
     }
+
+    @Test fun `race defaults are sane`() {
+        val c = KVPartnerConfig()
+        assertTrue(c.raceEnabled)            // ② on by default
+        assertTrue(c.autoRecord)             // history recording on by default
+        assertEquals(GhostPick.BEST, c.ghostPick)
+        assertFalse(c.segmentEntryAlert)     // alerts off by default (sounds off by default)
+    }
+
+    @Test fun `config version bumped to 2`() { assertEquals(2, CONFIG_VERSION) }
 }
