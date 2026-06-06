@@ -50,12 +50,38 @@ class GapNumericDataType(
 
     private val configManager = ConfigurationManager(context)
 
+    /**
+     * Tracks the coroutine scope of the currently active view so a re-entrant [startView]
+     * (the Karoo host can call it again for the same field) cancels the previous scope first,
+     * avoiding two render loops fighting over the same emitter.
+     */
+    @Volatile
+    private var activeScopeJob: Job? = null
+
     private companion object {
         const val PLACEHOLDER = "---"
+
+        /**
+         * Synthetic state shown in the profile-editor gallery (config.preview = true).
+         * Represents being ~1:30 ahead and ~60 m in front — a readable, non-trivial snapshot.
+         */
+        val DEMO_STATE = GapState(
+            gapTimeS = -90.0,
+            gapDistanceM = 60.0,
+            progressM = 0.0,
+            ghostProgressM = 0.0,
+            ahead = true,
+            stale = false,
+            active = true,
+        )
     }
 
     override fun startView(context: Context, config: ViewConfig, emitter: ViewEmitter) {
+        // Re-entry guard: cancel any previous render scope before starting a new one.
+        activeScopeJob?.cancel()
+
         val scopeJob = Job()
+        activeScopeJob = scopeJob
         val scope = CoroutineScope(Dispatchers.Default + scopeJob)
 
         val configJob = scope.launch {
@@ -68,7 +94,12 @@ class GapNumericDataType(
                 val display = configManager.loadConfigFlow().map { it.gapDisplay }
                 combine(GapStateHolder.state, display) { state, gapDisplay -> state to gapDisplay }
                     .distinctUntilChanged()
-                    .collect { (state, gapDisplay) -> emitter.updateView(buildView(state, gapDisplay)) }
+                    .collect { (liveState, gapDisplay) ->
+                        // In preview (profile editor gallery) render a synthetic demo state so the
+                        // field shows a meaningful sample instead of the inactive `---` placeholder.
+                        val state = if (config.preview) DEMO_STATE else liveState
+                        emitter.updateView(buildView(state, gapDisplay))
+                    }
             } catch (_: CancellationException) {
                 // normal — field removed from the page.
             } catch (e: Exception) {

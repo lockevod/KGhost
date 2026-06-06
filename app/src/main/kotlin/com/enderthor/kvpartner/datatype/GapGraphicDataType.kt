@@ -76,6 +76,20 @@ class GapGraphicDataType(
         /** Upper bound so an oversized field can't allocate a huge bitmap each frame. */
         const val MAX_W = 480
         const val MAX_H = 320
+
+        /**
+         * Synthetic state shown in the profile-editor gallery (config.preview = true).
+         * Represents being ~1:30 ahead and ~60 m in front — a readable, non-trivial snapshot.
+         */
+        val DEMO_STATE = GapState(
+            gapTimeS = -90.0,
+            gapDistanceM = 60.0,
+            progressM = 0.0,
+            ghostProgressM = 0.0,
+            ahead = true,
+            stale = false,
+            active = true,
+        )
     }
 
     // ── Pre-allocated drawing primitives (reused every frame — no per-frame allocation) ──
@@ -117,7 +131,10 @@ class GapGraphicDataType(
                 val display = configManager.loadConfigFlow().map { it.gapDisplay }
                 combine(GapStateHolder.state, display) { state, gapDisplay -> state to gapDisplay }
                     .distinctUntilChanged()
-                    .collect { (state, gapDisplay) ->
+                    .collect { (liveState, gapDisplay) ->
+                        // In preview (profile editor gallery) render a synthetic demo state so the
+                        // field shows a meaningful sample instead of the inactive `---` placeholder.
+                        val state = if (config.preview) DEMO_STATE else liveState
                         val (w, h) = bitmapSize(config)
                         val bmp = drawFrame(w, h, state, gapDisplay)
                         val rv = RemoteViews(context.packageName, R.layout.field_gap)
@@ -149,9 +166,13 @@ class GapGraphicDataType(
     private fun drawFrame(w: Int, h: Int, state: GapState, gapDisplay: GapDisplay): Bitmap {
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
-        canvas.drawColor(context.getColor(R.color.gap_bg))
 
+        // Night mode: black background (matches Karoo dark UI, white text readable).
+        // Day mode: white background (sunlight-readable; black text on black = invisible).
         val dark = context.isKarooNightMode()
+        val bgColor = if (dark) Color.BLACK else Color.WHITE
+        canvas.drawColor(bgColor)
+
         val neutral = if (dark) Color.WHITE else Color.BLACK
 
         val waiting = !state.active || state.stale
