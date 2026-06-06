@@ -7,6 +7,7 @@ import com.enderthor.kvpartner.engine.DistanceProgress
 import com.enderthor.kvpartner.engine.GapCalculator
 import com.enderthor.kvpartner.engine.GapStateHolder
 import com.enderthor.kvpartner.engine.GhostCurve
+import com.enderthor.kvpartner.engine.RenderPrefs
 import com.enderthor.kvpartner.engine.VirtualPartnerSource
 import com.enderthor.kvpartner.managers.ConfigurationManager
 import io.hammerhead.karooext.KarooSystemService
@@ -21,7 +22,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
@@ -76,6 +79,13 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         karooSystem = KarooSystemService(applicationContext)
         // loadConfigFlow() already applies migrateToLatest(); no need to migrate again here.
         configManager.loadConfigFlow().onEach { activeConfig.value = it }.launchIn(scope)
+        // Feed the render-prefs holder so the data fields don't each open their own DataStore
+        // subscription just to read gapDisplay (single writer here; fields are readers).
+        activeConfig
+            .map { it.gapDisplay }
+            .distinctUntilChanged()
+            .onEach { RenderPrefs.setGapDisplay(it) }
+            .launchIn(scope)
         karooSystem.connect { connected -> if (connected) onConnected() }
     }
 

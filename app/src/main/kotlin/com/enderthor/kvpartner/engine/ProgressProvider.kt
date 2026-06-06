@@ -26,7 +26,8 @@ class DistanceProgress(
     private val clock: () -> Long = System::currentTimeMillis,
 ) : ProgressProvider {
 
-    @Volatile override var progressM: Double = 0.0
+    // Access is confined to the single tick coroutine in KVPartnerExtension; no cross-thread reads.
+    override var progressM: Double = 0.0
         private set
 
     /** Timestamp of the last time [progressM] actually changed (or 0 if never received). */
@@ -45,10 +46,4 @@ class DistanceProgress(
     /** True when the distance value changed within the last [staleThresholdMs] milliseconds. */
     override val isFresh: Boolean
         get() = lastChangeMs > 0L && (clock() - lastChangeMs) < staleThresholdMs
-
-    /** Resets state — call when a ride ends or is discarded. */
-    fun reset() {
-        progressM = 0.0
-        lastChangeMs = 0L
-    }
 }

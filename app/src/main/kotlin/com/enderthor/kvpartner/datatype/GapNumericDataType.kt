@@ -7,9 +7,11 @@ import android.view.View
 import android.widget.RemoteViews
 import com.enderthor.kvpartner.R
 import com.enderthor.kvpartner.data.GapDisplay
+import com.enderthor.kvpartner.engine.GapDisplayLogic
 import com.enderthor.kvpartner.engine.GapState
 import com.enderthor.kvpartner.engine.GapStateHolder
-import com.enderthor.kvpartner.managers.ConfigurationManager
+import com.enderthor.kvpartner.engine.GapStatus
+import com.enderthor.kvpartner.engine.RenderPrefs
 import io.hammerhead.karooext.extension.DataTypeImpl
 import io.hammerhead.karooext.internal.ViewEmitter
 import io.hammerhead.karooext.models.UpdateGraphicConfig
@@ -22,7 +24,6 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.util.Locale
@@ -36,19 +37,19 @@ import kotlin.math.roundToInt
  * mathematical sign convention (ahead ⇒ gapTimeS negative), so this field flips the sign
  * for human-readable display: ahead shows `+M:SS` in green, behind shows `-M:SS` in red.
  *
- * When the gap is not [GapState.active] or the source is [GapState.stale], the field shows
- * `---` in the neutral day/night text colour (NOT a disabled grey) — the rider is waiting
- * for data, the field is not turned off.
+ * When the gap is not [GapState.active] the field shows `---` in the neutral day/night text
+ * colour (NOT a disabled grey) — the rider is waiting for data, the field is not turned off.
+ * Note we intentionally do NOT blank on [GapState.stale]: the gap stays valid while the rider is
+ * legitimately stopped (e.g. at a red light) because the ghost keeps moving; proper GPS-loss
+ * detection (via location/speed) is deferred to sub-project ②.
  *
  * This is a passive readout, so there is no tap PendingIntent — it just observes
- * [GapStateHolder.state] (combined with the rider's [GapDisplay] preference) and emits a
- * RemoteViews per distinct change.
+ * [GapStateHolder.state] (combined with the rider's [GapDisplay] preference from [RenderPrefs])
+ * and emits a RemoteViews per distinct change.
  */
 class GapNumericDataType(
     private val context: Context,
 ) : DataTypeImpl("kvpartner", "kvpartner-gap-num") {
-
-    private val configManager = ConfigurationManager(context)
 
     /**
      * Tracks the coroutine scope of the currently active view so a re-entrant [startView]
@@ -91,8 +92,7 @@ class GapNumericDataType(
 
         val viewJob = scope.launch {
             try {
-                val display = configManager.loadConfigFlow().map { it.gapDisplay }
-                combine(GapStateHolder.state, display) { state, gapDisplay -> state to gapDisplay }
+                combine(GapStateHolder.state, RenderPrefs.gapDisplay) { state, gapDisplay -> state to gapDisplay }
                     .distinctUntilChanged()
                     .collect { (liveState, gapDisplay) ->
                         // In preview (profile editor gallery) render a synthetic demo state so the
@@ -120,8 +120,10 @@ class GapNumericDataType(
         val neutral = if (dark) Color.WHITE else Color.BLACK
         val neutralHint = if (dark) 0xCCFFFFFF.toInt() else 0xCC000000.toInt()
 
-        // Waiting for data: neutral `---`, NOT a disabled grey.
-        val waiting = !state.active || state.stale
+        // Waiting for data: neutral `---`, NOT a disabled grey. We blank ONLY on !active; we do
+        // NOT blank on state.stale — the gap stays valid while the rider is legitimately stopped
+        // (the ghost keeps moving). GPS-loss detection is deferred to sub-project ②.
+        val waiting = !state.active
 
         val main: String
         val hint: String
@@ -134,8 +136,15 @@ class GapNumericDataType(
             mainColor = neutral
             hintColor = neutralHint
         } else {
-            val stateColor = if (state.ahead) ahead() else behind()
-            val timeText = fmtTime(state.gapTimeS)
+            // Three-state classification with a small epsilon so an exactly-on-pace gap renders
+            // neutral (no sign, day/night colour) rather than a misleading green "+0:00".
+            val status = GapDisplayLogic.gapStatus(state.gapTimeS)
+            val stateColor = when (status) {
+                GapStatus.NEUTRAL -> neutral
+                GapStatus.AHEAD -> ahead()
+                GapStatus.BEHIND -> behind()
+            }
+            val timeText = fmtTime(state.gapTimeS, status)
             val distText = fmtDistance(state.gapDistanceM)
             when (gapDisplay) {
                 GapDisplay.TIME -> {
@@ -171,22 +180,31 @@ class GapNumericDataType(
 }
 
 /**
- * Formats the gap as a signed time string, flipping the engine's mathematical sign so that
- * being ahead reads as a positive number on screen ("+0:20" when 20 s ahead).
+ * Formats the gap as a time string. For [GapStatus.NEUTRAL] (on-pace) it shows the magnitude
+ * with NO leading sign ("0:00"); for AHEAD/BEHIND it flips the engine's mathematical sign so
+ * being ahead reads positive on screen ("+0:20" when 20 s ahead, "-0:20" when 20 s behind).
  */
-internal fun fmtTime(gapTimeS: Double): String {
-    val shown = -gapTimeS // ahead (gapTimeS < 0) → positive on screen
-    val sign = if (shown >= 0) "+" else "-"
-    val a = abs(shown).toInt()
+internal fun fmtTime(gapTimeS: Double, status: GapStatus = GapDisplayLogic.gapStatus(gapTimeS)): String {
+    val a = abs(gapTimeS).toInt()
+    val sign = when (status) {
+        GapStatus.NEUTRAL -> ""
+        GapStatus.AHEAD -> "+"
+        GapStatus.BEHIND -> "-"
+    }
     return String.format(Locale.US, "%s%d:%02d", sign, a / 60, a % 60)
 }
 
 /**
- * Formats the gap distance in metres, presenting an explicit sign so ahead reads positive
- * ("+120 m" when 120 m ahead). The engine already uses positive = ahead for distance.
+ * Formats the gap distance in metres. Within a small epsilon (±[epsM]) the value is treated as
+ * on-pace: rendered with NO leading sign ("0 m"). Otherwise it shows an explicit sign so ahead
+ * reads positive ("+120 m"). The engine already uses positive = ahead for distance.
  */
-internal fun fmtDistance(gapDistanceM: Double): String {
+internal fun fmtDistance(gapDistanceM: Double, epsM: Double = 2.0): String {
     val m = gapDistanceM.roundToInt()
-    val sign = if (m >= 0) "+" else "-"
+    val sign = when {
+        abs(gapDistanceM) < epsM -> ""
+        m >= 0 -> "+"
+        else -> "-"
+    }
     return String.format(Locale.US, "%s%d m", sign, abs(m))
 }

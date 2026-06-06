@@ -9,9 +9,11 @@ import android.graphics.Rect
 import android.widget.RemoteViews
 import com.enderthor.kvpartner.R
 import com.enderthor.kvpartner.data.GapDisplay
+import com.enderthor.kvpartner.engine.GapDisplayLogic
 import com.enderthor.kvpartner.engine.GapState
 import com.enderthor.kvpartner.engine.GapStateHolder
-import com.enderthor.kvpartner.managers.ConfigurationManager
+import com.enderthor.kvpartner.engine.GapStatus
+import com.enderthor.kvpartner.engine.RenderPrefs
 import io.hammerhead.karooext.extension.DataTypeImpl
 import io.hammerhead.karooext.internal.ViewEmitter
 import io.hammerhead.karooext.models.UpdateGraphicConfig
@@ -24,7 +26,6 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -41,18 +42,19 @@ import timber.log.Timber
  * Your dot is green when ahead and red when behind (reserved state hues). Below the track the
  * gap text is drawn (time big, distance small, per the rider's [GapDisplay] preference).
  *
- * When the gap is not [GapState.active] or the source is [GapState.stale], the field draws a
- * neutral `---` (day/night colour, NOT a disabled grey) — waiting for data, not turned off.
+ * When the gap is not [GapState.active] the field draws a neutral `---` (day/night colour, NOT a
+ * disabled grey) — waiting for data, not turned off. Note we intentionally do NOT blank on
+ * [GapState.stale]: the gap stays valid while the rider is legitimately stopped (the ghost keeps
+ * moving). GPS-loss detection is deferred to sub-project ②.
  *
  * Passive readout, so there is no tap PendingIntent. All `Paint`/`Rect`/`RectF` are
- * pre-allocated at class level and reused per frame (no per-frame allocation). The bitmap is
- * the only per-frame allocation, sized from [ViewConfig.viewSize] (with a sensible fallback).
+ * pre-allocated at class level and reused per frame. The bitmap+Canvas are also reused across
+ * frames (recreated only when [ViewConfig.viewSize] changes) so we don't churn a ~600 KB buffer
+ * at 1 Hz over multi-hour rides.
  */
 class GapGraphicDataType(
     private val context: Context,
 ) : DataTypeImpl("kvpartner", "kvpartner-gap") {
-
-    private val configManager = ConfigurationManager(context)
 
     /**
      * Tracks the coroutine scope of the currently active view so a re-entrant [startView]
@@ -113,6 +115,13 @@ class GapGraphicDataType(
     }
     private val textBounds = Rect()
 
+    // ── Reused render buffer ──────────────────────────────────────────────────────────────────
+    // A single Bitmap+Canvas reused across frames instead of allocating a fresh ~600 KB bitmap
+    // every tick. Confined to the single render coroutine (one collector at a time, guaranteed by
+    // the re-entry guard above), so no synchronisation is needed.
+    private var reuseBitmap: Bitmap? = null
+    private var reuseCanvas: Canvas? = null
+
     override fun startView(context: Context, config: ViewConfig, emitter: ViewEmitter) {
         // Re-entry guard: cancel any previous render scope before starting a new one.
         activeScopeJob?.cancel()
@@ -128,8 +137,7 @@ class GapGraphicDataType(
 
         val viewJob = scope.launch {
             try {
-                val display = configManager.loadConfigFlow().map { it.gapDisplay }
-                combine(GapStateHolder.state, display) { state, gapDisplay -> state to gapDisplay }
+                combine(GapStateHolder.state, RenderPrefs.gapDisplay) { state, gapDisplay -> state to gapDisplay }
                     .distinctUntilChanged()
                     .collect { (liveState, gapDisplay) ->
                         // In preview (profile editor gallery) render a synthetic demo state so the
@@ -153,6 +161,10 @@ class GapGraphicDataType(
             viewJob.cancel()
             scope.cancel()
             scopeJob.cancel()
+            // Release the reused render buffer when the field is removed from the page.
+            reuseBitmap?.recycle()
+            reuseBitmap = null
+            reuseCanvas = null
         }
     }
 
@@ -164,8 +176,20 @@ class GapGraphicDataType(
     }
 
     private fun drawFrame(w: Int, h: Int, state: GapState, gapDisplay: GapDisplay): Bitmap {
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
+        // Reuse the bitmap+Canvas across frames; only recreate when the target size changes
+        // (e.g. config.viewSize changed). This is safe because RemoteViews copies the bitmap into
+        // the Binder parcel at updateView time, so reusing the buffer on the next frame does not
+        // corrupt an already-dispatched frame. The whole bitmap is repainted each frame
+        // (background first), so there are no stale pixels.
+        var bmp = reuseBitmap
+        var canvas = reuseCanvas
+        if (bmp == null || canvas == null || bmp.width != w || bmp.height != h) {
+            bmp?.recycle()
+            bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            canvas = Canvas(bmp)
+            reuseBitmap = bmp
+            reuseCanvas = canvas
+        }
 
         // Night mode: black background (matches Karoo dark UI, white text readable).
         // Day mode: white background (sunlight-readable; black text on black = invisible).
@@ -175,7 +199,9 @@ class GapGraphicDataType(
 
         val neutral = if (dark) Color.WHITE else Color.BLACK
 
-        val waiting = !state.active || state.stale
+        // Blank ONLY on !active; the gap stays valid while the rider is legitimately stopped
+        // (the ghost keeps moving). GPS-loss detection is deferred to sub-project ②.
+        val waiting = !state.active
         if (waiting) {
             // Neutral `---` centred — waiting for data, not disabled.
             textPaint.color = neutral
@@ -202,17 +228,25 @@ class GapGraphicDataType(
         val youX = left + span * 0.5f
         val ghostX = (left + span * (0.5 + 0.5 * frac)).toFloat()
 
+        // Three-state classification with a small epsilon: an exactly-on-pace gap renders neutral
+        // (day/night colour, no leading sign) rather than a misleading green "+0:00".
+        val status = GapDisplayLogic.gapStatus(state.gapTimeS)
+        val stateColor = when (status) {
+            GapStatus.NEUTRAL -> neutral
+            GapStatus.AHEAD -> context.getColor(R.color.gap_ahead)
+            GapStatus.BEHIND -> context.getColor(R.color.gap_behind)
+        }
+
         val dotR = (h * 0.07f).coerceIn(3f, 14f)
         // Ghost dot (grey) first so an overlap draws your dot on top.
         canvas.drawCircle(ghostX, trackCy, dotR, ghostPaint)
-        youPaint.color = if (state.ahead) context.getColor(R.color.gap_ahead)
-        else context.getColor(R.color.gap_behind)
+        youPaint.color = stateColor
         canvas.drawCircle(youX, trackCy, dotR, youPaint)
 
         // Gap text below the track.
-        val timeText = fmtTime(state.gapTimeS)
+        val timeText = fmtTime(state.gapTimeS, status)
         val distText = fmtDistance(state.gapDistanceM)
-        val textColor = youPaint.color
+        val textColor = stateColor
         when (gapDisplay) {
             GapDisplay.TIME -> drawBig(canvas, w, h, timeText, textColor)
             GapDisplay.DISTANCE -> drawBig(canvas, w, h, distText, textColor)
