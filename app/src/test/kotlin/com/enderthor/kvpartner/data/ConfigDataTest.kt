@@ -30,4 +30,8 @@ class ConfigDataTest {
     }
 
     @Test fun `config version bumped to 2`() { assertEquals(2, CONFIG_VERSION) }
+
+    @Test fun `v1 config migrates version to 2`() {
+        assertEquals(2, KVPartnerConfig(version = 1).migrateToLatest().version)
+    }
 }

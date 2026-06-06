@@ -114,13 +114,20 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     @Volatile
     private var recordingStartedEpoch: Long = 0L
 
-    // Route mode state. When [routePath] is non-null AND [liveSegments] is non-empty the tick runs
-    // the per-segment ② logic; otherwise it runs the ① Virtual Partner logic. Written by the
+    /**
+     * One immutable route-mode snapshot. The matcher (Default thread) builds the full pairing of
+     * route path + its live segments and publishes it in a SINGLE @Volatile write; the tick (Main)
+     * reads it ONCE per tick. Bundling them prevents a one-tick `---` glitch on a route SWITCH where
+     * the tick could otherwise pair a NEW [path] with the OLD segments (two separate sequential
+     * writes were observable as a torn read).
+     */
+    private data class RouteMode(val path: PolylinePath, val segments: List<LiveSegment>)
+
+    // Route mode state. When non-null AND [RouteMode.segments] is non-empty the tick runs the
+    // per-segment ② logic; otherwise it runs the ① Virtual Partner logic. Written by the
     // navigation-state collector (off Main), read by the tick — hence @Volatile.
     @Volatile
-    private var routePath: PolylinePath? = null
-    @Volatile
-    private var liveSegments: List<LiveSegment> = emptyList()
+    private var routeMode: RouteMode? = null
 
     // The on-screen data fields rendering the GapState. typeIds must match extension_info.xml
     // exactly ("kvpartner-gap", "kvpartner-gap-num" and "kvpartner-segment").
@@ -210,8 +217,9 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                         SegmentMatcher.Params(),
                     )
                     val withElevation = applyElevation(matched, elevPolyline)
-                    routePath = path
-                    liveSegments = withElevation
+                    // Single atomic publish: path + segments together so the tick never sees a NEW
+                    // path paired with OLD segments.
+                    routeMode = RouteMode(path, withElevation)
                     Timber.d("route mode ON: ${withElevation.size} segment(s) on '${state.name}'")
                 }.onFailure { e ->
                     Timber.w(e, "route matching failed; staying in ① VP mode")
@@ -225,8 +233,7 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
 
     /** Clears ② route mode so the tick falls back to ① Virtual Partner behavior. */
     private fun clearRouteMode() {
-        routePath = null
-        liveSegments = emptyList()
+        routeMode = null
         SegmentInfoHolder.clear()
     }
 
@@ -344,13 +351,14 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                     }
 
                     // --- mode select: ② route mode vs ① Virtual Partner ---------------------
-                    val route = routePath
-                    val segments = liveSegments
-                    if (route != null && segments.isNotEmpty()) {
+                    // Read the route-mode snapshot ONCE per tick so path + segments stay consistent
+                    // even if the matcher publishes a new RouteMode mid-tick.
+                    val rm = routeMode
+                    if (rm != null && rm.segments.isNotEmpty()) {
                         // Rebuild the projector when the route identity changes.
-                        if (projectorRoute !== route) {
-                            routeProjector = RouteProjectedProgress(route)
-                            projectorRoute = route
+                        if (projectorRoute !== rm.path) {
+                            routeProjector = RouteProjectedProgress(rm.path)
+                            projectorRoute = rm.path
                             activeSegmentStartM = null
                         }
                         val rp = routeProjector!!
@@ -360,7 +368,7 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                             rp.onLocation(LatLng(lat, lng))
                         }
                         val routeDist = rp.progressM
-                        val seg = segments.firstOrNull { routeDist in it.routeStartM..it.routeEndM }
+                        val seg = rm.segments.firstOrNull { routeDist in it.routeStartM..it.routeEndM }
                         if (seg == null) {
                             // Between segments / off the matched stretch: no active segment.
                             activeSegmentStartM = null

@@ -11,8 +11,10 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -26,6 +28,8 @@ import com.enderthor.kvpartner.managers.ConfigurationManager
 import com.enderthor.kvpartner.screens.PartnerScreen
 import com.enderthor.kvpartner.screens.RaceScreen
 import com.enderthor.kvpartner.screens.SettingsScreen
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -65,9 +69,14 @@ fun TabLayout() {
     val config by configManager.loadConfigFlow()
         .collectAsStateWithLifecycle(initialValue = KVPartnerConfig())
 
-    // Cheap read-only snapshot of the stored track count, evaluated once at composition.
-    val trackCount = remember {
-        try { TrackStore(File(context.filesDir, "tracks")).allTrackIds().size } catch (_: Exception) { null }
+    // Read-only snapshot of the stored track count. allTrackIds() does a synchronous listFiles(),
+    // so it must NOT run on Main (ANR rule); compute it once on Dispatchers.IO. Stays null until
+    // loaded, which keeps the Race-tab count line hidden until the value is available.
+    var trackCount by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(Unit) {
+        trackCount = withContext(Dispatchers.IO) {
+            try { TrackStore(File(context.filesDir, "tracks")).allTrackIds().size } catch (_: Exception) { null }
+        }
     }
 
     var selectedTab by remember { mutableIntStateOf(0) }

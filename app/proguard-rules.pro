@@ -9,6 +9,11 @@
 # Keep the data model and its generated serializers.
 -keep class com.enderthor.kvpartner.data.** { *; }
 
+# Keep the geo @Serializable models (RecordedTrack/TrackPointDto + spatial index)
+# so R8 minification doesn't break TrackStore.save / loadCandidates.
+-keep class com.enderthor.kvpartner.geo.** { *; }
+-keepclasseswithmembers class com.enderthor.kvpartner.geo.**$$serializer { *; }
+
 # Standard kotlinx.serialization keeps.
 -keepclassmembers @kotlinx.serialization.Serializable class ** {
     *** Companion;
