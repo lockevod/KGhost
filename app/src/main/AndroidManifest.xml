@@ -9,15 +9,12 @@
         android:roundIcon="@drawable/ic_kvpartner"
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat">
-        <!-- TODO Task 9: re-enable MainActivity once the class exists -->
-        <!--
         <activity android:name=".activity.MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        -->
         <service
             android:name=".extension.KVPartnerExtension"
             android:exported="true"

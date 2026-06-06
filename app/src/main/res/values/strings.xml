@@ -7,4 +7,27 @@
     <string name="gap_numeric_description">Time/distance gap to the virtual partner.</string>
     <string name="gap_graphic_name">Virtual Partner Track</string>
     <string name="gap_graphic_description">Track view showing your position relative to the virtual partner.</string>
+
+    <!-- Settings UI: tabs -->
+    <string name="tab_partner">Partner</string>
+    <string name="tab_settings">Settings</string>
+
+    <!-- Settings UI: Partner tab -->
+    <string name="partner_title">Virtual Partner target</string>
+    <string name="partner_target_none">No target set</string>
+    <string name="partner_current_target">Current: %1$s</string>
+    <string name="partner_mode_speed">Speed</string>
+    <string name="partner_mode_pace">Pace</string>
+    <string name="partner_input_speed">Speed (km/h)</string>
+    <string name="partner_input_pace">Pace (min/km)</string>
+    <string name="partner_units">Units</string>
+    <string name="partner_save">Save target</string>
+    <string name="partner_clear">Clear target</string>
+    <string name="partner_invalid">Enter a target greater than 0.</string>
+
+    <!-- Settings UI: Settings tab -->
+    <string name="settings_title">Display preferences</string>
+    <string name="settings_show_graphic">Show graphic field</string>
+    <string name="settings_show_numeric">Show numeric field</string>
+    <string name="settings_gap_display">Gap display</string>
 </resources>
