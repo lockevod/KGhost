@@ -30,6 +30,7 @@ import com.enderthor.kvpartner.data.kmhToMs
 import com.enderthor.kvpartner.data.paceMinKmToMs
 import com.enderthor.kvpartner.managers.ConfigurationManager
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 /** Whether the target is entered as a speed or as a pace. */
 private enum class TargetMode { SPEED, PACE }
@@ -57,7 +58,7 @@ fun PartnerScreen(
     val currentLabel = if (currentMs > 0.0) {
         val kmh = currentMs * 3.6
         val paceMinKm = if (currentMs > 0.0) 1000.0 / currentMs / 60.0 else 0.0
-        "%.1f km/h  /  %.2f min/km".format(kmh, paceMinKm)
+        String.format(Locale.US, "%.1f km/h  /  %.2f min/km", kmh, paceMinKm)
     } else {
         stringResource(R.string.partner_target_none)
     }

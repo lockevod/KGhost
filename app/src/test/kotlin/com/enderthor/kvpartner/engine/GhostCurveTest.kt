@@ -29,6 +29,14 @@ class GhostCurveTest {
         assertEquals(0.0, curve.distanceAt(-5.0), 1e-6)
     }
 
+    @Test fun `timeAt clamps below the range`() {
+        assertEquals(0.0, curve.timeAt(-100.0), 1e-6)   // first sample's timeS
+    }
+
+    @Test fun `distanceAt clamps above the range`() {
+        assertEquals(2000.0, curve.distanceAt(99999.0), 1e-6)   // totalDistanceM
+    }
+
     @Test fun `totals are correct`() {
         assertEquals(2000.0, curve.totalDistanceM, 1e-6)
         assertEquals(500.0, curve.totalTimeS, 1e-6)

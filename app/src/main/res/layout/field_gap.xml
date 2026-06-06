@@ -6,12 +6,14 @@
   dots + the gap text). The bitmap is produced in GapGraphicDataType and pushed via
   RemoteViews.setImageViewBitmap(R.id.field_gap_image, bmp). scaleType=fitCenter keeps
   the rendered bitmap proportional inside whatever field size the Karoo profile assigns.
-  The background is the opaque gap_bg colour so the track is readable in sunlight.
+  The layout background is transparent so any fitCenter letterbox shows the host theme
+  (not black bands in day mode); the night-aware background is painted into the bitmap
+  itself by GapGraphicDataType.drawFrame.
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/gap_bg">
+    android:background="@android:color/transparent">
 
     <ImageView
         android:id="@+id/field_gap_image"

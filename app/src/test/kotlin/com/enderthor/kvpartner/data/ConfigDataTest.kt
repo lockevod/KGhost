@@ -13,4 +13,8 @@ class ConfigDataTest {
     @Test fun `config with target is valid`() {
         assertEquals(5.0, KVPartnerConfig(targetSpeedMs = 5.0).validTargetOrNull()!!, 1e-6)
     }
+    @Test fun `migrateToLatest is identity at v1`() {
+        val config = KVPartnerConfig()
+        assertEquals(config, config.migrateToLatest())
+    }
 }

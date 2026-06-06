@@ -22,10 +22,6 @@ data class KVPartnerConfig(
     val version: Int = CONFIG_VERSION,
     /** Target speed in m/s. 0.0 = no target configured (Virtual Partner inactive). */
     val targetSpeedMs: Double = 0.0,
-    /** Whether to show the graphical (track + dots) data field. */
-    val showGraphic: Boolean = true,
-    /** Whether to show the numeric gap data field. */
-    val showNumeric: Boolean = false,
     /** Which gap metric to display on the fields. */
     val gapDisplay: GapDisplay = GapDisplay.BOTH,
     /** Preferred unit system for the settings UI. */

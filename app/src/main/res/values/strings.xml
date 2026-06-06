@@ -27,7 +27,5 @@
 
     <!-- Settings UI: Settings tab -->
     <string name="settings_title">Display preferences</string>
-    <string name="settings_show_graphic">Show graphic field</string>
-    <string name="settings_show_numeric">Show numeric field</string>
     <string name="settings_gap_display">Gap display</string>
 </resources>
