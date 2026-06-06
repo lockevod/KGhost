@@ -28,4 +28,19 @@ class StalenessLogicTest {
         // Cannot prove the rider is stopped → conservatively not trustworthy.
         assertFalse(StalenessLogic.isTrustworthy(distanceFresh = false, speedMs = null))
     }
+
+    // The caller now passes a FRESHNESS-GATED speed (freshValueOrNull), not the raw SPEED reading.
+    // A stale/frozen speed arrives here as null, so the gate cannot mistake a frozen speed for a
+    // genuine stop. These cases assert that distinction at the logic boundary.
+
+    @Test fun `frozen distance with fresh genuine-stop speed is trustworthy`() {
+        // Genuine stop with healthy GPS → SPEED is fresh 0.0 → trustworthy → gap stays visible.
+        assertTrue(StalenessLogic.isTrustworthy(distanceFresh = false, speedMs = 0.0))
+    }
+
+    @Test fun `frozen distance with stale frozen speed (null) is not trustworthy`() {
+        // GPS lost while moving → SPEED freezes (last-known-value) → freshValueOrNull() returns
+        // null → must NOT be treated as a stop → blank to `---`.
+        assertFalse(StalenessLogic.isTrustworthy(distanceFresh = false, speedMs = null))
+    }
 }

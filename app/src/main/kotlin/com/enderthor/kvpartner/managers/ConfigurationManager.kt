@@ -60,16 +60,21 @@ class ConfigurationManager(private val context: Context) {
     /**
      * Writes [config] to DataStore, replacing any previously stored value.
      * Encodes with [jsonForStorage] (compact, no encodeDefaults).
+     *
+     * @return true if the write succeeded, false if it threw (already logged). Callers must not
+     *         report success on false — the screens surface an error status instead of clearing.
      */
-    suspend fun saveConfig(config: KVPartnerConfig) {
-        try {
+    suspend fun saveConfig(config: KVPartnerConfig): Boolean {
+        return try {
             context.dataStore.edit { prefs ->
                 prefs[configKey] = jsonForStorage.encodeToString(config)
             }
+            true
         } catch (e: Throwable) {
             // Surface a serialization/encode failure (e.g. a release R8 strip of generated
             // serializers) instead of silently swallowing it.
             Timber.e(e, "Failed to save KVPartnerConfig")
+            false
         }
     }
 

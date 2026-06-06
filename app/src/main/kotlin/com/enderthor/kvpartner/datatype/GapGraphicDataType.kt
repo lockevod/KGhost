@@ -116,11 +116,33 @@ class GapGraphicDataType(
             awaitCancellation()
         }
 
+        // Render buffers are OWNED by this startView invocation — created here, then used by the
+        // synchronous seed below AND reused across frames in viewJob's collect loop. The seed runs
+        // synchronously on the host thread and MUST fully complete before viewJob is launched, so
+        // the seed draw and every loop draw are strictly sequential on this one renderer; they never
+        // run concurrently. Each startView still creates its OWN renderer (re-entry safe — a
+        // cancelled-but-still-running prior startView owns a different renderer). See class KDoc.
+        val renderer = FrameRenderer(context)
+
+        // Seed one frame synchronously from the LIVE current state to beat karoo-ext 1.1.9's
+        // ViewEmitter.updateView 900 ms throttle (it hard-drops any call within 900 ms of the
+        // previous one, keeping the EARLIER one). Without this, viewJob's first real frame (a few ms
+        // later) would be silently dropped, leaving the graphic field blank/`---` for ~1 s on a
+        // mid-ride page re-entry while a valid gap existed. Seeding with the same values the dropped
+        // frame would carry makes that drop harmless.
+        run {
+            val (sw, sh) = bitmapSize(config)
+            val seedState = if (config.preview) DEMO_STATE else GapStateHolder.state.value
+            val seedBmp = renderer.draw(sw, sh, seedState, RenderPrefs.gapDisplay.value)
+            val seedRv = RemoteViews(context.packageName, R.layout.field_gap)
+            seedRv.setImageViewBitmap(R.id.field_gap_image, seedBmp)
+            emitter.updateView(seedRv)
+        }
+
         val viewJob = scope.launch {
-            // Render buffers are OWNED by this coroutine — created here, reused across frames in
-            // this collect loop only, never touched by any other (possibly cancelled-but-running)
-            // startView coroutine. See the class KDoc for why this must be per-coroutine.
-            val renderer = FrameRenderer(context)
+            // Reuses the SAME renderer the seed used (do NOT create a second renderer here). The
+            // seed has already completed synchronously before this launch, so there is no concurrent
+            // access to the renderer.
             try {
                 combine(GapStateHolder.state, RenderPrefs.gapDisplay) { state, gapDisplay -> state to gapDisplay }
                     .distinctUntilChanged()

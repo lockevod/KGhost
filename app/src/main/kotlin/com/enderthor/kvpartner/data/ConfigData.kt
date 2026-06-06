@@ -8,9 +8,6 @@ const val CONFIG_VERSION = 1
 /** Controls which gap metric is displayed on the data fields. */
 enum class GapDisplay { TIME, DISTANCE, BOTH }
 
-/** Unit system preference for the settings UI. */
-enum class Units { METRIC, IMPERIAL }
-
 /**
  * Persisted configuration for the KVPartner extension.
  *
@@ -24,8 +21,6 @@ data class KVPartnerConfig(
     val targetSpeedMs: Double = 0.0,
     /** Which gap metric to display on the fields. */
     val gapDisplay: GapDisplay = GapDisplay.BOTH,
-    /** Preferred unit system for the settings UI. */
-    val units: Units = Units.METRIC,
 ) {
     /**
      * Returns the target speed if valid (> 0), or null when no target is configured.

@@ -12,7 +12,11 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -34,6 +38,7 @@ fun SettingsScreen(
     configManager: ConfigurationManager,
 ) {
     val scope = rememberCoroutineScope()
+    var saveFailed by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -52,11 +57,19 @@ fun SettingsScreen(
             GapDisplay.entries.forEach { option ->
                 FilterChip(
                     selected = config.gapDisplay == option,
-                    onClick = { scope.launch { configManager.saveConfig(config.copy(gapDisplay = option)) } },
+                    onClick = {
+                        scope.launch {
+                            saveFailed = !configManager.saveConfig(config.copy(gapDisplay = option))
+                        }
+                    },
                     label = { Text(option.name) },
                     modifier = Modifier.heightIn(min = 48.dp),
                 )
             }
+        }
+
+        if (saveFailed) {
+            Text(text = stringResource(R.string.settings_save_failed))
         }
     }
 }

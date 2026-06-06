@@ -25,7 +25,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.enderthor.kvpartner.R
 import com.enderthor.kvpartner.data.KVPartnerConfig
-import com.enderthor.kvpartner.data.Units
 import com.enderthor.kvpartner.data.kmhToMs
 import com.enderthor.kvpartner.data.paceMinKmToMs
 import com.enderthor.kvpartner.managers.ConfigurationManager
@@ -102,19 +101,6 @@ fun PartnerScreen(
             modifier = Modifier.fillMaxWidth(),
         )
 
-        // Units selector (METRIC / IMPERIAL).
-        Text(text = stringResource(R.string.partner_units))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Units.entries.forEach { unit ->
-                FilterChip(
-                    selected = config.units == unit,
-                    onClick = { scope.launch { configManager.saveConfig(config.copy(units = unit)) } },
-                    label = { Text(unit.name) },
-                    modifier = Modifier.heightIn(min = 48.dp),
-                )
-            }
-        }
-
         Button(
             onClick = {
                 val value = targetText.replace(',', '.').trim().toDoubleOrNull()
@@ -126,8 +112,10 @@ fun PartnerScreen(
                 // is a generous cycling ceiling; this also blocks "1e400"→Infinity and pathological
                 // pace inputs that would otherwise produce a non-finite or absurd m/s.
                 if (targetMs.isFinite() && targetMs > 0.0 && targetMs <= 30.0) {
-                    scope.launch { configManager.saveConfig(config.copy(targetSpeedMs = targetMs)) }
-                    status = null
+                    scope.launch {
+                        val ok = configManager.saveConfig(config.copy(targetSpeedMs = targetMs))
+                        status = if (ok) null else "saveFailed"
+                    }
                 } else {
                     status = "invalid"
                 }
@@ -142,12 +130,21 @@ fun PartnerScreen(
         if (status == "invalid") {
             Text(text = stringResource(R.string.partner_invalid))
         }
+        if (status == "saveFailed") {
+            Text(text = stringResource(R.string.settings_save_failed))
+        }
 
         Button(
             onClick = {
-                scope.launch { configManager.saveConfig(config.copy(targetSpeedMs = 0.0)) }
-                targetText = ""
-                status = null
+                scope.launch {
+                    val ok = configManager.saveConfig(config.copy(targetSpeedMs = 0.0))
+                    if (ok) {
+                        targetText = ""
+                        status = null
+                    } else {
+                        status = "saveFailed"
+                    }
+                }
             },
             modifier = Modifier
                 .fillMaxWidth()
