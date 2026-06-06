@@ -1,4 +1,4 @@
 package com.enderthor.kvpartner.engine
 
-/** Una muestra de la curva del fantasma: a [distanceM] metros recorridos, llevaba [timeS] segundos. */
+/** One sample of the ghost curve: at [distanceM] metres travelled, the ghost had elapsed [timeS] seconds. */
 data class GhostSample(val distanceM: Double, val timeS: Double)
