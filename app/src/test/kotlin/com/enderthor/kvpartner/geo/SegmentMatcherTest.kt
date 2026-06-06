@@ -99,4 +99,57 @@ class SegmentMatcherTest {
             ratio in 0.85..1.15,
         )
     }
+
+    /**
+     * Out-and-back regression. The ROUTE goes east A→B then back west B→A on the same road, and the
+     * TRACK rides the shared middle stretch TWICE (outbound then return).
+     *
+     * On the OLD code [extractTrackSlice] projected every track point by GLOBAL nearest and bucketed
+     * by `[startM, endM]`. Outbound track points are geometrically valid on BOTH the outbound and
+     * the return vertex range of the route, so they smeared across both intervals: the per-interval
+     * slice became non-monotonic in route-distance, the dedup dropped points, and the ghost shrank
+     * (frozen tail). The pass-segregated extraction walks the track in recorded order and keeps the
+     * longest contiguous monotonic pass, so the ghost again covers the full segment width.
+     */
+    @Test fun `out-and-back track rides the shared stretch twice and yields one clean pass`() {
+        // Route: A(0,0) -> B(0,0.018) east (~2 km) -> back to A. Total ~4 km.
+        // Densely vertexed (~67 m) like a real decimated route, so the per-segment window of the
+        // forward-biased slice projection can segregate the outbound and return passes.
+        val outLngs = generateSequence(0.0) { it + 0.0006 }.takeWhile { it < 0.018 }.toList() + 0.018
+        val backLngs = outLngs.reversed().drop(1)
+        val outAndBack = PolylinePath((outLngs + backLngs).map { LatLng(0.0, it) })
+
+        // Track: ride the middle ~1 km east (out), then back west over the SAME longitudes (return).
+        // Distances and times are cumulative across both passes (a real ride never rewinds).
+        val outPts = (0..18).map { i ->
+            val lng = 0.004 + i * 0.0005
+            pt(lng, distanceM = i * 55.0, t = i * 11.0)
+        }
+        val lastOut = outPts.last()
+        val returnPts = (1..18).map { j ->
+            val lng = 0.013 - j * 0.0005 // walk back west over the same span
+            pt(lng, distanceM = lastOut.distanceM + j * 55.0, t = lastOut.timeS + j * 11.0)
+        }
+        val track = com.enderthor.kvpartner.geo.RecordedTrack(
+            id = "oab", startedAtEpoch = 1_000L,
+            points = (outPts + returnPts).map { it.toDto() },
+        )
+
+        val segs = SegmentMatcher.match(outAndBack, listOf(track), GhostPick.BEST, params)
+        assertTrue("expected at least one segment, got ${segs.size}", segs.isNotEmpty())
+
+        // Every emitted segment must be built from ONE clean pass: the ghost covers the full
+        // declared span (no smeared/shrunk curve), within ~15 %.
+        for (s in segs) {
+            val span = s.routeEndM - s.routeStartM
+            val ghostM = s.ghost.totalDistanceM
+            val ratio = ghostM / span
+            assertTrue(
+                "ghost.totalDistanceM ($ghostM) must be within 15% of span ($span) for one pass, ratio=$ratio",
+                ratio in 0.85..1.15,
+            )
+            // Sanity: the ghost is monotonic and starts at zero (single pass, not a smear).
+            assertEquals(0.0, s.ghost.timeAt(0.0), 1e-6)
+        }
+    }
 }

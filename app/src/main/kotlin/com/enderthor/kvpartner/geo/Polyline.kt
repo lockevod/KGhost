@@ -54,9 +54,52 @@ class PolylinePath(val points: List<LatLng>) {
      * the per-segment point→segment distance (accurate at the metre scale we care about), and
      * returns the cumulative distance-along of the projected foot point.
      */
-    fun nearestProjection(p: LatLng): Projection {
+    fun nearestProjection(p: LatLng): Projection =
+        nearestProjectionInRange(p, Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY)
+
+    /**
+     * Windowed, forward-biased projection used for live progress on out-and-back / self-overlapping
+     * routes. Only considers route segments whose cumulative-distance range intersects the window
+     * `[aroundDistanceM - backWindowM, aroundDistanceM + fwdWindowM]`.
+     *
+     * On a route A→B→A a point on the shared road is geometrically valid on BOTH the outbound and
+     * the return vertex ranges, so the unwindowed [nearestProjection] returns the GLOBAL minimum and
+     * GPS noise flips the winning pass tick-to-tick. Constraining the search to a window centred on
+     * the previously known route-distance keeps the projection on the CURRENT pass: the other pass'
+     * vertex range lies outside the window and is never considered.
+     *
+     * The asymmetric window (small back, larger forward) reflects that the rider moves forward along
+     * the route between fixes; the small back window tolerates GPS jitter without allowing a snap
+     * back onto an earlier pass.
+     *
+     * If the window is empty (e.g. all segments fall outside it) this falls back to a global scan so
+     * the caller always gets a valid projection.
+     */
+    fun nearestProjectionNear(
+        p: LatLng,
+        aroundDistanceM: Double,
+        backWindowM: Double,
+        fwdWindowM: Double,
+    ): Projection {
+        val lo = aroundDistanceM - backWindowM
+        val hi = aroundDistanceM + fwdWindowM
+        val windowed = nearestProjectionInRange(p, lo, hi)
+        // Empty window (no segment intersected it) -> sentinel perpDist; fall back to global.
+        return if (windowed.perpDistM == Double.MAX_VALUE) nearestProjection(p) else windowed
+    }
+
+    /**
+     * Core projection scan restricted to segments whose `[cumulativeM[i], cumulativeM[i + 1]]`
+     * range intersects `[windowLoM, windowHiM]`. With an infinite window this is the plain global
+     * nearest projection.
+     */
+    private fun nearestProjectionInRange(p: LatLng, windowLoM: Double, windowHiM: Double): Projection {
         var best = Projection(0.0, Double.MAX_VALUE, 0)
         for (i in 0 until points.size - 1) {
+            val segLoM = cumulativeM[i]; val segHiM = cumulativeM[i + 1]
+            // Skip segments fully outside the window.
+            if (segHiM < windowLoM || segLoM > windowHiM) continue
+
             val a = points[i]; val b = points[i + 1]
             // Local metric plane (metres) centred at `a`.
             val mPerDegLat = 111_320.0

@@ -182,9 +182,38 @@ object SegmentMatcher {
     }
 
     /**
-     * Extracts the track points projecting onto `[interval]` of the route, ordered by route
-     * distance, reversing when the track runs opposite to the route. Returns null when fewer than
-     * two usable (strictly-increasing-distance) points remain.
+     * Window (m) ahead of the previously kept point's route-distance used when seeding the
+     * forward-biased projection inside [extractTrackSlice]. Generous enough to bridge the route
+     * sampling/decimation spacing, small enough that the return pass of an out-and-back route (whose
+     * route-distance runs the other way) falls outside it.
+     */
+    private const val sliceFwdWindowM = 250.0
+
+    /**
+     * Small back window (m) for the slice projection. Tolerates GPS jitter / equirectangular error
+     * without letting the projection snap onto an earlier-overlapping pass.
+     */
+    private const val sliceBackWindowM = 30.0
+
+    /**
+     * Extracts ONE clean monotonic pass of the track over `[interval]` of the route.
+     *
+     * The old implementation projected every track point by GLOBAL nearest and bucketed by
+     * `[startM, endM]`. On an out-and-back route the outbound track points were geometrically valid
+     * on BOTH the outbound and return vertex ranges, so they smeared across both intervals: the
+     * resulting per-interval slice was non-monotonic in route-distance, the dedup dropped points,
+     * and the ghost shrank (frozen tail re-emerged).
+     *
+     * Instead we walk the TRACK in recorded order and collect the LONGEST contiguous run of points
+     * whose route-projection — seeded forward-biased from the previous kept point's route-distance —
+     * stays inside `[startM, endM]` and is monotonic in route-distance. That yields a single pass
+     * over the interval. The first point of each candidate run is seeded with a GLOBAL projection so
+     * a run can start anywhere; every following point is projected within a window ahead of the
+     * previous one, so the OTHER pass (whose route-distance runs the opposite way) is never picked.
+     *
+     * Reverse detection is preserved: if the chosen run descends in track distance it is reversed so
+     * the slice ascends before the ghost is built. Returns null when fewer than two usable
+     * (strictly-increasing-distance) points remain in the best run.
      */
     private fun extractTrackSlice(
         route: PolylinePath,
@@ -192,14 +221,64 @@ object SegmentMatcher {
         interval: Pair<Double, Double>,
     ): List<TrackPoint>? {
         val (startM, endM) = interval
-        // Project each track point onto the route; keep those inside the interval.
-        val inside = trackPoints
-            .map { it to route.nearestProjection(LatLng(it.lat, it.lng)).distanceAlongM }
-            .filter { it.second in startM..endM }
-            .sortedBy { it.second } // route order
-            .map { it.first }
 
-        if (inside.size < 2) return null
+        var bestRun: List<Pair<TrackPoint, Double>> = emptyList()
+        var currentRun = ArrayList<Pair<TrackPoint, Double>>()
+        var prevRouteM = Double.NaN
+
+        fun closeRun() {
+            if (currentRun.size > bestRun.size) bestRun = currentRun
+            currentRun = ArrayList()
+            prevRouteM = Double.NaN
+        }
+
+        // Seed projection for a run-start point: constrained to the interval so an ambiguous shared
+        // point (valid on both passes of an out-and-back route) is forced onto THIS interval's pass
+        // rather than the global nearest, which may belong to the other pass.
+        fun seedProjection(ll: LatLng): Double =
+            route.nearestProjectionNear(
+                ll,
+                aroundDistanceM = startM,
+                backWindowM = 0.0,
+                fwdWindowM = endM - startM,
+            ).distanceAlongM
+
+        for (tp in trackPoints) {
+            val ll = LatLng(tp.lat, tp.lng)
+            // Seed the first point of a run inside the interval; extend forward-biased thereafter.
+            val routeM = if (currentRun.isEmpty()) {
+                seedProjection(ll)
+            } else {
+                route.nearestProjectionNear(
+                    ll,
+                    aroundDistanceM = prevRouteM,
+                    backWindowM = sliceBackWindowM,
+                    fwdWindowM = sliceFwdWindowM,
+                ).distanceAlongM
+            }
+
+            val insideInterval = routeM in startM..endM
+            // Monotonic forward in route-distance (allow equal: dedup handles it later).
+            val monotonic = currentRun.isEmpty() || routeM >= prevRouteM - sliceBackWindowM
+
+            if (insideInterval && monotonic) {
+                currentRun.add(tp to routeM)
+                prevRouteM = routeM
+            } else {
+                closeRun()
+                // The breaking point may itself start a fresh run if it lands inside the interval.
+                val seedM = seedProjection(ll)
+                if (seedM in startM..endM) {
+                    currentRun.add(tp to seedM)
+                    prevRouteM = seedM
+                }
+            }
+        }
+        closeRun()
+
+        if (bestRun.size < 2) return null
+
+        val inside = bestRun.map { it.first }
 
         // Reverse detection: if track distance decreases as route distance increases, the track
         // was ridden opposite to the route -> reverse so the slice ascends in track distance.

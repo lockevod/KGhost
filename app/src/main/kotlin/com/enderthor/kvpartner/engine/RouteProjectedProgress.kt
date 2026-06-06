@@ -25,9 +25,14 @@ import com.enderthor.kvpartner.geo.PolylinePath
  *                          false.  Default 3000 ms.
  * @param clock             Injectable time source for tests.
  *
- * NOTE: a windowed search over only nearby route segments is a possible future optimisation
- * for very long routes; for sub-project ② the full scan via [PolylinePath.nearestProjection]
- * is fast enough (typical routes are < 5 000 points).
+ * Out-and-back / self-overlapping routes: on a route A→B→A a point on the shared road projects
+ * equally well onto BOTH the outbound and the return vertex range, so a plain global
+ * [PolylinePath.nearestProjection] lets GPS noise flip the winning pass tick-to-tick — making
+ * [progressM] jump km backward/forward (and spuriously read fresh). To prevent this, every fix
+ * after the first uses [PolylinePath.nearestProjectionNear] windowed around the last known
+ * route-distance, so progress can only advance along the CURRENT pass. The first fix (acquisition)
+ * and any fix where the windowed projection falls outside [toleranceM] (a genuine deviation/reroute
+ * or a legitimate skip) fall back to a GLOBAL [PolylinePath.nearestProjection] to re-acquire.
  */
 class RouteProjectedProgress(
     private val route: PolylinePath,
@@ -35,6 +40,9 @@ class RouteProjectedProgress(
     private val staleThresholdMs: Long = 3000,
     private val clock: () -> Long = System::currentTimeMillis,
 ) : ProgressProvider {
+
+    /** Whether a route position has been acquired yet (false until the first [onLocation]). */
+    private var acquired: Boolean = false
 
     /** Cumulative distance-along-route of the last projected position (metres). */
     override var progressM: Double = 0.0
@@ -52,16 +60,40 @@ class RouteProjectedProgress(
      * Must be called from a single coroutine (no cross-thread synchronisation).
      */
     fun onLocation(p: LatLng) {
-        val proj = route.nearestProjection(p)
+        val proj = if (!acquired) {
+            // First fix: global scan to acquire the pass.
+            route.nearestProjection(p)
+        } else {
+            // Subsequent fixes: window around the last known route-distance so progress advances
+            // along the CURRENT pass and cannot snap onto the other pass of an out-and-back route.
+            val windowed = route.nearestProjectionNear(
+                p,
+                aroundDistanceM = progressM,
+                backWindowM = BACK_WINDOW_M,
+                fwdWindowM = FWD_WINDOW_M,
+            )
+            // Rider left the window (genuine deviation / reroute / legitimate skip): re-acquire
+            // globally so we don't get stuck off the current pass.
+            if (windowed.perpDistM >= toleranceM) route.nearestProjection(p) else windowed
+        }
         val now = clock()
 
         val newDist = proj.distanceAlongM
         if (newDist != progressM || lastChangeMs == 0L) lastChangeMs = now
         progressM = newDist
         onRoute = proj.perpDistM < toleranceM
+        acquired = true
     }
 
     /** True when [progressM] changed within the last [staleThresholdMs] milliseconds. */
     override val isFresh: Boolean
         get() = lastChangeMs > 0L && (clock() - lastChangeMs) < staleThresholdMs
+
+    private companion object {
+        /** Window behind the last route-distance — tolerates GPS jitter without snapping back a pass. */
+        const val BACK_WINDOW_M = 50.0
+
+        /** Window ahead of the last route-distance — bounds how far progress may advance per fix. */
+        const val FWD_WINDOW_M = 200.0
+    }
 }
