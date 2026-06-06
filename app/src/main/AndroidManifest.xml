@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application
+        android:name=".KVPartnerApplication"
+        android:allowBackup="true"
+        android:icon="@drawable/ic_kvpartner"
+        android:label="@string/app_name"
+        android:roundIcon="@drawable/ic_kvpartner"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AppCompat">
+        <!-- TODO Task 9: re-enable MainActivity once the class exists -->
+        <!--
+        <activity android:name=".activity.MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        -->
+        <!-- TODO Task 7: re-enable KVPartnerExtension service once the class exists -->
+        <!--
+        <service
+            android:name=".extension.KVPartnerExtension"
+            android:exported="true"
+            tools:ignore="ExportedService">
+            <intent-filter>
+                <action android:name="io.hammerhead.karooext.KAROO_EXTENSION" />
+            </intent-filter>
+            <meta-data
+                android:name="io.hammerhead.karooext.EXTENSION_INFO"
+                android:resource="@xml/extension_info" />
+        </service>
+        -->
+    </application>
+</manifest>

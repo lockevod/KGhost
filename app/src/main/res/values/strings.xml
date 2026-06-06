@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">KVPartner</string>
+    <string name="extension_name">KVPartner</string>
+
+    <string name="gap_numeric_name">Virtual Partner Gap</string>
+    <string name="gap_numeric_description">Time/distance gap to the virtual partner.</string>
+    <string name="gap_graphic_name">Virtual Partner Track</string>
+    <string name="gap_graphic_description">Track view showing your position relative to the virtual partner.</string>
+</resources>

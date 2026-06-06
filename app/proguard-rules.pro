@@ -1,0 +1,2 @@
+-keep class com.enderthor.kvpartner.datatype.** { *; }
+-keepclassmembers enum * { public static **[] values(); public static ** valueOf(java.lang.String); }
