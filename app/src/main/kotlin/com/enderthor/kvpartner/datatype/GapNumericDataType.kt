@@ -10,7 +10,6 @@ import com.enderthor.kvpartner.data.GapDisplay
 import com.enderthor.kvpartner.engine.GapDisplayLogic
 import com.enderthor.kvpartner.engine.GapState
 import com.enderthor.kvpartner.engine.GapStateHolder
-import com.enderthor.kvpartner.engine.GapStatus
 import com.enderthor.kvpartner.engine.RenderPrefs
 import io.hammerhead.karooext.extension.DataTypeImpl
 import io.hammerhead.karooext.internal.ViewEmitter
@@ -26,12 +25,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import timber.log.Timber
-import java.util.Locale
-import kotlin.math.abs
-import kotlin.math.roundToInt
-
-/** Neutral placeholder shown when there is no data or the value is non-finite. */
-internal const val GAP_PLACEHOLDER = "---"
 
 /**
  * Numeric gap data field — the simpler "option A" readout.
@@ -159,11 +152,7 @@ class GapNumericDataType(
             // Three-state classification with a small epsilon so an exactly-on-pace gap renders
             // neutral (no sign, day/night colour) rather than a misleading green "+0:00".
             val status = GapDisplayLogic.gapStatus(state.gapTimeS)
-            val stateColor = when (status) {
-                GapStatus.NEUTRAL -> neutral
-                GapStatus.AHEAD -> ahead()
-                GapStatus.BEHIND -> behind()
-            }
+            val stateColor = context.gapStatusColor(status, neutral)
             val timeText = fmtTime(state.gapTimeS, status)
             val distText = fmtDistance(state.gapDistanceM)
             when (gapDisplay) {
@@ -194,54 +183,4 @@ class GapNumericDataType(
             setTextColor(R.id.field_hint, hintColor)
         }
     }
-
-    private fun ahead(): Int = context.getColor(R.color.gap_ahead)
-    private fun behind(): Int = context.getColor(R.color.gap_behind)
-}
-
-/**
- * Formats the gap as a time string. For [GapStatus.NEUTRAL] (on-pace) it shows the magnitude
- * with NO leading sign ("0:00"); for AHEAD/BEHIND it flips the engine's mathematical sign so
- * being ahead reads positive on screen ("+0:20" when 20 s ahead, "-0:20" when 20 s behind).
- *
- * Gaps under one hour render as `M:SS` (unbounded was ambiguous, e.g. "-90:00"); a gap of an hour
- * or more rolls over to `H:MM:SS` (e.g. "-1:30:00"). The sign and NEUTRAL (no-sign) rules are
- * preserved in both cases.
- */
-internal fun fmtTime(gapTimeS: Double, status: GapStatus = GapDisplayLogic.gapStatus(gapTimeS)): String {
-    // Guard non-finite gap (NaN/±Inf): toInt() on those is undefined/garbage — render the
-    // neutral placeholder instead.
-    if (!gapTimeS.isFinite()) return GAP_PLACEHOLDER
-    val a = abs(gapTimeS).toInt()
-    val sign = when (status) {
-        GapStatus.NEUTRAL -> ""
-        GapStatus.AHEAD -> "+"
-        GapStatus.BEHIND -> "-"
-    }
-    return if (a >= 3600) {
-        String.format(Locale.US, "%s%d:%02d:%02d", sign, a / 3600, (a % 3600) / 60, a % 60)
-    } else {
-        String.format(Locale.US, "%s%d:%02d", sign, a / 60, a % 60)
-    }
-}
-
-/**
- * Formats the gap distance in metres. The value is rounded ONCE to the nearest metre and both the
- * dead-band and the magnitude derive from that rounded value: an exact 0 m renders with NO leading
- * sign ("0 m"), otherwise it shows an explicit sign so ahead reads positive ("+120 m"). The engine
- * already uses positive = ahead for distance.
- */
-internal fun fmtDistance(gapDistanceM: Double): String {
-    // Guard non-finite gap (NaN/±Inf): roundToInt() on those throws/overflows — render the
-    // neutral placeholder instead.
-    if (!gapDistanceM.isFinite()) return GAP_PLACEHOLDER
-    // Round ONCE and derive both the dead-band and the magnitude from the same rounded value, so
-    // sign and magnitude can never disagree (e.g. "2 m" unsigned while 1.9 m behind).
-    val m = gapDistanceM.roundToInt()
-    val sign = when {
-        m == 0 -> ""
-        m > 0 -> "+"
-        else -> "-"
-    }
-    return String.format(Locale.US, "%s%d m", sign, abs(m))
 }

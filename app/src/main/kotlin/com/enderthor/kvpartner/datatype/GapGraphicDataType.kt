@@ -12,7 +12,6 @@ import com.enderthor.kvpartner.data.GapDisplay
 import com.enderthor.kvpartner.engine.GapDisplayLogic
 import com.enderthor.kvpartner.engine.GapState
 import com.enderthor.kvpartner.engine.GapStateHolder
-import com.enderthor.kvpartner.engine.GapStatus
 import com.enderthor.kvpartner.engine.RenderPrefs
 import io.hammerhead.karooext.extension.DataTypeImpl
 import io.hammerhead.karooext.internal.ViewEmitter
@@ -281,11 +280,7 @@ class GapGraphicDataType(
             // Three-state classification with a small epsilon: an exactly-on-pace gap renders neutral
             // (day/night colour, no leading sign) rather than a misleading green "+0:00".
             val status = GapDisplayLogic.gapStatus(state.gapTimeS)
-            val stateColor = when (status) {
-                GapStatus.NEUTRAL -> neutral
-                GapStatus.AHEAD -> context.getColor(R.color.gap_ahead)
-                GapStatus.BEHIND -> context.getColor(R.color.gap_behind)
-            }
+            val stateColor = context.gapStatusColor(status, neutral)
 
             val dotR = (h * 0.07f).coerceIn(3f, 14f)
             // Ghost dot (grey) first so an overlap draws your dot on top.

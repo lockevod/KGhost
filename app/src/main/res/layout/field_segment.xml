@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive segment gap field layout (used by SegmentGapDataType).
+
+  A single ImageView that hosts a programmatically drawn Bitmap: either the elevation-profile
+  silhouette render (option A, when the segment carries elevation) or the two-dot track render
+  (option B). The bitmap is produced in SegmentGapDataType and pushed via
+  RemoteViews.setImageViewBitmap(R.id.field_segment_image, bmp). scaleType=fitCenter keeps the
+  rendered bitmap proportional inside whatever field size the Karoo profile assigns. The layout
+  background is transparent so any fitCenter letterbox shows the host theme (not black bands in
+  day mode); the night-aware background is painted into the bitmap itself by the renderer.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/transparent">
+
+    <ImageView
+        android:id="@+id/field_segment_image"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@string/segment_field_name"
+        android:scaleType="fitCenter" />
+
+</FrameLayout>

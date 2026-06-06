@@ -3,6 +3,7 @@ package com.enderthor.kvpartner.extension
 import com.enderthor.kvpartner.data.KVPartnerConfig
 import com.enderthor.kvpartner.datatype.GapGraphicDataType
 import com.enderthor.kvpartner.datatype.GapNumericDataType
+import com.enderthor.kvpartner.datatype.SegmentGapDataType
 import com.enderthor.kvpartner.engine.DistanceProgress
 import com.enderthor.kvpartner.engine.GapCalculator
 import com.enderthor.kvpartner.engine.GapStateHolder
@@ -121,13 +122,13 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     @Volatile
     private var liveSegments: List<LiveSegment> = emptyList()
 
-    // The two on-screen data fields rendering the GapState. typeIds must match
-    // extension_info.xml exactly ("kvpartner-gap" and "kvpartner-gap-num").
-    // TODO Task 11: register SegmentGapDataType(applicationContext) here once it exists.
+    // The on-screen data fields rendering the GapState. typeIds must match extension_info.xml
+    // exactly ("kvpartner-gap", "kvpartner-gap-num" and "kvpartner-segment").
     override val types by lazy {
         listOf(
             GapGraphicDataType(applicationContext),
             GapNumericDataType(applicationContext),
+            SegmentGapDataType(applicationContext),
         )
     }
 
