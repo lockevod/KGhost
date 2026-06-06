@@ -21,16 +21,19 @@ import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.enderthor.kvpartner.R
 import com.enderthor.kvpartner.data.KVPartnerConfig
+import com.enderthor.kvpartner.geo.TrackStore
 import com.enderthor.kvpartner.managers.ConfigurationManager
 import com.enderthor.kvpartner.screens.PartnerScreen
+import com.enderthor.kvpartner.screens.RaceScreen
 import com.enderthor.kvpartner.screens.SettingsScreen
+import java.io.File
 
 /**
  * Settings UI for the KVPartner extension.
  *
- * A minimal Compose host with two tabs: Partner (Virtual Partner target + units) and
- * Settings (display preferences). Configuration is loaded and saved through
- * [ConfigurationManager], which reuses the single process-wide DataStore defined in
+ * A minimal Compose host with three tabs: Partner (Virtual Partner target + units), Race (Race
+ * Your Own settings), and Settings (display preferences). Configuration is loaded and saved
+ * through [ConfigurationManager], which reuses the single process-wide DataStore defined in
  * `com.enderthor.kvpartner.managers`. This Activity never creates its own DataStore.
  */
 class MainActivity : ComponentActivity() {
@@ -48,8 +51,12 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * Two-tab layout. The config is collected once here and passed down so both tabs share the
+ * Three-tab layout. The config is collected once here and passed down so all tabs share the
  * same source of truth; saves go straight back through [ConfigurationManager.saveConfig].
+ *
+ * A [TrackStore] is instantiated here — read-only from the UI side — solely to expose the
+ * recorded-track count on the Race tab. All actual write IO runs on Dispatchers.IO inside
+ * [KVPartnerExtension]; this call is a cheap directory listing done once at composition.
  */
 @Composable
 fun TabLayout() {
@@ -58,9 +65,15 @@ fun TabLayout() {
     val config by configManager.loadConfigFlow()
         .collectAsStateWithLifecycle(initialValue = KVPartnerConfig())
 
+    // Cheap read-only snapshot of the stored track count, evaluated once at composition.
+    val trackCount = remember {
+        try { TrackStore(File(context.filesDir, "tracks")).allTrackIds().size } catch (_: Exception) { null }
+    }
+
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabTitles = listOf(
         stringResource(R.string.tab_partner),
+        stringResource(R.string.tab_race),
         stringResource(R.string.tab_settings),
     )
 
@@ -76,6 +89,7 @@ fun TabLayout() {
         }
         when (selectedTab) {
             0 -> PartnerScreen(config = config, configManager = configManager)
+            1 -> RaceScreen(config = config, configManager = configManager, recordedCount = trackCount)
             else -> SettingsScreen(config = config, configManager = configManager)
         }
     }

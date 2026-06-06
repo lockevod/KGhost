@@ -30,4 +30,20 @@
     <!-- Settings UI: Settings tab -->
     <string name="settings_title">Display preferences</string>
     <string name="settings_gap_display">Gap display</string>
+
+    <!-- Settings UI: Race tab -->
+    <string name="tab_race">Race</string>
+    <string name="race_title">Race Your Own</string>
+    <string name="race_description">Race against your past self on stretches of the route you have ridden before.</string>
+    <string name="race_enabled_label">Race Your Own</string>
+    <string name="race_enabled_description">Enable racing against recorded history when a matching route is loaded.</string>
+    <string name="race_ghost_pick_label">Ghost to race</string>
+    <string name="race_ghost_pick_description">Which past ride to use when multiple tracks cover the same stretch.</string>
+    <string name="race_ghost_best">Best (PR)</string>
+    <string name="race_ghost_last">Last</string>
+    <string name="race_auto_record_label">Record ride history</string>
+    <string name="race_auto_record_description">Automatically save each ride as a GPS track for future ghost comparison.</string>
+    <string name="race_recorded_tracks">Recorded tracks: %1$d</string>
+    <string name="race_segment_alert_label">Segment entry alert</string>
+    <string name="race_segment_alert_description">Show an alert when entering a stretch with a recorded ghost.</string>
 </resources>
