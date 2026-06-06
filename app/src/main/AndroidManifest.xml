@@ -18,8 +18,6 @@
             </intent-filter>
         </activity>
         -->
-        <!-- TODO Task 7: re-enable KVPartnerExtension service once the class exists -->
-        <!--
         <service
             android:name=".extension.KVPartnerExtension"
             android:exported="true"
@@ -31,6 +29,5 @@
                 android:name="io.hammerhead.karooext.EXTENSION_INFO"
                 android:resource="@xml/extension_info" />
         </service>
-        -->
     </application>
 </manifest>

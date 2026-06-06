@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Numeric gap field layout (used by GapNumericDataType).
+
+  A vertical stack of a big main value (the gap, e.g. "+0:20") and a small hint line
+  (the secondary metre value, e.g. "120 m"). Both are centred. Text colour is set at
+  runtime via RemoteViews.setTextColor() so it can switch between the day/night neutral
+  colour and the reserved green/red state hues — see GapNumericDataType. The hard-coded
+  colours below are only IDE-preview placeholders; they are always overridden before the
+  view is emitted.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/field_container"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:padding="2dp">
+
+    <!-- Main value — bold, up to 2 lines, auto-scales for sunlight readability. -->
+    <TextView
+        android:id="@+id/field_main"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1.5"
+        android:autoSizeMaxTextSize="28sp"
+        android:autoSizeMinTextSize="8sp"
+        android:autoSizeTextType="uniform"
+        android:gravity="center"
+        android:maxLines="2"
+        android:textColor="#FFFFFF"
+        android:textStyle="bold" />
+
+    <!-- Hint line — smaller secondary value, single line. -->
+    <TextView
+        android:id="@+id/field_hint"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:autoSizeMaxTextSize="14sp"
+        android:autoSizeMinTextSize="7sp"
+        android:autoSizeTextType="uniform"
+        android:gravity="center"
+        android:maxLines="1"
+        android:textColor="#CCFFFFFF" />
+
+</LinearLayout>

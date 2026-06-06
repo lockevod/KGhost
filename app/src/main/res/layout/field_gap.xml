@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Graphical gap field layout (used by GapGraphicDataType).
+
+  A single ImageView that hosts a programmatically drawn Bitmap (the track + the two
+  dots + the gap text). The bitmap is produced in GapGraphicDataType and pushed via
+  RemoteViews.setImageViewBitmap(R.id.field_gap_image, bmp). scaleType=fitCenter keeps
+  the rendered bitmap proportional inside whatever field size the Karoo profile assigns.
+  The background is the opaque gap_bg colour so the track is readable in sunlight.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/gap_bg">
+
+    <ImageView
+        android:id="@+id/field_gap_image"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@string/gap_graphic_name"
+        android:scaleType="fitCenter" />
+
+</FrameLayout>

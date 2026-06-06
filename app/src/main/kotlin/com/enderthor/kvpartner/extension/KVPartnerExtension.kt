@@ -1,6 +1,8 @@
 package com.enderthor.kvpartner.extension
 
 import com.enderthor.kvpartner.data.KVPartnerConfig
+import com.enderthor.kvpartner.datatype.GapGraphicDataType
+import com.enderthor.kvpartner.datatype.GapNumericDataType
 import com.enderthor.kvpartner.engine.DistanceProgress
 import com.enderthor.kvpartner.engine.GapCalculator
 import com.enderthor.kvpartner.engine.GapStateHolder
@@ -58,10 +60,14 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     private val activeConfig = MutableStateFlow(KVPartnerConfig())
     private var tickJob: Job? = null
 
-    // TODO Task 8: register GapGraphicDataType + GapNumericDataType here once those classes exist.
-    // Until then the extension exposes no data fields, which keeps Task 7 compiling without
-    // importing classes that do not exist yet.
-    override val types by lazy { emptyList<io.hammerhead.karooext.extension.DataTypeImpl>() }
+    // The two on-screen data fields rendering the GapState. typeIds must match
+    // extension_info.xml exactly ("kvpartner-gap" and "kvpartner-gap-num").
+    override val types by lazy {
+        listOf(
+            GapGraphicDataType(applicationContext),
+            GapNumericDataType(applicationContext),
+        )
+    }
 
     override fun onCreate() {
         super.onCreate()
