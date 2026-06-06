@@ -30,7 +30,9 @@ import java.util.Locale
  *  5. **Ghost + pick** — build the ghost with [RecordedGhostSource.fromTrackSlice]. When several
  *     tracks produce a segment overlapping the SAME route interval, group by overlapping interval
  *     and apply [pick]: `BEST` keeps the segment whose ghost `totalTimeS` is smallest; `LAST` keeps
- *     the one whose track `startedAtEpoch` is largest. One [LiveSegment] per merged interval.
+ *     the one whose track `startedAtEpoch` is largest. One [LiveSegment] per group, whose
+ *     `[routeStartM, routeEndM]` is the **winner's own interval** — so `ghost.totalDistanceM ≈
+ *     routeEndM − routeStartM` and the ghost covers the full segment width without a frozen tail.
  *  6. `hasElevation = false`, `elevationProfile = null` for now (Task 9/10 fills these from the
  *     route elevation polyline). The result is sorted ascending by `routeStartM`.
  *
@@ -39,7 +41,8 @@ import java.util.Locale
  * Design notes for cases the tests do not cover (recall-first: never silently drop a real overlap):
  *  - When grouping per-track segments into merged route intervals, two segments are considered the
  *    same stretch when their `[routeStartM, routeEndM]` ranges overlap at all. Groups are formed
- *    greedily over the union span, which keeps a genuine shared stretch as a single segment.
+ *    greedily. The emitted [LiveSegment] uses the WINNER's own interval (not the union span) so
+ *    the ghost always covers the full declared stretch without a frozen tail.
  *  - Equal consecutive track distances inside a slice are collapsed (keeping the first), because
  *    [GhostCurve] requires strictly increasing distance. The collapsed point's time is preserved.
  */
@@ -102,12 +105,12 @@ object SegmentMatcher {
                 GhostPick.BEST -> group.minByOrNull { it.totalTimeS }!!
                 GhostPick.LAST -> group.maxByOrNull { it.startedAtEpoch }!!
             }
-            // Merged interval spans the union of the group so a shared stretch is one segment.
-            val start = group.minOf { it.routeStartM }
-            val end = group.maxOf { it.routeEndM }
+            // Use the winner's own interval so ghost.totalDistanceM ≈ routeEndM − routeStartM.
+            // A union span wider than the winner's track coverage would freeze the gap reading in
+            // the tail (GhostCurve.timeAt clamps beyond totalDistanceM).
             LiveSegment(
-                routeStartM = start,
-                routeEndM = end,
+                routeStartM = chosen.routeStartM,
+                routeEndM = chosen.routeEndM,
                 ghost = chosen.ghost,
                 ghostLabel = chosen.ghostLabel,
                 hasElevation = false,

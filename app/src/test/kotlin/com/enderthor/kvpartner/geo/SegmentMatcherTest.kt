@@ -48,4 +48,55 @@ class SegmentMatcherTest {
         // The chosen ghost's total time over the segment equals the fast track's.
         assertTrue(segs.first().ghost.totalTimeS < 18 * 10.0)
     }
+
+    /**
+     * Regression for the union-span bug: two tracks covering partially-overlapping but DIFFERENT
+     * route ranges (A ≈ [0,600 m], B ≈ [400,1000 m]) were previously grouped into a single segment
+     * whose [routeStartM,routeEndM] was the greedy union [0,1000 m].  The chosen ghost (say B)
+     * only covered ~600 m, so GhostCurve.timeAt clamped and the gap reading froze for the last
+     * ~400 m of the union span.  After the fix the emitted segment's span must match the winner's
+     * own ghost coverage (within 15 %).
+     */
+    @Test fun `ghost coverage matches declared segment span after overlapping-range resolution`() {
+        // Route is 2 km east (lng 0..0.018). Each degree of longitude ≈ 111 320 m at equator,
+        // so 0.018° ≈ 2004 m.  One sample step of 0.0005° ≈ 55.7 m along the route.
+
+        // Track A: covers roughly route [0, ~600 m] — lng 0.000..0.0054 (10 steps × 55 m = 550 m track).
+        // Made deliberately SLOWER so BEST will prefer track B.
+        val trackA = com.enderthor.kvpartner.geo.RecordedTrack(
+            id = "A", startedAtEpoch = 1_000L,
+            points = (0..10).map { i ->
+                pt(lng = i * 0.0005, distanceM = i * 55.0, t = i * 15.0).toDto()
+            },
+        )
+
+        // Track B: covers roughly route [~400 m, ~1000 m] — lng 0.0036..0.0090
+        // (shifted by ~7 steps = ~385 m; 11 steps × 55 m = 605 m track). Made FASTER.
+        val trackB = com.enderthor.kvpartner.geo.RecordedTrack(
+            id = "B", startedAtEpoch = 2_000L,
+            points = (0..10).map { i ->
+                pt(lng = 0.0036 + i * 0.0005, distanceM = i * 55.0, t = i * 10.0).toDto()
+            },
+        )
+
+        val segs = SegmentMatcher.match(route, listOf(trackA, trackB), GhostPick.BEST, params)
+
+        // There must be at least one segment (the two tracks overlap, so they form a group).
+        assertTrue("Expected at least one segment, got ${segs.size}", segs.size >= 1)
+
+        // Find the segment that the winner (B, faster) produced.  On the fixed code there is
+        // exactly one segment whose span matches B's coverage.  On the old union-span code there
+        // would be a single segment with routeEndM ≈ 1000 m but ghost.totalDistanceM ≈ 550 m —
+        // a ~80 % mismatch that this assertion catches.
+        val winning = segs.first()
+        val spanM = winning.routeEndM - winning.routeStartM
+        val ghostM = winning.ghost.totalDistanceM
+
+        // Ghost coverage must be within 15 % of the declared segment span.
+        val ratio = ghostM / spanM
+        assertTrue(
+            "ghost.totalDistanceM ($ghostM) should be within 15% of span ($spanM), ratio=$ratio",
+            ratio in 0.85..1.15,
+        )
+    }
 }
