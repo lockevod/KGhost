@@ -8,6 +8,7 @@ import com.enderthor.kvpartner.engine.GapCalculator
 import com.enderthor.kvpartner.engine.GapStateHolder
 import com.enderthor.kvpartner.engine.GhostCurve
 import com.enderthor.kvpartner.engine.RenderPrefs
+import com.enderthor.kvpartner.engine.StalenessLogic
 import com.enderthor.kvpartner.engine.VirtualPartnerSource
 import com.enderthor.kvpartner.managers.ConfigurationManager
 import io.hammerhead.karooext.KarooSystemService
@@ -119,10 +120,13 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         tickJob = scope.launch {
             val distance = karooSystem.streamDataFlow(DataType.Type.DISTANCE)
             val elapsed = karooSystem.streamDataFlow(DataType.Type.ELAPSED_TIME)
-            combine(distance, elapsed) { d, e -> d to e }
+            // SPEED (m/s) is streamed to distinguish "stopped at a light" (frozen distance is
+            // legitimate) from "GPS lost while moving" (frozen distance is wrong → blank to `---`).
+            val speed = karooSystem.streamDataFlow(DataType.Type.SPEED)
+            combine(distance, elapsed, speed) { d, e, sp -> Triple(d, e, sp) }
                 .sample(REFRESH_MS) // rate-limit BEFORE conflate so we tick at most once per REFRESH_MS
                 .conflate()
-                .onEach { (d, e) ->
+                .onEach { (d, e, sp) ->
                     val target = activeConfig.value.validTargetOrNull()
                     if (target == null) {
                         GapStateHolder.clear()
@@ -137,13 +141,20 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                     // delivers seconds, drop the divide-by-1000 in [elapsedMsToSeconds].
                     val elapsedRaw = (e as? StreamState.Streaming)?.dataPoint?.singleValue ?: return@onEach
                     val elapsedS = elapsedMsToSeconds(elapsedRaw).takeIf { it.isFinite() } ?: return@onEach
+                    // SPEED in m/s. Null when the stream isn't producing a finite value — then
+                    // isTrustworthy() conservatively falls back to distance freshness alone.
+                    val speedMs = (sp as? StreamState.Streaming)?.dataPoint?.singleValue
+                        ?.takeIf { it.isFinite() }
                     progress.onDistance(distM)
                     if (cachedTargetMs != target || cachedCurve == null) {
                         cachedCurve = VirtualPartnerSource(target).curve()
                         cachedTargetMs = target
                     }
+                    // Speed-gated staleness: a frozen distance is trustworthy only if the rider is
+                    // essentially stopped; frozen WHILE moving means GPS is unreliable → stale.
+                    val trustworthy = StalenessLogic.isTrustworthy(progress.isFresh, speedMs)
                     GapStateHolder.update(
-                        GapCalculator.compute(progress.progressM, elapsedS, cachedCurve!!, progress.isFresh),
+                        GapCalculator.compute(progress.progressM, elapsedS, cachedCurve!!, trustworthy),
                     )
                 }.collect {}
         }

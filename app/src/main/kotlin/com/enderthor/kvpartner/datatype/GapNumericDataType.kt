@@ -40,11 +40,12 @@ internal const val GAP_PLACEHOLDER = "---"
  * mathematical sign convention (ahead ⇒ gapTimeS negative), so this field flips the sign
  * for human-readable display: ahead shows `+M:SS` in green, behind shows `-M:SS` in red.
  *
- * When the gap is not [GapState.active] the field shows `---` in the neutral day/night text
- * colour (NOT a disabled grey) — the rider is waiting for data, the field is not turned off.
- * Note we intentionally do NOT blank on [GapState.stale]: the gap stays valid while the rider is
- * legitimately stopped (e.g. at a red light) because the ghost keeps moving; proper GPS-loss
- * detection (via location/speed) is deferred to sub-project ②.
+ * When the gap is not [GapState.active] or is [GapState.stale] the field shows `---` in the
+ * neutral day/night text colour (NOT a disabled grey) — the rider is waiting for / cannot trust
+ * data, the field is not turned off. Staleness is speed-gated upstream (see
+ * [com.enderthor.kvpartner.engine.StalenessLogic]): a legitimate stop (the ghost keeps moving)
+ * stays trustworthy and visible, while a distance frozen WHILE moving (real GPS loss, e.g. a
+ * tunnel) is marked stale so the field honestly blanks instead of showing a wrong, snapping gap.
  *
  * This is a passive readout, so there is no tap PendingIntent — it just observes
  * [GapStateHolder.state] (combined with the rider's [GapDisplay] preference from [RenderPrefs])
@@ -88,10 +89,19 @@ class GapNumericDataType(
         activeScopeJob = scopeJob
         val scope = CoroutineScope(Dispatchers.Default + scopeJob)
 
-        // Seed one placeholder frame synchronously with the night-aware neutral text colour, so the
-        // field is never white-on-white (invisible) in day mode during the pre-first-emission
-        // window. The live frames below replace it as soon as state arrives.
-        emitter.updateView(buildView(GapState.inactive(), GapDisplay.TIME))
+        // Seed one frame synchronously with the night-aware neutral text colour, so the field is
+        // never white-on-white (invisible) in day mode during the pre-first-emission window.
+        // karoo-ext 1.1.9's ViewEmitter.updateView hard-drops any call within 900 ms of the
+        // previous one (keeping the EARLIER one), so the collect coroutine's first real frame
+        // (a few ms later) would be silently dropped — on mid-ride page re-entry that left the
+        // field showing `---` for ~1 s while a valid gap existed. Seeding with the LIVE current
+        // state (the same values the dropped frame would carry) makes that drop harmless.
+        emitter.updateView(
+            buildView(
+                if (config.preview) DEMO_STATE else GapStateHolder.state.value,
+                RenderPrefs.gapDisplay.value,
+            ),
+        )
 
         val configJob = scope.launch {
             emitter.onNext(UpdateGraphicConfig(showHeader = false))
@@ -128,10 +138,12 @@ class GapNumericDataType(
         val neutral = if (dark) Color.WHITE else Color.BLACK
         val neutralHint = if (dark) 0xCCFFFFFF.toInt() else 0xCC000000.toInt()
 
-        // Waiting for data: neutral `---`, NOT a disabled grey. We blank ONLY on !active; we do
-        // NOT blank on state.stale — the gap stays valid while the rider is legitimately stopped
-        // (the ghost keeps moving). GPS-loss detection is deferred to sub-project ②.
-        val waiting = !state.active
+        // Waiting for data: neutral `---`, NOT a disabled grey. We blank on !active (no target /
+        // not recording / no first data) AND on state.stale. Staleness is now speed-gated upstream:
+        // a legitimate stop (speed < 0.5 m/s) stays trustworthy and visible, while a frozen
+        // distance WHILE moving (real GPS loss, e.g. a tunnel) is marked stale → honest `---`
+        // instead of a believable-but-wrong gap that snaps on recovery.
+        val waiting = !state.active || state.stale
 
         val main: String
         val hint: String
@@ -191,6 +203,10 @@ class GapNumericDataType(
  * Formats the gap as a time string. For [GapStatus.NEUTRAL] (on-pace) it shows the magnitude
  * with NO leading sign ("0:00"); for AHEAD/BEHIND it flips the engine's mathematical sign so
  * being ahead reads positive on screen ("+0:20" when 20 s ahead, "-0:20" when 20 s behind).
+ *
+ * Gaps under one hour render as `M:SS` (unbounded was ambiguous, e.g. "-90:00"); a gap of an hour
+ * or more rolls over to `H:MM:SS` (e.g. "-1:30:00"). The sign and NEUTRAL (no-sign) rules are
+ * preserved in both cases.
  */
 internal fun fmtTime(gapTimeS: Double, status: GapStatus = GapDisplayLogic.gapStatus(gapTimeS)): String {
     // Guard non-finite gap (NaN/±Inf): toInt() on those is undefined/garbage — render the
@@ -202,7 +218,11 @@ internal fun fmtTime(gapTimeS: Double, status: GapStatus = GapDisplayLogic.gapSt
         GapStatus.AHEAD -> "+"
         GapStatus.BEHIND -> "-"
     }
-    return String.format(Locale.US, "%s%d:%02d", sign, a / 60, a % 60)
+    return if (a >= 3600) {
+        String.format(Locale.US, "%s%d:%02d:%02d", sign, a / 3600, (a % 3600) / 60, a % 60)
+    } else {
+        String.format(Locale.US, "%s%d:%02d", sign, a / 60, a % 60)
+    }
 }
 
 /**

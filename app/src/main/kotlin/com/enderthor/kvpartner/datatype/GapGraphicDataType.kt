@@ -42,10 +42,12 @@ import timber.log.Timber
  * Your dot is green when ahead and red when behind (reserved state hues). Below the track the
  * gap text is drawn (time big, distance small, per the rider's [GapDisplay] preference).
  *
- * When the gap is not [GapState.active] the field draws a neutral `---` (day/night colour, NOT a
- * disabled grey) — waiting for data, not turned off. Note we intentionally do NOT blank on
- * [GapState.stale]: the gap stays valid while the rider is legitimately stopped (the ghost keeps
- * moving). GPS-loss detection is deferred to sub-project ②.
+ * When the gap is not [GapState.active] or is [GapState.stale] the field draws a neutral `---`
+ * (day/night colour, NOT a disabled grey) — waiting for / cannot trust data, not turned off.
+ * Staleness is speed-gated upstream (see [com.enderthor.kvpartner.engine.StalenessLogic]): a
+ * legitimate stop (the ghost keeps moving) stays trustworthy and visible, while a distance frozen
+ * WHILE moving (real GPS loss, e.g. a tunnel) is marked stale so the field honestly blanks instead
+ * of showing a wrong, snapping gap.
  *
  * Passive readout, so there is no tap PendingIntent.
  *
@@ -224,9 +226,10 @@ class GapGraphicDataType(
 
             val neutral = if (dark) Color.WHITE else Color.BLACK
 
-            // Blank ONLY on !active; the gap stays valid while the rider is legitimately stopped
-            // (the ghost keeps moving). GPS-loss detection is deferred to sub-project ②.
-            val waiting = !state.active
+            // Blank on !active (no target / not recording / no first data) AND on stale. Staleness
+            // is speed-gated upstream: a legitimate stop stays trustworthy and visible, while a
+            // distance frozen WHILE moving (real GPS loss) is marked stale → honest `---`.
+            val waiting = !state.active || state.stale
             if (waiting) {
                 // Neutral `---` centred — waiting for data, not disabled.
                 textPaint.color = neutral
