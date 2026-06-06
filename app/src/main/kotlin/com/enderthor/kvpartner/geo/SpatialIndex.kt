@@ -1,7 +1,9 @@
 package com.enderthor.kvpartner.geo
 
 import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
+import kotlin.math.pow
 
 /**
  * Axis-aligned WGS84 bounding box. Latitudes/longitudes are in degrees.
@@ -130,30 +132,43 @@ class SpatialIndex(val precision: Int = 6) {
     /**
      * Returns the geohash cells that [bbox] touches.
      *
-     * The box is sampled at its 4 corners plus an interior grid. The grid step is chosen so that
-     * adjacent samples are never more than roughly half a cell apart (≈0.005° at precision 6),
-     * which guarantees every cell the box spans is hit for boxes up to a few cells wide. Very large
-     * boxes still work but cost more samples; see [maxSamplesPerAxis] for the cap.
+     * The box is sampled at its 4 corners plus an interior grid. The grid step is exactly half the
+     * geohash cell size at [precision], derived from the bit-interleaving geometry:
+     *   - bits = 5 * precision; lngBits = ceil(bits/2); latBits = floor(bits/2)
+     *   - cellHeightDeg = 180 / 2^latBits; cellWidthDeg = 360 / 2^lngBits
+     *   - stepLat = cellHeightDeg / 2; stepLng = cellWidthDeg / 2
+     *
+     * Because the step is exactly half a cell, every cell the bbox touches contains at least one
+     * sample point — recall is exact for any realistic route bbox regardless of its span. The only
+     * remaining cap ([maxSamplesPerAxis] = 4096) is a runaway guard for degenerate planet-scale
+     * inputs; no realistic route bbox (even 300 km × 300 km) approaches it.
      */
     fun cellsFor(bbox: BBox): Set<String> {
         val cells = HashSet<String>()
 
-        // Sampling step in degrees. At precision 6 a cell is ~0.0055° tall / ~0.011° wide; using
-        // ~0.005° keeps adjacent samples within half a cell so no spanned cell is skipped.
-        val stepDeg = stepDegForPrecision(precision)
+        // Derive the actual geohash cell size at this precision from the bit-interleaving geometry.
+        val bits = 5 * precision
+        val lngBits = ceil(bits / 2.0).toInt()
+        val latBits = floor(bits / 2.0).toInt()
+        val cellHeightDeg = 180.0 / 2.0.pow(latBits)
+        val cellWidthDeg  = 360.0 / 2.0.pow(lngBits)
+
+        // Step by half a cell so every touched cell contains at least one sample.
+        val stepLat = cellHeightDeg / 2.0
+        val stepLng = cellWidthDeg  / 2.0
 
         val latSpan = max(0.0, bbox.maxLat - bbox.minLat)
         val lngSpan = max(0.0, bbox.maxLng - bbox.minLng)
 
-        val latSteps = sampleCount(latSpan, stepDeg)
-        val lngSteps = sampleCount(lngSpan, stepDeg)
+        val latSteps = sampleCount(latSpan, stepLat)
+        val lngSteps = sampleCount(lngSpan, stepLng)
 
         for (i in 0..latSteps) {
             val lat = if (latSteps == 0) bbox.minLat
-            else bbox.minLat + (bbox.maxLat - bbox.minLat) * i / latSteps
+            else (bbox.minLat + stepLat * i).coerceAtMost(bbox.maxLat)
             for (j in 0..lngSteps) {
                 val lng = if (lngSteps == 0) bbox.minLng
-                else bbox.minLng + (bbox.maxLng - bbox.minLng) * j / lngSteps
+                else (bbox.minLng + stepLng * j).coerceAtMost(bbox.maxLng)
                 cells.add(geohash(lat, lng, precision))
             }
         }
@@ -202,19 +217,11 @@ class SpatialIndex(val precision: Int = 6) {
 
     companion object {
         /**
-         * Hard cap on samples per axis so a pathologically large box cannot blow up to a huge grid.
-         * With the cap, boxes up to ~[maxSamplesPerAxis] × stepDeg wide are sampled densely; wider
-         * boxes are sampled more coarsely but, since recall only over-includes, this stays safe for
-         * candidate prefiltering (the precise matcher still rejects non-overlaps).
+         * Runaway guard: maximum samples per axis. At half-cell stepping this is never reached by
+         * any realistic route bbox — a 300 km × 300 km box at precision 6 produces ≈ 800 × 400
+         * samples, well below this limit. The cap exists solely to protect against degenerate
+         * planet-scale inputs (e.g. minLat = -90, maxLat = 90).
          */
-        const val maxSamplesPerAxis: Int = 64
-
-        /** Sampling step (degrees) sized to roughly half a geohash cell at the given precision. */
-        private fun stepDegForPrecision(precision: Int): Double = when {
-            precision <= 4 -> 0.1
-            precision == 5 -> 0.02
-            precision == 6 -> 0.005
-            else -> 0.001
-        }
+        const val maxSamplesPerAxis: Int = 4096
     }
 }
