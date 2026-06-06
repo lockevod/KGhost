@@ -161,10 +161,11 @@ class GapGraphicDataType(
             viewJob.cancel()
             scope.cancel()
             scopeJob.cancel()
-            // Release the reused render buffer when the field is removed from the page.
-            reuseBitmap?.recycle()
-            reuseBitmap = null
-            reuseCanvas = null
+            // Intentionally do NOT recycle reuseBitmap here: this cancellable runs on the host
+            // thread while a drawFrame() may still be in flight on Dispatchers.Default, so an
+            // eager recycle() could hit a use-after-recycle. It is a single bitmap (not per-frame),
+            // reused if startView is re-entered and otherwise reclaimed by GC; recycle on
+            // size-change inside drawFrame stays (same coroutine, safe).
         }
     }
 
