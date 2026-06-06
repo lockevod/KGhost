@@ -4,7 +4,6 @@ import com.enderthor.kvpartner.data.KVPartnerConfig
 import com.enderthor.kvpartner.datatype.GapGraphicDataType
 import com.enderthor.kvpartner.datatype.GapNumericDataType
 import com.enderthor.kvpartner.engine.DistanceProgress
-import com.enderthor.kvpartner.engine.FreshnessTracker
 import com.enderthor.kvpartner.engine.GapCalculator
 import com.enderthor.kvpartner.engine.GapStateHolder
 import com.enderthor.kvpartner.engine.GhostCurve
@@ -112,10 +111,6 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     private fun startTick() {
         if (tickJob?.isActive == true) return
         val progress = DistanceProgress()
-        // SPEED also freezes (last-known-value) on GPS loss, so the raw reading can't tell a genuine
-        // stop (fresh 0.0) from a frozen value while moving. Track its freshness the same way as
-        // DISTANCE and feed only a FRESH speed (or null) to the staleness gate.
-        val speedTracker = FreshnessTracker()
         // Cache the ghost curve and rebuild it only when the target speed changes.
         // VirtualPartnerSource.curve() allocates a fresh curve on every call, so building it
         // inside the 1 Hz tick would churn a curve per second; instead we remember the target
@@ -146,24 +141,24 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                     // delivers seconds, drop the divide-by-1000 in [elapsedMsToSeconds].
                     val elapsedRaw = (e as? StreamState.Streaming)?.dataPoint?.singleValue ?: return@onEach
                     val elapsedS = elapsedMsToSeconds(elapsedRaw).takeIf { it.isFinite() } ?: return@onEach
-                    // SPEED in m/s. Feed every emission (including frozen re-emissions) into the
-                    // freshness tracker; a non-finite value is treated as "no value this tick".
+                    // SPEED in m/s — raw magnitude, NOT value-change freshness. A legitimately
+                    // constant speed (a rider settled at a steady 0.0 after stopping >3 s at a light)
+                    // never "changes", so value-change freshness would wrongly age it out and blank a
+                    // valid gap. Magnitude classifies correctly: a frozen-HIGH speed (still moving, or
+                    // GPS lost while moving) reads as moving → not trustworthy → blank; a LOW/zero
+                    // speed reads as stopped → trustworthy → gap stays visible. Null (stream not yet
+                    // emitted or non-finite) means we cannot prove a stop → not trustworthy.
                     val speedMs = (sp as? StreamState.Streaming)?.dataPoint?.singleValue
                         ?.takeIf { it.isFinite() }
-                    if (speedMs != null) speedTracker.onValue(speedMs)
-                    // freshSpeed is null when SPEED is stale/frozen (GPS loss) or never seen, so the
-                    // gate never trusts a frozen speed. A genuine stop keeps emitting a CHANGING then
-                    // settled-but-fresh 0.0 within the threshold → fresh 0.0 → trustworthy.
-                    val freshSpeed = speedTracker.freshValueOrNull()
                     progress.onDistance(distM)
                     if (cachedTargetMs != target || cachedCurve == null) {
                         cachedCurve = VirtualPartnerSource(target).curve()
                         cachedTargetMs = target
                     }
-                    // Speed-gated staleness: a frozen distance is trustworthy only if the rider is
-                    // essentially stopped (fresh speed below the moving threshold); frozen WHILE
-                    // moving — or with stale/frozen speed — means GPS is unreliable → stale.
-                    val trustworthy = StalenessLogic.isTrustworthy(progress.isFresh, freshSpeed)
+                    // Speed-magnitude-gated staleness: a frozen distance is trustworthy only if the
+                    // rider is essentially stopped (raw speed below the moving threshold); frozen
+                    // WHILE moving — or with no usable speed — means GPS is unreliable → stale.
+                    val trustworthy = StalenessLogic.isTrustworthy(progress.isFresh, speedMs)
                     GapStateHolder.update(
                         GapCalculator.compute(progress.progressM, elapsedS, cachedCurve!!, trustworthy),
                     )

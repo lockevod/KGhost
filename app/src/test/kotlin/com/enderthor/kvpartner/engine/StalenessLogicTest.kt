@@ -25,22 +25,25 @@ class StalenessLogicTest {
     }
 
     @Test fun `frozen distance with unavailable speed is not trustworthy`() {
-        // Cannot prove the rider is stopped → conservatively not trustworthy.
+        // Speed stream not yet emitted (or non-finite) → null → cannot prove the rider is stopped
+        // → conservatively not trustworthy.
         assertFalse(StalenessLogic.isTrustworthy(distanceFresh = false, speedMs = null))
     }
 
-    // The caller now passes a FRESHNESS-GATED speed (freshValueOrNull), not the raw SPEED reading.
-    // A stale/frozen speed arrives here as null, so the gate cannot mistake a frozen speed for a
-    // genuine stop. These cases assert that distinction at the logic boundary.
+    // The caller passes the RAW SPEED magnitude (no value-change freshness wrapping). A genuinely
+    // constant speed — e.g. a steady 0.0 after stopping at a light — must still classify as stopped;
+    // value-change freshness would wrongly age it out and blank a valid gap. These cases assert the
+    // magnitude-based distinction at the logic boundary.
 
-    @Test fun `frozen distance with fresh genuine-stop speed is trustworthy`() {
-        // Genuine stop with healthy GPS → SPEED is fresh 0.0 → trustworthy → gap stays visible.
+    @Test fun `frozen distance with genuine-stop speed magnitude is trustworthy`() {
+        // Genuine stop → raw SPEED is 0.0 (< 0.5) → trustworthy → gap stays visible, even when the
+        // 0.0 has been constant for a long time (value-change freshness would have failed here).
         assertTrue(StalenessLogic.isTrustworthy(distanceFresh = false, speedMs = 0.0))
     }
 
-    @Test fun `frozen distance with stale frozen speed (null) is not trustworthy`() {
-        // GPS lost while moving → SPEED freezes (last-known-value) → freshValueOrNull() returns
-        // null → must NOT be treated as a stop → blank to `---`.
-        assertFalse(StalenessLogic.isTrustworthy(distanceFresh = false, speedMs = null))
+    @Test fun `frozen distance with frozen-high speed magnitude is not trustworthy`() {
+        // GPS lost while moving → SPEED freezes at its last (high) value ≥ 0.5 → reads as moving →
+        // must NOT be treated as a stop → blank to `---`.
+        assertFalse(StalenessLogic.isTrustworthy(distanceFresh = false, speedMs = 8.0))
     }
 }
