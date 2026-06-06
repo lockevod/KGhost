@@ -30,6 +30,9 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+/** Neutral placeholder shown when there is no data or the value is non-finite. */
+internal const val GAP_PLACEHOLDER = "---"
+
 /**
  * Numeric gap data field — the simpler "option A" readout.
  *
@@ -84,6 +87,11 @@ class GapNumericDataType(
         val scopeJob = Job()
         activeScopeJob = scopeJob
         val scope = CoroutineScope(Dispatchers.Default + scopeJob)
+
+        // Seed one placeholder frame synchronously with the night-aware neutral text colour, so the
+        // field is never white-on-white (invisible) in day mode during the pre-first-emission
+        // window. The live frames below replace it as soon as state arrives.
+        emitter.updateView(buildView(GapState.inactive(), GapDisplay.TIME))
 
         val configJob = scope.launch {
             emitter.onNext(UpdateGraphicConfig(showHeader = false))
@@ -185,6 +193,9 @@ class GapNumericDataType(
  * being ahead reads positive on screen ("+0:20" when 20 s ahead, "-0:20" when 20 s behind).
  */
 internal fun fmtTime(gapTimeS: Double, status: GapStatus = GapDisplayLogic.gapStatus(gapTimeS)): String {
+    // Guard non-finite gap (NaN/±Inf): toInt() on those is undefined/garbage — render the
+    // neutral placeholder instead.
+    if (!gapTimeS.isFinite()) return GAP_PLACEHOLDER
     val a = abs(gapTimeS).toInt()
     val sign = when (status) {
         GapStatus.NEUTRAL -> ""
@@ -195,15 +206,21 @@ internal fun fmtTime(gapTimeS: Double, status: GapStatus = GapDisplayLogic.gapSt
 }
 
 /**
- * Formats the gap distance in metres. Within a small epsilon (±[epsM]) the value is treated as
- * on-pace: rendered with NO leading sign ("0 m"). Otherwise it shows an explicit sign so ahead
- * reads positive ("+120 m"). The engine already uses positive = ahead for distance.
+ * Formats the gap distance in metres. The value is rounded ONCE to the nearest metre and both the
+ * dead-band and the magnitude derive from that rounded value: an exact 0 m renders with NO leading
+ * sign ("0 m"), otherwise it shows an explicit sign so ahead reads positive ("+120 m"). The engine
+ * already uses positive = ahead for distance.
  */
-internal fun fmtDistance(gapDistanceM: Double, epsM: Double = 2.0): String {
+internal fun fmtDistance(gapDistanceM: Double): String {
+    // Guard non-finite gap (NaN/±Inf): roundToInt() on those throws/overflows — render the
+    // neutral placeholder instead.
+    if (!gapDistanceM.isFinite()) return GAP_PLACEHOLDER
+    // Round ONCE and derive both the dead-band and the magnitude from the same rounded value, so
+    // sign and magnitude can never disagree (e.g. "2 m" unsigned while 1.9 m behind).
     val m = gapDistanceM.roundToInt()
     val sign = when {
-        abs(gapDistanceM) < epsM -> ""
-        m >= 0 -> "+"
+        m == 0 -> ""
+        m > 0 -> "+"
         else -> "-"
     }
     return String.format(Locale.US, "%s%d m", sign, abs(m))

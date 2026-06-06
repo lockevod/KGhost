@@ -47,10 +47,18 @@ import timber.log.Timber
  * [GapState.stale]: the gap stays valid while the rider is legitimately stopped (the ghost keeps
  * moving). GPS-loss detection is deferred to sub-project ②.
  *
- * Passive readout, so there is no tap PendingIntent. All `Paint`/`Rect`/`RectF` are
- * pre-allocated at class level and reused per frame. The bitmap+Canvas are also reused across
- * frames (recreated only when [ViewConfig.viewSize] changes) so we don't churn a ~600 KB buffer
- * at 1 Hz over multi-hour rides.
+ * Passive readout, so there is no tap PendingIntent.
+ *
+ * ## Concurrency / render-buffer ownership
+ * ALL mutable render state (the reused Bitmap+Canvas, every Paint that is mutated during draw,
+ * and the Rect used for text bounds) lives in a [FrameRenderer] that is created fresh INSIDE the
+ * render coroutine of each [startView]. The buffers are reused across frames within that one
+ * coroutine (so we still avoid per-frame allocation of a ~600 KB bitmap at 1 Hz over multi-hour
+ * rides) but are never shared between coroutines. This matters because [startView] can be
+ * re-entered (page change) and the re-entry guard's [Job.cancel] is asynchronous and non-joining;
+ * since [FrameRenderer.draw] has no suspension points, an old (cancelled-but-still-running)
+ * coroutine could otherwise be mid-draw on the SAME shared bitmap/canvas/paints while a new one
+ * starts. Per-coroutine ownership removes that cross-scope mutation entirely.
  */
 class GapGraphicDataType(
     private val context: Context,
@@ -59,8 +67,7 @@ class GapGraphicDataType(
     /**
      * Tracks the coroutine scope of the currently active view so a re-entrant [startView]
      * (the Karoo host can call it again for the same field) cancels the previous scope first,
-     * avoiding two render loops fighting over the same emitter. KSafe's data fields cancel via
-     * `setCancellable`; we additionally guard re-entry here as the plan calls out.
+     * avoiding two render loops fighting over the same emitter.
      */
     @Volatile
     private var activeScopeJob: Job? = null
@@ -94,34 +101,6 @@ class GapGraphicDataType(
         )
     }
 
-    // ── Pre-allocated drawing primitives (reused every frame — no per-frame allocation) ──
-    private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        color = 0xFF888888.toInt()
-    }
-    private val ghostPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-        color = 0xFFAAAAAA.toInt() // grey ghost dot
-    }
-    private val youPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-    }
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        textAlign = Paint.Align.CENTER
-        isFakeBoldText = true
-    }
-    private val hintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        textAlign = Paint.Align.CENTER
-    }
-    private val textBounds = Rect()
-
-    // ── Reused render buffer ──────────────────────────────────────────────────────────────────
-    // A single Bitmap+Canvas reused across frames instead of allocating a fresh ~600 KB bitmap
-    // every tick. Confined to the single render coroutine (one collector at a time, guaranteed by
-    // the re-entry guard above), so no synchronisation is needed.
-    private var reuseBitmap: Bitmap? = null
-    private var reuseCanvas: Canvas? = null
-
     override fun startView(context: Context, config: ViewConfig, emitter: ViewEmitter) {
         // Re-entry guard: cancel any previous render scope before starting a new one.
         activeScopeJob?.cancel()
@@ -136,6 +115,10 @@ class GapGraphicDataType(
         }
 
         val viewJob = scope.launch {
+            // Render buffers are OWNED by this coroutine — created here, reused across frames in
+            // this collect loop only, never touched by any other (possibly cancelled-but-running)
+            // startView coroutine. See the class KDoc for why this must be per-coroutine.
+            val renderer = FrameRenderer(context)
             try {
                 combine(GapStateHolder.state, RenderPrefs.gapDisplay) { state, gapDisplay -> state to gapDisplay }
                     .distinctUntilChanged()
@@ -144,7 +127,7 @@ class GapGraphicDataType(
                         // field shows a meaningful sample instead of the inactive `---` placeholder.
                         val state = if (config.preview) DEMO_STATE else liveState
                         val (w, h) = bitmapSize(config)
-                        val bmp = drawFrame(w, h, state, gapDisplay)
+                        val bmp = renderer.draw(w, h, state, gapDisplay)
                         val rv = RemoteViews(context.packageName, R.layout.field_gap)
                         rv.setImageViewBitmap(R.id.field_gap_image, bmp)
                         emitter.updateView(rv)
@@ -153,6 +136,10 @@ class GapGraphicDataType(
                 // normal — field removed from the page.
             } catch (e: Exception) {
                 Timber.e(e, "GapGraphicDataType error: ${e.message}")
+            } finally {
+                // Safe: same coroutine, after the collect loop has stopped — no draw can be in
+                // flight here.
+                renderer.recycle()
             }
         }
 
@@ -161,11 +148,10 @@ class GapGraphicDataType(
             viewJob.cancel()
             scope.cancel()
             scopeJob.cancel()
-            // Intentionally do NOT recycle reuseBitmap here: this cancellable runs on the host
-            // thread while a drawFrame() may still be in flight on Dispatchers.Default, so an
-            // eager recycle() could hit a use-after-recycle. It is a single bitmap (not per-frame),
-            // reused if startView is re-entered and otherwise reclaimed by GC; recycle on
-            // size-change inside drawFrame stays (same coroutine, safe).
+            // No render buffers to clean up here: they are owned by viewJob's coroutine and
+            // recycled in its `finally`. This cancellable runs on the host thread, so it must NOT
+            // touch the (possibly in-flight) bitmap/canvas — doing so would risk a
+            // use-after-recycle from a different thread.
         }
     }
 
@@ -176,100 +162,139 @@ class GapGraphicDataType(
         return w.coerceIn(1, MAX_W) to h.coerceIn(1, MAX_H)
     }
 
-    private fun drawFrame(w: Int, h: Int, state: GapState, gapDisplay: GapDisplay): Bitmap {
-        // Reuse the bitmap+Canvas across frames; only recreate when the target size changes
-        // (e.g. config.viewSize changed). This is safe because RemoteViews copies the bitmap into
-        // the Binder parcel at updateView time, so reusing the buffer on the next frame does not
-        // corrupt an already-dispatched frame. The whole bitmap is repainted each frame
-        // (background first), so there are no stale pixels.
-        var bmp = reuseBitmap
-        var canvas = reuseCanvas
-        if (bmp == null || canvas == null || bmp.width != w || bmp.height != h) {
-            bmp?.recycle()
-            bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            canvas = Canvas(bmp)
-            reuseBitmap = bmp
-            reuseCanvas = canvas
+    /**
+     * Per-[startView] render state. Holds the reused Bitmap+Canvas and all Paint/Rect objects,
+     * which are mutated during [draw] (colour, stroke width, text size, text bounds). Instantiated
+     * once per render coroutine and confined to it, so concurrent render coroutines each have their
+     * own buffers and never mutate shared state. Reuses its buffers across frames within that one
+     * coroutine; recreates the bitmap only when the target size changes.
+     */
+    private class FrameRenderer(private val context: Context) {
+        private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            color = 0xFF888888.toInt()
+        }
+        private val ghostPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = 0xFFAAAAAA.toInt() // grey ghost dot
+        }
+        private val youPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+        }
+        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textAlign = Paint.Align.CENTER
+            isFakeBoldText = true
+        }
+        private val hintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textAlign = Paint.Align.CENTER
+        }
+        private val textBounds = Rect()
+
+        private var reuseBitmap: Bitmap? = null
+        private var reuseCanvas: Canvas? = null
+
+        /** Releases the reused bitmap. Call once, from the owning coroutine, after the loop ends. */
+        fun recycle() {
+            reuseBitmap?.recycle()
+            reuseBitmap = null
+            reuseCanvas = null
         }
 
-        // Night mode: black background (matches Karoo dark UI, white text readable).
-        // Day mode: white background (sunlight-readable; black text on black = invisible).
-        val dark = context.isKarooNightMode()
-        val bgColor = if (dark) Color.BLACK else Color.WHITE
-        canvas.drawColor(bgColor)
+        fun draw(w: Int, h: Int, state: GapState, gapDisplay: GapDisplay): Bitmap {
+            // Reuse the bitmap+Canvas across frames; only recreate when the target size changes
+            // (e.g. config.viewSize changed). Same-coroutine: this recreate cannot race a draw from
+            // another scope. RemoteViews copies the bitmap into the Binder parcel at updateView
+            // time, so reusing the buffer on the next frame does not corrupt an already-dispatched
+            // frame. The whole bitmap is repainted each frame (background first), so no stale pixels.
+            var bmp = reuseBitmap
+            var canvas = reuseCanvas
+            if (bmp == null || canvas == null || bmp.width != w || bmp.height != h) {
+                bmp?.recycle()
+                bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                canvas = Canvas(bmp)
+                reuseBitmap = bmp
+                reuseCanvas = canvas
+            }
 
-        val neutral = if (dark) Color.WHITE else Color.BLACK
+            // Night mode: black background (matches Karoo dark UI, white text readable).
+            // Day mode: white background (sunlight-readable; black text on black = invisible).
+            val dark = context.isKarooNightMode()
+            val bgColor = if (dark) Color.BLACK else Color.WHITE
+            canvas.drawColor(bgColor)
 
-        // Blank ONLY on !active; the gap stays valid while the rider is legitimately stopped
-        // (the ghost keeps moving). GPS-loss detection is deferred to sub-project ②.
-        val waiting = !state.active
-        if (waiting) {
-            // Neutral `---` centred — waiting for data, not disabled.
-            textPaint.color = neutral
-            textPaint.textSize = h * 0.4f
-            textPaint.getTextBounds(PLACEHOLDER, 0, PLACEHOLDER.length, textBounds)
-            canvas.drawText(PLACEHOLDER, w / 2f, h / 2f - textBounds.exactCenterY(), textPaint)
+            val neutral = if (dark) Color.WHITE else Color.BLACK
+
+            // Blank ONLY on !active; the gap stays valid while the rider is legitimately stopped
+            // (the ghost keeps moving). GPS-loss detection is deferred to sub-project ②.
+            val waiting = !state.active
+            if (waiting) {
+                // Neutral `---` centred — waiting for data, not disabled.
+                textPaint.color = neutral
+                textPaint.textSize = h * 0.4f
+                textPaint.getTextBounds(PLACEHOLDER, 0, PLACEHOLDER.length, textBounds)
+                canvas.drawText(PLACEHOLDER, w / 2f, h / 2f - textBounds.exactCenterY(), textPaint)
+                return bmp
+            }
+
+            // Layout: track in the top ~55%, text in the bottom ~45%.
+            val trackCy = h * 0.30f
+            val margin = w * 0.06f
+            val left = margin
+            val right = w - margin
+            val span = right - left
+
+            // Track bar.
+            trackPaint.strokeWidth = (h * 0.04f).coerceAtLeast(2f)
+            canvas.drawLine(left, trackCy, right, trackCy, trackPaint)
+
+            // Your dot fixed at centre; ghost offset by gapDistanceM within ±WINDOW_M.
+            // gapDistanceM > 0 means you are ahead → ghost is behind you (to the left).
+            val frac = (-state.gapDistanceM / WINDOW_M).coerceIn(-1.0, 1.0) // -1..1, 0 = centre
+            val youX = left + span * 0.5f
+            val ghostX = (left + span * (0.5 + 0.5 * frac)).toFloat()
+
+            // Three-state classification with a small epsilon: an exactly-on-pace gap renders neutral
+            // (day/night colour, no leading sign) rather than a misleading green "+0:00".
+            val status = GapDisplayLogic.gapStatus(state.gapTimeS)
+            val stateColor = when (status) {
+                GapStatus.NEUTRAL -> neutral
+                GapStatus.AHEAD -> context.getColor(R.color.gap_ahead)
+                GapStatus.BEHIND -> context.getColor(R.color.gap_behind)
+            }
+
+            val dotR = (h * 0.07f).coerceIn(3f, 14f)
+            // Ghost dot (grey) first so an overlap draws your dot on top.
+            canvas.drawCircle(ghostX, trackCy, dotR, ghostPaint)
+            youPaint.color = stateColor
+            canvas.drawCircle(youX, trackCy, dotR, youPaint)
+
+            // Gap text below the track.
+            val timeText = fmtTime(state.gapTimeS, status)
+            val distText = fmtDistance(state.gapDistanceM)
+            val textColor = stateColor
+            when (gapDisplay) {
+                GapDisplay.TIME -> drawBig(canvas, w, h, timeText, textColor)
+                GapDisplay.DISTANCE -> drawBig(canvas, w, h, distText, textColor)
+                GapDisplay.BOTH -> drawBigAndSmall(canvas, w, h, timeText, distText, textColor)
+            }
             return bmp
         }
 
-        // Layout: track in the top ~55%, text in the bottom ~45%.
-        val trackCy = h * 0.30f
-        val margin = w * 0.06f
-        val left = margin
-        val right = w - margin
-        val span = right - left
-
-        // Track bar.
-        trackPaint.strokeWidth = (h * 0.04f).coerceAtLeast(2f)
-        canvas.drawLine(left, trackCy, right, trackCy, trackPaint)
-
-        // Your dot fixed at centre; ghost offset by gapDistanceM within ±WINDOW_M.
-        // gapDistanceM > 0 means you are ahead → ghost is behind you (to the left).
-        val frac = (-state.gapDistanceM / WINDOW_M).coerceIn(-1.0, 1.0) // -1..1, 0 = centre
-        val youX = left + span * 0.5f
-        val ghostX = (left + span * (0.5 + 0.5 * frac)).toFloat()
-
-        // Three-state classification with a small epsilon: an exactly-on-pace gap renders neutral
-        // (day/night colour, no leading sign) rather than a misleading green "+0:00".
-        val status = GapDisplayLogic.gapStatus(state.gapTimeS)
-        val stateColor = when (status) {
-            GapStatus.NEUTRAL -> neutral
-            GapStatus.AHEAD -> context.getColor(R.color.gap_ahead)
-            GapStatus.BEHIND -> context.getColor(R.color.gap_behind)
+        /** Draws a single big value centred in the lower text area. */
+        private fun drawBig(canvas: Canvas, w: Int, h: Int, text: String, color: Int) {
+            textPaint.color = color
+            textPaint.textSize = h * 0.34f
+            canvas.drawText(text, w / 2f, h * 0.82f, textPaint)
         }
 
-        val dotR = (h * 0.07f).coerceIn(3f, 14f)
-        // Ghost dot (grey) first so an overlap draws your dot on top.
-        canvas.drawCircle(ghostX, trackCy, dotR, ghostPaint)
-        youPaint.color = stateColor
-        canvas.drawCircle(youX, trackCy, dotR, youPaint)
-
-        // Gap text below the track.
-        val timeText = fmtTime(state.gapTimeS, status)
-        val distText = fmtDistance(state.gapDistanceM)
-        val textColor = stateColor
-        when (gapDisplay) {
-            GapDisplay.TIME -> drawBig(canvas, w, h, timeText, textColor)
-            GapDisplay.DISTANCE -> drawBig(canvas, w, h, distText, textColor)
-            GapDisplay.BOTH -> drawBigAndSmall(canvas, w, h, timeText, distText, textColor)
+        /** Draws a big primary value with a small secondary value beneath it. */
+        private fun drawBigAndSmall(canvas: Canvas, w: Int, h: Int, big: String, small: String, color: Int) {
+            textPaint.color = color
+            textPaint.textSize = h * 0.30f
+            canvas.drawText(big, w / 2f, h * 0.72f, textPaint)
+            hintPaint.color = color
+            hintPaint.textSize = h * 0.18f
+            canvas.drawText(small, w / 2f, h * 0.94f, hintPaint)
         }
-        return bmp
-    }
-
-    /** Draws a single big value centred in the lower text area. */
-    private fun drawBig(canvas: Canvas, w: Int, h: Int, text: String, color: Int) {
-        textPaint.color = color
-        textPaint.textSize = h * 0.34f
-        canvas.drawText(text, w / 2f, h * 0.82f, textPaint)
-    }
-
-    /** Draws a big primary value with a small secondary value beneath it. */
-    private fun drawBigAndSmall(canvas: Canvas, w: Int, h: Int, big: String, small: String, color: Int) {
-        textPaint.color = color
-        textPaint.textSize = h * 0.30f
-        canvas.drawText(big, w / 2f, h * 0.72f, textPaint)
-        hintPaint.color = color
-        hintPaint.textSize = h * 0.18f
-        canvas.drawText(small, w / 2f, h * 0.94f, hintPaint)
     }
 }

@@ -128,13 +128,15 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                         GapStateHolder.clear()
                         return@onEach
                     }
-                    // DISTANCE is in metres.
-                    val distM = (d as? StreamState.Streaming)?.dataPoint?.singleValue ?: return@onEach
+                    // DISTANCE is in metres. Drop non-finite values (NaN/±Inf) so they never reach
+                    // the gap engine.
+                    val distM = (d as? StreamState.Streaming)?.dataPoint?.singleValue
+                        ?.takeIf { it.isFinite() } ?: return@onEach
                     // ELAPSED_TIME is delivered in milliseconds by karoo-ext, so convert to seconds.
                     // GapCalculator expects elapsed seconds. If field testing shows the SDK already
                     // delivers seconds, drop the divide-by-1000 in [elapsedMsToSeconds].
                     val elapsedRaw = (e as? StreamState.Streaming)?.dataPoint?.singleValue ?: return@onEach
-                    val elapsedS = elapsedMsToSeconds(elapsedRaw)
+                    val elapsedS = elapsedMsToSeconds(elapsedRaw).takeIf { it.isFinite() } ?: return@onEach
                     progress.onDistance(distM)
                     if (cachedTargetMs != target || cachedCurve == null) {
                         cachedCurve = VirtualPartnerSource(target).curve()

@@ -23,6 +23,9 @@ object GapCalculator {
      * @return           A fully populated, active [GapState].
      */
     fun compute(progressM: Double, elapsedS: Double, curve: GhostCurve, fresh: Boolean): GapState {
+        // Reject non-finite inputs (NaN/±Inf) — a corrupt stream value must not propagate into the
+        // gap state and crash the formatters/renderers downstream.
+        if (!progressM.isFinite() || !elapsedS.isFinite()) return GapState.inactive()
         val ghostTimeAtMyDistance = curve.timeAt(progressM)
         val ghostDistanceNow = curve.distanceAt(elapsedS)
         val gapTimeS = elapsedS - ghostTimeAtMyDistance

@@ -52,4 +52,18 @@ class GhostCurveTest {
         assertThrows(IllegalArgumentException::class.java) { GhostCurve(emptyList()) }
         assertThrows(IllegalArgumentException::class.java) { GhostCurve(listOf(GhostSample(0.0, 0.0))) }
     }
+
+    @Test fun `timeAt of non-finite input returns the clamped endpoint and does not throw`() {
+        // Without the finiteness guard these would fall through to indexOfFirst (returns -1) and
+        // crash with samples[-2]. The first sample's timeS is the clamped value.
+        assertEquals(0.0, curve.timeAt(Double.NaN), 1e-6)
+        assertEquals(0.0, curve.timeAt(Double.POSITIVE_INFINITY), 1e-6)
+        assertEquals(0.0, curve.timeAt(Double.NEGATIVE_INFINITY), 1e-6)
+    }
+
+    @Test fun `distanceAt of non-finite input returns the clamped endpoint and does not throw`() {
+        assertEquals(0.0, curve.distanceAt(Double.NaN), 1e-6)
+        assertEquals(0.0, curve.distanceAt(Double.POSITIVE_INFINITY), 1e-6)
+        assertEquals(0.0, curve.distanceAt(Double.NEGATIVE_INFINITY), 1e-6)
+    }
 }

@@ -62,8 +62,14 @@ class ConfigurationManager(private val context: Context) {
      * Encodes with [jsonForStorage] (compact, no encodeDefaults).
      */
     suspend fun saveConfig(config: KVPartnerConfig) {
-        context.dataStore.edit { prefs ->
-            prefs[configKey] = jsonForStorage.encodeToString(config)
+        try {
+            context.dataStore.edit { prefs ->
+                prefs[configKey] = jsonForStorage.encodeToString(config)
+            }
+        } catch (e: Throwable) {
+            // Surface a serialization/encode failure (e.g. a release R8 strip of generated
+            // serializers) instead of silently swallowing it.
+            Timber.e(e, "Failed to save KVPartnerConfig")
         }
     }
 

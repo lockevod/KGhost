@@ -28,7 +28,7 @@
         android:autoSizeTextType="uniform"
         android:gravity="center"
         android:maxLines="2"
-        android:textColor="#FFFFFF"
+        android:textColor="#808080"
         android:textStyle="bold" />
 
     <!-- Hint line — smaller secondary value, single line. -->
@@ -42,6 +42,6 @@
         android:autoSizeTextType="uniform"
         android:gravity="center"
         android:maxLines="1"
-        android:textColor="#CCFFFFFF" />
+        android:textColor="#80808080" />
 
 </LinearLayout>

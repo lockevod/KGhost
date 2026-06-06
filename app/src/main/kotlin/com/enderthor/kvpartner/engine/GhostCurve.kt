@@ -18,6 +18,9 @@ class GhostCurve(val samples: List<GhostSample>) {
 
     /** Ghost time at [distanceM] metres. Clamps to the endpoints when out of range. */
     fun timeAt(distanceM: Double): Double {
+        // Guard non-finite input (NaN/±Inf): every comparison against NaN is false, so without
+        // this the function would fall through to indexOfFirst, which returns -1 → samples[-2].
+        if (!distanceM.isFinite()) return samples.first().timeS
         if (distanceM <= samples.first().distanceM) return samples.first().timeS
         if (distanceM >= samples.last().distanceM) return samples.last().timeS
         val hi = samples.indexOfFirst { it.distanceM >= distanceM }
@@ -28,6 +31,8 @@ class GhostCurve(val samples: List<GhostSample>) {
 
     /** Ghost distance at time [timeS]. Clamps to the endpoints when out of range. */
     fun distanceAt(timeS: Double): Double {
+        // Guard non-finite input (NaN/±Inf): see timeAt — without this we would index samples[-2].
+        if (!timeS.isFinite()) return samples.first().distanceM
         if (timeS <= samples.first().timeS) return samples.first().distanceM
         if (timeS >= samples.last().timeS) return samples.last().distanceM
         val hi = samples.indexOfFirst { it.timeS >= timeS }

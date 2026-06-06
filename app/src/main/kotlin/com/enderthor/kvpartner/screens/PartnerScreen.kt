@@ -122,7 +122,10 @@ fun PartnerScreen(
                     TargetMode.SPEED -> value?.let { kmhToMs(it) } ?: 0.0
                     TargetMode.PACE -> value?.let { paceMinKmToMs(it) } ?: 0.0
                 }
-                if (targetMs > 0.0) {
+                // Only persist a finite, positive, physically-plausible target. 30 m/s (≈108 km/h)
+                // is a generous cycling ceiling; this also blocks "1e400"→Infinity and pathological
+                // pace inputs that would otherwise produce a non-finite or absurd m/s.
+                if (targetMs.isFinite() && targetMs > 0.0 && targetMs <= 30.0) {
                     scope.launch { configManager.saveConfig(config.copy(targetSpeedMs = targetMs)) }
                     status = null
                 } else {

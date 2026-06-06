@@ -36,4 +36,14 @@ class GapCalculatorTest {
         val s = GapState.inactive()
         assertFalse(s.active)
     }
+
+    @Test fun `non-finite progress returns an inactive state`() {
+        assertFalse(GapCalculator.compute(Double.NaN, 100.0, curve, true).active)
+        assertFalse(GapCalculator.compute(Double.POSITIVE_INFINITY, 100.0, curve, true).active)
+    }
+
+    @Test fun `non-finite elapsed returns an inactive state`() {
+        assertFalse(GapCalculator.compute(600.0, Double.NaN, curve, true).active)
+        assertFalse(GapCalculator.compute(600.0, Double.NEGATIVE_INFINITY, curve, true).active)
+    }
 }
