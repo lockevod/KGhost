@@ -34,12 +34,49 @@ class TrackStore(private val dir: File) {
      */
     private val indexLock = Any()
 
-    /** Reads all stored track ids by listing the `<id>.json` files (excludes `index.json`). */
+    /**
+     * Reads all stored track ids by listing the `<id>.json` files (excludes `index.json` and
+     * `sourcekeys.json`, which are bookkeeping files, not tracks).
+     */
     fun allTrackIds(): List<String> {
         val files = dir.listFiles() ?: return emptyList()
         return files
-            .filter { it.isFile && it.name.endsWith(JSON_SUFFIX) && it.name != INDEX_FILE }
+            .filter {
+                it.isFile && it.name.endsWith(JSON_SUFFIX) &&
+                    it.name != INDEX_FILE && it.name != SOURCEKEYS_FILE
+            }
             .map { it.name.removeSuffix(JSON_SUFFIX) }
+    }
+
+    /**
+     * Returns the set of source keys already ingested via [add]. An absent `sourcekeys.json` is a
+     * normal cold-start state → empty, no log; a present-but-unparseable file is treated as empty
+     * and logged (mirrors [readSnapshot]'s corruption handling).
+     */
+    fun knownSourceKeys(): Set<String> = synchronized(indexLock) { readSourceKeys() }
+
+    /**
+     * Ingests [track] with sourceKey-based de-duplication and returns whether it was stored.
+     *
+     * If [track] has a non-empty [RecordedTrack.sourceKey] that was already ingested, the track is
+     * skipped (not saved) and `false` is returned — first writer wins. Otherwise the track is
+     * [save]d; if its sourceKey is non-empty it is recorded in `sourcekeys.json` so future calls
+     * with the same key are deduped. An empty sourceKey is never deduped but is still saved
+     * (defensive for legacy tracks). `true` is returned when the track was stored.
+     */
+    fun add(track: RecordedTrack): Boolean {
+        synchronized(indexLock) {
+            val key = track.sourceKey
+            val known = readSourceKeys()
+            if (key.isNotEmpty() && key in known) return false
+
+            save(track)
+
+            if (key.isNotEmpty()) {
+                writeSourceKeys(known + key)
+            }
+            return true
+        }
     }
 
     /**
@@ -101,6 +138,24 @@ class TrackStore(private val dir: File) {
         atomicWriteText(File(dir, INDEX_FILE), jsonForStorage.encodeToString(snapshot))
     }
 
+    private fun readSourceKeys(): Set<String> {
+        val f = File(dir, SOURCEKEYS_FILE)
+        // An absent file is a normal cold-start state → empty, no log.
+        if (!f.isFile) return emptySet()
+        return runCatching {
+            jsonWithUnknownKeys.decodeFromString<Set<String>>(f.readText())
+        }.getOrElse { e ->
+            // A PRESENT-but-unparseable file is corruption; treat as empty (re-dedup) but surface it.
+            Timber.w(e, "sourcekeys.json present but failed to parse; treating as empty (corrupt?)")
+            emptySet()
+        }
+    }
+
+    private fun writeSourceKeys(keys: Set<String>) {
+        ensureDir()
+        atomicWriteText(File(dir, SOURCEKEYS_FILE), jsonForStorage.encodeToString(keys))
+    }
+
     /**
      * Writes [text] to [target] atomically: serialize to a temp file in the same directory, then
      * [File.renameTo] (an atomic move on the same filesystem) so a reader never observes a
@@ -121,6 +176,9 @@ class TrackStore(private val dir: File) {
     companion object {
         private const val JSON_SUFFIX = ".json"
         private const val INDEX_FILE = "index.json"
+
+        /** Stores the serialized `Set<String>` of source keys ingested via [add] (dedup state). */
+        private const val SOURCEKEYS_FILE = "sourcekeys.json"
 
         /** Suffix for the same-dir temp file used by the atomic write-then-rename. */
         private const val TMP_SUFFIX = ".tmp"

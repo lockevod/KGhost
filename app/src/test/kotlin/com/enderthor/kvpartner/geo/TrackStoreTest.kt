@@ -102,6 +102,16 @@ class TrackStoreTest {
         assertTrue(candidates.isEmpty())
     }
 
+    @Test fun `add skips a track whose sourceKey is already present`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        val a = RecordedTrack("a", 1000L, listOf(TrackPointDto(0.0, 0.0, 0.0, 0.0), TrackPointDto(0.0, 0.001, 100.0, 20.0)), sourceKey = "k1")
+        val b = RecordedTrack("b", 2000L, listOf(TrackPointDto(1.0, 1.0, 0.0, 0.0), TrackPointDto(1.0, 1.001, 100.0, 20.0)), sourceKey = "k1")
+        assertTrue(store.add(a))      // first wins
+        assertFalse(store.add(b))     // same sourceKey → skipped
+        assertTrue("k1" in store.knownSourceKeys())
+        assertEquals(1, store.allTrackIds().size)
+    }
+
     @Test fun `pure updatedSnapshot then candidateIds selects the overlapping track`() {
         val a = track("A", 40.0, -3.0)
         val b = track("B", 50.0, 7.0)
