@@ -16,9 +16,35 @@ class ConfigDataTest {
     @Test fun `config with target is valid`() {
         assertEquals(5.0, KVPartnerConfig(targetSpeedMs = 5.0).validTargetOrNull()!!, 1e-6)
     }
-    @Test fun `migrateToLatest is identity at v1`() {
+    @Test fun `migrateToLatest is identity for a fresh config`() {
         val config = KVPartnerConfig()
         assertEquals(config, config.migrateToLatest())
+    }
+
+    @Test fun `default target is 12 kmh and version is 3`() {
+        val c = KVPartnerConfig()
+        assertEquals(DEFAULT_TARGET_SPEED_MS, c.targetSpeedMs, 1e-9)
+        assertEquals(kmhToMs(12.0), c.targetSpeedMs, 1e-9)
+        assertEquals(3.333333, c.targetSpeedMs, 1e-3)
+        assertEquals(3, c.version)
+    }
+
+    @Test fun `v1 unset target migrates to 12 kmh default`() {
+        val migrated = KVPartnerConfig(version = 1, targetSpeedMs = 0.0).migrateToLatest()
+        assertEquals(DEFAULT_TARGET_SPEED_MS, migrated.targetSpeedMs, 1e-9)
+        assertEquals(3, migrated.version)
+    }
+
+    @Test fun `v2 unset target migrates to 12 kmh default`() {
+        val migrated = KVPartnerConfig(version = 2, targetSpeedMs = 0.0).migrateToLatest()
+        assertEquals(DEFAULT_TARGET_SPEED_MS, migrated.targetSpeedMs, 1e-9)
+        assertEquals(3, migrated.version)
+    }
+
+    @Test fun `migration preserves an explicit target value`() {
+        val migrated = KVPartnerConfig(version = 2, targetSpeedMs = kmhToMs(25.0)).migrateToLatest()
+        assertEquals(kmhToMs(25.0), migrated.targetSpeedMs, 1e-9)
+        assertEquals(3, migrated.version)
     }
 
     @Test fun `race defaults are sane`() {
@@ -29,9 +55,10 @@ class ConfigDataTest {
         assertFalse(c.segmentEntryAlert)     // alerts off by default (sounds off by default)
     }
 
-    @Test fun `config version bumped to 2`() { assertEquals(2, CONFIG_VERSION) }
+    @Test fun `config version bumped to 3`() { assertEquals(3, CONFIG_VERSION) }
 
-    @Test fun `v1 config migrates version to 2`() {
-        assertEquals(2, KVPartnerConfig(version = 1).migrateToLatest().version)
+    @Test fun `validTargetOrNull returns value for positive and null for explicit clear`() {
+        assertEquals(kmhToMs(20.0), KVPartnerConfig(targetSpeedMs = kmhToMs(20.0)).validTargetOrNull()!!, 1e-9)
+        assertNull(KVPartnerConfig(targetSpeedMs = 0.0).validTargetOrNull())
     }
 }

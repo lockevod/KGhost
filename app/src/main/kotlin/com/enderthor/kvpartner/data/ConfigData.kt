@@ -4,7 +4,10 @@ import com.enderthor.kvpartner.engine.GhostPick
 import kotlinx.serialization.Serializable
 
 /** Current schema version. Bump this and add a branch in [migrateToLatest] when defaults change. */
-const val CONFIG_VERSION = 2
+const val CONFIG_VERSION = 3
+
+/** Default Virtual Partner target speed (12 km/h) used when the user hasn't set one. */
+val DEFAULT_TARGET_SPEED_MS: Double = kmhToMs(12.0)
 
 /** Controls which gap metric is displayed on the data fields. */
 enum class GapDisplay { TIME, DISTANCE, BOTH }
@@ -13,13 +16,14 @@ enum class GapDisplay { TIME, DISTANCE, BOTH }
  * Persisted configuration for the KVPartner extension.
  *
  * Stored as a single JSON blob under the key `kvpartnerconfig` in the DataStore.
- * [targetSpeedMs] = 0.0 means no target is configured (Virtual Partner inactive).
+ * [targetSpeedMs] defaults to 12 km/h ([DEFAULT_TARGET_SPEED_MS]) when the user hasn't set a
+ * target. 0.0 means the target was explicitly cleared (Virtual Partner inactive).
  */
 @Serializable
 data class KVPartnerConfig(
     val version: Int = CONFIG_VERSION,
-    /** Target speed in m/s. 0.0 = no target configured (Virtual Partner inactive). */
-    val targetSpeedMs: Double = 0.0,
+    /** Target speed in m/s. Defaults to 12 km/h; 0.0 = target explicitly cleared (VP inactive). */
+    val targetSpeedMs: Double = DEFAULT_TARGET_SPEED_MS,
     /** Which gap metric to display on the fields. */
     val gapDisplay: GapDisplay = GapDisplay.BOTH,
     /** Whether the Race Your Own feature is enabled. */
@@ -41,7 +45,7 @@ data class KVPartnerConfig(
     val lastScanEpoch: Long = 0L,
 ) {
     /**
-     * Returns the target speed if valid (> 0), or null when no target is configured.
+     * Returns the target speed if valid (> 0), or null when the target was explicitly cleared (0.0).
      * Data fields and the engine use this to decide whether the Virtual Partner is active.
      */
     fun validTargetOrNull(): Double? = targetSpeedMs.takeIf { it > 0.0 }
@@ -62,7 +66,13 @@ fun paceMinKmToMs(minPerKm: Double): Double = if (minPerKm > 0) 1000.0 / (minPer
  * Always called after JSON decoding so every consumer always sees the current schema.
  */
 fun KVPartnerConfig.migrateToLatest(): KVPartnerConfig {
+    var c = this
     // v1 → v2: race fields added with defaults; just stamp the version.
-    if (version < 2) return copy(version = 2)
-    return this
+    if (c.version < 2) c = c.copy(version = 2)
+    // v2 → v3: a never-set target (stored 0.0, the old default) becomes the new 12 km/h default.
+    if (c.version < 3) c = c.copy(
+        targetSpeedMs = if (c.targetSpeedMs <= 0.0) DEFAULT_TARGET_SPEED_MS else c.targetSpeedMs,
+        version = 3,
+    )
+    return c
 }
