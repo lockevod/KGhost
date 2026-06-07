@@ -4,13 +4,19 @@ import com.enderthor.kvpartner.engine.GhostPick
 import kotlinx.serialization.Serializable
 
 /** Current schema version. Bump this and add a branch in [migrateToLatest] when defaults change. */
-const val CONFIG_VERSION = 3
+const val CONFIG_VERSION = 4
 
 /** Default Virtual Partner target speed (12 km/h) used when the user hasn't set one. */
 val DEFAULT_TARGET_SPEED_MS: Double = kmhToMs(12.0)
 
 /** Controls which gap metric is displayed on the data fields. */
 enum class GapDisplay { TIME, DISTANCE, BOTH }
+
+/** Which icon to draw for the ghost on the map. Resolved to a drawable by the extension. */
+enum class GhostIcon { GHOST, CYCLIST, ARROW, DOT }
+
+/** On-map ghost icon size. The SDK has no size field, so each maps to a different-sized drawable. */
+enum class GhostSize { SMALL, MEDIUM, LARGE }
 
 /**
  * Persisted configuration for the KVPartner extension.
@@ -36,6 +42,10 @@ data class KVPartnerConfig(
     val segmentEntryAlert: Boolean = false,
     /** Whether to draw the ghost's live position on the map during a segment race. */
     val showGhostOnMap: Boolean = true,
+    /** Which icon to draw for the ghost on the map. */
+    val ghostIcon: GhostIcon = GhostIcon.GHOST,
+    /** On-map ghost icon size (selects a different-sized drawable; the SDK has no size field). */
+    val ghostSize: GhostSize = GhostSize.MEDIUM,
     /** When racing a route, show the fixed-pace Virtual Partner gap on stretches with no recorded-segment history (instead of `---`). */
     val fillGapsWithVP: Boolean = true,
     /**
@@ -74,5 +84,7 @@ fun KVPartnerConfig.migrateToLatest(): KVPartnerConfig {
         targetSpeedMs = if (c.targetSpeedMs <= 0.0) DEFAULT_TARGET_SPEED_MS else c.targetSpeedMs,
         version = 3,
     )
+    // v3 → v4: ghost icon/size selection added; defaults (GHOST, MEDIUM) apply, just stamp.
+    if (c.version < 4) c = c.copy(version = 4)
     return c
 }

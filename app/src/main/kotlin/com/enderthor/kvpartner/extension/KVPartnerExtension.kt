@@ -1,6 +1,5 @@
 package com.enderthor.kvpartner.extension
 
-import com.enderthor.kvpartner.R
 import com.enderthor.kvpartner.data.KVPartnerConfig
 import com.enderthor.kvpartner.datatype.GapGraphicDataType
 import com.enderthor.kvpartner.datatype.GapNumericDataType
@@ -28,6 +27,7 @@ import com.enderthor.kvpartner.geo.TrackStorage
 import com.enderthor.kvpartner.managers.ConfigurationManager
 import com.enderthor.kvpartner.map.GhostMapPresenter
 import com.enderthor.kvpartner.map.GhostMarker
+import com.enderthor.kvpartner.map.ghostIconRes
 import com.enderthor.kvpartner.map.MapEmit
 import com.enderthor.kvpartner.map.decideMapEmit
 import io.hammerhead.karooext.KarooSystemService
@@ -327,9 +327,11 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
             when (val decision = decideMapEmit(lastGhostMarker, next, MARKER_MIN_MOVE_M, force)) {
                 is MapEmit.Show -> {
                     val m = decision.marker
+                    val cfg = activeConfig.value
+                    val iconRes = ghostIconRes(cfg.ghostIcon, cfg.ghostSize)
                     em.onNext(
                         ShowSymbols(
-                            listOf(Symbol.Icon(GHOST_SYMBOL_ID, m.lat, m.lng, R.drawable.ic_ghost, m.bearingDeg)),
+                            listOf(Symbol.Icon(GHOST_SYMBOL_ID, m.lat, m.lng, iconRes, m.bearingDeg)),
                         ),
                     )
                     lastGhostMarker = m

@@ -33,6 +33,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.enderthor.kvpartner.R
+import com.enderthor.kvpartner.data.GhostIcon
+import com.enderthor.kvpartner.data.GhostSize
 import com.enderthor.kvpartner.data.KVPartnerConfig
 import com.enderthor.kvpartner.engine.GhostPick
 import com.enderthor.kvpartner.geo.TrackStore
@@ -183,6 +185,57 @@ fun RaceScreen(
                 }
             },
         )
+
+        // ── Ghost icon picker ─────────────────────────────────────────────────
+        Text(
+            text = stringResource(R.string.race_ghost_icon_label),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            data class IconChoice(val icon: GhostIcon, val labelRes: Int)
+            listOf(
+                IconChoice(GhostIcon.GHOST, R.string.race_ghost_icon_ghost),
+                IconChoice(GhostIcon.CYCLIST, R.string.race_ghost_icon_cyclist),
+                IconChoice(GhostIcon.ARROW, R.string.race_ghost_icon_arrow),
+                IconChoice(GhostIcon.DOT, R.string.race_ghost_icon_dot),
+            ).forEach { choice ->
+                FilterChip(
+                    selected = config.ghostIcon == choice.icon,
+                    onClick = {
+                        scope.launch {
+                            saveFailed = !configManager.updateConfig { it.copy(ghostIcon = choice.icon) }
+                        }
+                    },
+                    label = { Text(stringResource(choice.labelRes)) },
+                    modifier = Modifier.heightIn(min = 48.dp),
+                )
+            }
+        }
+
+        // ── Ghost size picker ─────────────────────────────────────────────────
+        Text(
+            text = stringResource(R.string.race_ghost_size_label),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            data class SizeChoice(val size: GhostSize, val labelRes: Int)
+            listOf(
+                SizeChoice(GhostSize.SMALL, R.string.race_ghost_size_small),
+                SizeChoice(GhostSize.MEDIUM, R.string.race_ghost_size_medium),
+                SizeChoice(GhostSize.LARGE, R.string.race_ghost_size_large),
+            ).forEach { choice ->
+                FilterChip(
+                    selected = config.ghostSize == choice.size,
+                    onClick = {
+                        scope.launch {
+                            saveFailed = !configManager.updateConfig { it.copy(ghostSize = choice.size) }
+                        }
+                    },
+                    label = { Text(stringResource(choice.labelRes)) },
+                    modifier = Modifier.heightIn(min = 48.dp),
+                )
+            }
+        }
 
         HorizontalDivider()
 

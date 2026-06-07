@@ -43,6 +43,15 @@
     <string name="race_segment_alert_description">Show an alert when entering a stretch with a recorded ghost.</string>
     <string name="race_show_ghost_on_map">Show ghost on map</string>
     <string name="race_show_ghost_on_map_desc">Draw the ghost\'s live position on the map during a segment race</string>
+    <string name="race_ghost_icon_label">Ghost icon</string>
+    <string name="race_ghost_icon_ghost">Ghost</string>
+    <string name="race_ghost_icon_cyclist">Cyclist</string>
+    <string name="race_ghost_icon_arrow">Arrow</string>
+    <string name="race_ghost_icon_dot">Dot</string>
+    <string name="race_ghost_size_label">Ghost size</string>
+    <string name="race_ghost_size_small">S</string>
+    <string name="race_ghost_size_medium">M</string>
+    <string name="race_ghost_size_large">L</string>
     <string name="race_fill_gaps_vp">Virtual Partner in gaps</string>
     <string name="race_fill_gaps_vp_desc">On a route, show the fixed-pace Virtual Partner gap where you have no recorded history (instead of ---).</string>
 
