@@ -161,6 +161,85 @@ class SegmentMatcherTest {
         assertEquals(0.0, s.ghost.timeAt(0.0), 1e-6)
     }
 
+    /**
+     * BUG 1 regression: multi-lap SAME-direction smear. On a route where a stretch is ridden two or
+     * more times in the SAME direction (criterium / repeated loop), the coverage scan yields ONE
+     * interval. On the buggy code the lap-2 points (same road, perpDist≈0, odometer jumped a full
+     * lap so strictly greater, route "not backward" within the back window) appended at the chain
+     * head with a FROZEN route position, so ghost.totalDistanceM became ~2× the segment span. The
+     * strict route-forward rule plus the odometer-vs-route-span backstop keep the emitted ghost to
+     * ONE lap's span.
+     */
+    @Test fun `multi-lap same-direction stretch yields one lap span not multiple`() {
+        // Track rides the middle ~1 km east (lng 0.004..0.013) at 5 m/s, then rides the SAME stretch
+        // again in the SAME direction (lap 2). Distances and times are cumulative across both laps
+        // (a real ride never rewinds the odometer): lap 2 picks up where lap 1 left off.
+        val lap1 = (0..18).map { i ->
+            val lng = 0.004 + i * 0.0005
+            pt(lng, distanceM = i * 55.0, t = i * 11.0)
+        }
+        val lastLap1 = lap1.last()
+        // Lap 2: same longitudes, same direction; odometer + time continue from lap 1's end.
+        val lap2 = (1..18).map { j ->
+            val lng = 0.004 + j * 0.0005
+            pt(lng, distanceM = lastLap1.distanceM + j * 55.0, t = lastLap1.timeS + j * 11.0)
+        }
+        val track = com.enderthor.kvpartner.geo.RecordedTrack(
+            id = "laps", startedAtEpoch = 1_000L,
+            points = (lap1 + lap2).map { it.toDto() },
+        )
+
+        val segs = SegmentMatcher.match(route, listOf(track), GhostPick.BEST, params)
+        // The stretch is real, so we expect a segment (the backstop only rejects smeared chains).
+        assertTrue("expected at least one segment, got ${segs.size}", segs.isNotEmpty())
+
+        val s = segs.first()
+        val span = s.routeEndM - s.routeStartM
+        val ghostM = s.ghost.totalDistanceM
+        val ratio = ghostM / span
+        // On the buggy code the ghost smears across both laps (ratio ~2.0). After the fix the ghost
+        // is ONE lap, within ~15 % of the declared span.
+        assertTrue(
+            "ghost.totalDistanceM ($ghostM) should be within 15% of ONE lap's span ($span), ratio=$ratio",
+            ratio in 0.85..1.15,
+        )
+        assertEquals(0.0, s.ghost.timeAt(0.0), 1e-6)
+    }
+
+    /**
+     * BUG 2 regression: a recorded track with a backward TIME glitch (odometer increasing but timeS
+     * decreasing at one point) flowed into RecordedGhostSource.fromTrackSlice -> GhostCurve, which
+     * threw IllegalArgumentException("decreasing time") and crashed match() at route load. The chain
+     * walk now also requires strictly increasing time for a kept point, so the emitted slice is
+     * monotonic in BOTH distance and time and GhostCurve never throws.
+     */
+    @Test fun `non-monotonic time track does not crash match and yields a sane segment`() {
+        // Track rides the middle ~1 km east (lng 0.004..0.013) at 5 m/s, EXCEPT point #9 whose time
+        // jumps BACKWARD (odometer still increasing). On the buggy code this reaches GhostCurve and
+        // throws; the time-monotonic guard skips the bad point so the slice stays monotonic.
+        val pts = (0..18).map { i ->
+            val lng = 0.004 + i * 0.0005
+            if (i == 9) {
+                // Time glitch: distance keeps climbing, but time goes backward by 50 s.
+                pt(lng, distanceM = i * 55.0, t = i * 11.0 - 50.0)
+            } else {
+                pt(lng, distanceM = i * 55.0, t = i * 11.0)
+            }
+        }
+        val track = com.enderthor.kvpartner.geo.RecordedTrack(
+            id = "timeglitch", startedAtEpoch = 1_000L,
+            points = pts.map { it.toDto() },
+        )
+
+        // Must NOT throw.
+        val segs = SegmentMatcher.match(route, listOf(track), GhostPick.BEST, params)
+        // A sane segment is produced (the stretch is otherwise clean) with a monotonic ghost.
+        assertTrue("expected at least one segment, got ${segs.size}", segs.isNotEmpty())
+        val s = segs.first()
+        assertEquals(0.0, s.ghost.timeAt(0.0), 1e-6)
+        assertTrue("ghost time must be positive", s.ghost.totalTimeS > 0.0)
+    }
+
     @Test fun `out-and-back track rides the shared stretch twice and yields one clean pass`() {
         // Route: A(0,0) -> B(0,0.018) east (~2 km) -> back to A. Total ~4 km.
         // Densely vertexed (~67 m) like a real decimated route, so the per-segment window of the

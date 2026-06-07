@@ -196,6 +196,27 @@ object SegmentMatcher {
     private const val sliceBackWindowM = 30.0
 
     /**
+     * Tiny epsilon (m) for the strict route-forward test in [extractTrackSlice]'s chain walk. A kept
+     * point must advance in route-distance by more than this; the epsilon only absorbs float
+     * round-off so two genuinely distinct, advancing points are not rejected as "equal". It must stay
+     * far below the route sampling/decimation spacing so it never lets a stalled (frozen) or
+     * backward lap re-entry through.
+     */
+    private const val routeAdvanceEpsilonM = 1e-3
+
+    /**
+     * Backstop multiplier for the odometer-vs-route-span sanity check in [extractTrackSlice]. After
+     * building the chosen chain we reject it (treat the interval as no-segment) when the ghost's
+     * odometer span exceeds `(routeSpan + 2 * toleranceM) * routeSpanInflationLimit`. This guarantees
+     * a smeared/inflated ghost (e.g. a multi-lap chain whose odometer covers N laps over a one-lap
+     * route span) is never emitted, regardless of how it slipped past the per-point guards. The
+     * `2 * toleranceM` allowance covers the projection's perpendicular tolerance at both ends, and
+     * 1.25 leaves headroom for legitimate odometer-vs-route slack (a track is sampled along the road,
+     * which is slightly longer than the straight route projection) without admitting a full extra lap.
+     */
+    private const val routeSpanInflationLimit = 1.25
+
+    /**
      * Extracts ONE clean monotonic pass of the track over `[interval]` of the route by STITCHING the
      * monotonic subsequence of in-interval track points across the whole interval.
      *
@@ -284,8 +305,22 @@ object SegmentMatcher {
                 val onRoute = proj.perpDistM < toleranceM
                 val insideInterval = routeM in startM..endM
                 val monotonicOdometer = kept.isEmpty() || tp.distanceM > kept.last().first.distanceM
-                val monotonicRoute = kept.isEmpty() || routeM >= prevRouteM - sliceBackWindowM
-                if (onRoute && insideInterval && monotonicOdometer && monotonicRoute) {
+                // Strict route-forward progress: a kept point must advance in route-distance past the
+                // previous kept point (modulo a tiny float epsilon). This is the multi-lap
+                // same-direction segregator (BUG 1): when the rider re-enters the SAME stretch in the
+                // SAME direction, the windowed projection either snaps the lap-2 point back to the
+                // stretch start (routeM jumps backward) or freezes it at the window head (routeM
+                // stalls) — both fail strict-advance, so the second lap never appends with a frozen
+                // route position. A single-pass mid-segment blip still advances in routeM afterwards,
+                // so it is kept; the out-and-back return pass runs backward in routeM, so it is
+                // rejected here too (preserving the earlier out-and-back fix).
+                val monotonicRoute = kept.isEmpty() || routeM > prevRouteM + routeAdvanceEpsilonM
+                // Time-forward progress (BUG 2): a kept point must not move time backward. A recorded
+                // track with a backward time glitch (odometer up, timeS down) would otherwise flow
+                // into GhostCurve and throw "decreasing time", crashing match() at route load. Guard
+                // it here so the emitted slice is monotonic in BOTH distance and time.
+                val monotonicTime = kept.isEmpty() || tp.timeS >= kept.last().first.timeS
+                if (onRoute && insideInterval && monotonicOdometer && monotonicRoute && monotonicTime) {
                     kept.add(tp to routeM)
                     prevRouteM = routeM
                 }
@@ -326,7 +361,17 @@ object SegmentMatcher {
         for (p in oriented) {
             if (deduped.isEmpty() || p.distanceM > deduped.last().distanceM) deduped += p
         }
-        return if (deduped.size >= 2) deduped else null
+        if (deduped.size < 2) return null
+
+        // Backstop validation (BUG 1): reject any chain whose ODOMETER span inflated well past the
+        // route span — a smeared/multi-lap chain that slipped past the per-point guards. The engine
+        // assumes ghost.totalDistanceM ≈ routeEndM − routeStartM; emitting an inflated ghost breaks
+        // gap-distance and ghost-progress, so we drop the interval (no segment) instead.
+        val odometerSpanM = deduped.last().distanceM - deduped.first().distanceM
+        val routeSpanM = endM - startM
+        if (odometerSpanM > (routeSpanM + 2.0 * toleranceM) * routeSpanInflationLimit) return null
+
+        return deduped
     }
 
     /** Greedily groups candidates whose route-distance ranges overlap (transitively via union). */
