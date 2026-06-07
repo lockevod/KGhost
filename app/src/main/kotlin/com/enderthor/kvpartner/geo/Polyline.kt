@@ -124,12 +124,43 @@ class PolylinePath(val points: List<LatLng>) {
      * range intersects `[windowLoM, windowHiM]`. With an infinite window this is the plain global
      * nearest projection.
      */
+    /**
+     * Index of the first segment `i` (in `0 until points.size - 1`) whose far end
+     * `cumulativeM[i + 1] >= [windowLoM]` — i.e. the first segment that can intersect a window
+     * starting at [windowLoM]. Lower-bound binary search over the non-decreasing `cumulativeM`
+     * (searching `cumulativeM[1 .. size-1]`, the far ends). Returns `points.size - 1` (an empty loop
+     * range) when every segment ends before [windowLoM]. For `windowLoM == NEGATIVE_INFINITY` this is
+     * 0, leaving the global scan unchanged.
+     */
+    private fun firstSegmentFrom(windowLoM: Double): Int {
+        // Search far ends cumulativeM[hi] for hi in 1 .. size-1 (segment index = hi - 1).
+        var lo = 1
+        var hi = points.size // exclusive
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            if (cumulativeM[mid] >= windowLoM) hi = mid else lo = mid + 1
+        }
+        // lo is the smallest far-end index with cumulativeM[lo] >= windowLoM, or size if none.
+        return (lo - 1).coerceAtMost(points.size - 1)
+    }
+
     private fun nearestProjectionInRange(p: LatLng, windowLoM: Double, windowHiM: Double): Projection {
         var best = Projection(0.0, Double.MAX_VALUE, 0)
-        for (i in 0 until points.size - 1) {
+        // Window the scan: only segments whose `[cumulativeM[i], cumulativeM[i+1]]` intersects
+        // `[windowLoM, windowHiM]` can win, exactly as the skip-condition below selects. Because
+        // `cumulativeM` is non-decreasing, those segments form one contiguous index range, so we can
+        // binary-search the first eligible index and BREAK past the last instead of touching every
+        // segment. This visits the IDENTICAL set of candidate segments as the old full scan (which
+        // `continue`d the out-of-window ones), so the resulting `best` is identical. For an infinite
+        // window (the plain global projection) `start` is 0 and the break never fires -> unchanged.
+        val start = firstSegmentFrom(windowLoM)
+        for (i in start until points.size - 1) {
             val segLoM = cumulativeM[i]; val segHiM = cumulativeM[i + 1]
-            // Skip segments fully outside the window.
-            if (segHiM < windowLoM || segLoM > windowHiM) continue
+            // No later segment can intersect the window once its start passes windowHiM.
+            if (segLoM > windowHiM) break
+            // Defensive: this matches the old skip-condition exactly (always false for i >= start
+            // except the infinite-window NEGATIVE_INFINITY case, where it is also false).
+            if (segHiM < windowLoM) continue
 
             val a = points[i]; val b = points[i + 1]
             // Local metric plane (metres) centred at `a`.

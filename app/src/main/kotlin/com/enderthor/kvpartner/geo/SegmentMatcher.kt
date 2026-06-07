@@ -398,7 +398,19 @@ object SegmentMatcher {
     private fun PolylinePath.pointAtDistance(distM: Double): LatLng {
         if (distM <= 0.0) return points.first()
         if (distM >= totalM) return points.last()
-        val hi = cumulativeM.indexOfFirst { it >= distM }
+        // Lower-bound binary search over the non-decreasing cumulativeM: the smallest index `hi`
+        // with cumulativeM[hi] >= distM. Identical result to indexOfFirst { it >= distM } (it returns
+        // the FIRST such index, and on ties picks the lowest index — so does this lower bound), but
+        // O(log n). distM is strictly in (0, totalM) here, so such an index always exists and hi >= 1.
+        val hi = run {
+            var lo = 0
+            var high = cumulativeM.size // exclusive
+            while (lo < high) {
+                val mid = (lo + high) ushr 1
+                if (cumulativeM[mid] >= distM) high = mid else lo = mid + 1
+            }
+            lo
+        }
         val a = points[hi - 1]; val b = points[hi]
         val da = cumulativeM[hi - 1]; val db = cumulativeM[hi]
         val f = if (db == da) 0.0 else (distM - da) / (db - da)
