@@ -142,6 +142,64 @@ class TrackStoreTest {
         assertEquals(listOf("A"), store.loadCandidates(queryA).map { it.id })
     }
 
+    @Test fun `rankCandidateIds ranks by route-cell overlap, excludes non-overlapping, respects cap`() {
+        // A long-ish route bbox so it spans several precision-6 cells.
+        val routeBBox = BBox(minLat = 41.0, maxLat = 41.05, minLng = 2.0, maxLng = 2.05)
+        val routeCells = SpatialIndex(TrackStore.INDEX_PRECISION).cellsFor(routeBBox).toList()
+        assertTrue("route must span several cells for this test", routeCells.size >= 3)
+
+        // Pick one cell OUTSIDE the route (Madrid-ish) so track C never overlaps the route.
+        val outsideCell = geohash(40.41, -3.70, TrackStore.INDEX_PRECISION)
+        assertFalse(routeCells.contains(outsideCell))
+
+        // Build a snapshot by hand: A appears in ALL route cells (max overlap), B in exactly ONE
+        // route cell (a little overlap), C only in the outside cell (no overlap).
+        val snapshot = HashMap<String, MutableSet<String>>()
+        for (cell in routeCells) snapshot.getOrPut(cell) { mutableSetOf() }.add("A")
+        snapshot.getOrPut(routeCells.first()) { mutableSetOf() }.add("B")
+        snapshot.getOrPut(outsideCell) { mutableSetOf() }.add("C")
+        val readonly: Map<String, Set<String>> = snapshot.mapValues { it.value.toSet() }
+
+        // Ranking: A (most overlap) before B (some overlap); C excluded (zero overlap).
+        val ranked = TrackStore.rankCandidateIds(
+            readonly, routeBBox, TrackStore.INDEX_PRECISION, maxTracks = 10,
+        )
+        assertEquals(listOf("A", "B"), ranked)
+
+        // Cap respected: only the single most-overlapping track is returned.
+        val capped = TrackStore.rankCandidateIds(
+            readonly, routeBBox, TrackStore.INDEX_PRECISION, maxTracks = 1,
+        )
+        assertEquals(listOf("A"), capped)
+    }
+
+    @Test fun `rankCandidateIds tie-breaks deterministically by id ascending`() {
+        // Two tracks with the SAME overlap (both in every route cell) must order by id ascending.
+        val routeBBox = BBox(minLat = 41.0, maxLat = 41.02, minLng = 2.0, maxLng = 2.02)
+        val routeCells = SpatialIndex(TrackStore.INDEX_PRECISION).cellsFor(routeBBox).toList()
+        val snapshot = HashMap<String, MutableSet<String>>()
+        for (cell in routeCells) snapshot.getOrPut(cell) { mutableSetOf() }.apply { add("zzz"); add("aaa") }
+        val readonly: Map<String, Set<String>> = snapshot.mapValues { it.value.toSet() }
+
+        val ranked = TrackStore.rankCandidateIds(
+            readonly, routeBBox, TrackStore.INDEX_PRECISION, maxTracks = 10,
+        )
+        assertEquals(listOf("aaa", "zzz"), ranked)
+    }
+
+    @Test fun `loadTopCandidates parses only the ranked overlapping tracks`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        // A overlaps the query bbox (near 40.0,-3.0); C is far away (near 50.0,7.0) → not a candidate.
+        val a = track("A", 40.0, -3.0)
+        val c = track("C", 50.0, 7.0)
+        store.save(a)
+        store.save(c)
+
+        val queryA = BBox.around(a.points.map { LatLng(it.lat, it.lng) })!!
+        val loaded = store.loadTopCandidates(queryA, maxTracks = 24)
+        assertEquals(listOf("A"), loaded.map { it.id })
+    }
+
     @Test fun `pure updatedSnapshot then candidateIds selects the overlapping track`() {
         val a = track("A", 40.0, -3.0)
         val b = track("B", 50.0, 7.0)

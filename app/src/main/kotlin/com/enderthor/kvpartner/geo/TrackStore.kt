@@ -136,13 +136,36 @@ class TrackStore(private val dir: File) {
     fun loadCandidates(routeBBox: BBox): List<RecordedTrack> {
         // Snapshot the index under the lock so we never read it mid-modify (torn file → empty).
         val ids = synchronized(indexLock) { candidateIds(readSnapshot(), routeBBox, INDEX_PRECISION) }
-        return ids.mapNotNull { id ->
+        return loadByIds(ids)
+    }
+
+    /**
+     * Returns the parsed candidate tracks RANKED by ROUTE OVERLAP and capped at [maxTracks], parsing
+     * ONLY the chosen files.
+     *
+     * "Race your own on THIS route" wants the tracks that cover the most of the route — not the most
+     * recent ones. Using the spatial index snapshot we score each candidate by how many of the
+     * route's cells it appears in (its overlap with the route), rank by that score, take the top
+     * [maxTracks], and only THEN open + parse those files. This avoids parsing all candidates before
+     * the matcher's own cap (which used recency, the wrong cap here) and stops the relevant old ride
+     * from being silently dropped by a recency cut.
+     */
+    fun loadTopCandidates(routeBBox: BBox, maxTracks: Int): List<RecordedTrack> {
+        // Snapshot the index under the lock so we never read it mid-modify (torn file → empty).
+        val ids = synchronized(indexLock) {
+            rankCandidateIds(readSnapshot(), routeBBox, INDEX_PRECISION, maxTracks)
+        }
+        return loadByIds(ids)
+    }
+
+    /** Loads + parses the `<id>.json` files for [ids]; missing/unparseable files are skipped. */
+    private fun loadByIds(ids: Iterable<String>): List<RecordedTrack> =
+        ids.mapNotNull { id ->
             val f = File(dir, id + JSON_SUFFIX)
             if (!f.isFile) return@mapNotNull null
             runCatching { jsonWithUnknownKeys.decodeFromString<RecordedTrack>(f.readText()) }
                 .getOrNull()
         }
-    }
 
     // --- file helpers -------------------------------------------------------
 
@@ -252,5 +275,37 @@ class TrackStore(private val dir: File) {
             routeBBox: BBox,
             precision: Int = INDEX_PRECISION,
         ): Set<String> = SpatialIndex(precision, snapshot).candidates(routeBBox)
+
+        /**
+         * Pure: candidate track ids RANKED by route overlap, capped at [maxTracks] — no filesystem.
+         *
+         * The overlap score for a track is the number of the ROUTE's geohash cells in which that
+         * track appears (from [snapshot]). A track that ran the whole route shares many cells; a
+         * track that only clipped a corner shares few; a track outside the route shares none and is
+         * excluded entirely. Ranking is descending by overlap score, tie-broken deterministically by
+         * track id (ascending) so the result is stable and reproducible for tests. Returns at most
+         * [maxTracks] ids (the whole ranked list when [maxTracks] is non-positive — defensive).
+         */
+        fun rankCandidateIds(
+            snapshot: Map<String, Set<String>>,
+            routeBBox: BBox,
+            precision: Int = INDEX_PRECISION,
+            maxTracks: Int,
+        ): List<String> {
+            // The route's cells. Reuse SpatialIndex's cell geometry so ranking and candidate
+            // selection agree exactly on what "the route's cells" are.
+            val routeCells = SpatialIndex(precision).cellsFor(routeBBox)
+            // Tally, per track id, how many route cells it appears in (overlap score).
+            val overlap = HashMap<String, Int>()
+            for (cell in routeCells) {
+                val ids = snapshot[cell] ?: continue
+                for (id in ids) overlap[id] = (overlap[id] ?: 0) + 1
+            }
+            // Score-descending, then id-ascending for a deterministic, stable order.
+            val ranked = overlap.entries
+                .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+                .map { it.key }
+            return if (maxTracks > 0) ranked.take(maxTracks) else ranked
+        }
     }
 }

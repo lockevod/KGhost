@@ -45,6 +45,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
@@ -151,6 +153,17 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     // navigation-state collector (off Main), read by the tick — hence @Volatile.
     @Volatile
     private var routeMode: RouteMode? = null
+
+    // Dedup + cancel guard for the route matcher. The host re-emits the SAME NavigatingRoute
+    // repeatedly while it computes climbs/progress; without these, onNavigationState would re-run the
+    // full O(n²) match on every re-emit in an un-cancelled coroutine → Default pool saturation → GC
+    // storm → routeMode never gets assigned (② never activates). matchJob lets a superseding route
+    // cancel an in-flight stale match; lastMatchedPolyline collapses re-emits of the SAME route to a
+    // single match. Both written from the navigation-state collector (off Main) and clear/stop paths.
+    @Volatile
+    private var matchJob: Job? = null
+    @Volatile
+    private var lastMatchedPolyline: String? = null
 
     // ④ map overlay. The map emitter is supplied by the host via startMap() on its own thread, so it
     // is @Volatile. lastGhostMarker is the last marker we emitted (edge-trigger state); read on the
@@ -278,15 +291,28 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         if (state is OnNavigationState.NavigationState.NavigatingRoute && activeConfig.value.raceEnabled) {
             val routePolyline = state.routePolyline
             val elevPolyline = state.routeElevationPolyline
+            // Dedup: the host re-emits the SAME NavigatingRoute many times as it computes
+            // climbs/progress. If this is a re-emit of the route we already matched (and ② is live),
+            // ignore it — re-running the full match would saturate the Default pool and starve the
+            // assignment of routeMode. Compare BEFORE launching anything.
+            if (routePolyline == lastMatchedPolyline && routeMode != null) return
+            // A different (or first) route: cancel any in-flight match for the previous route so a
+            // stale O(n²) match can't run concurrently with the new one, then claim this polyline.
+            matchJob?.cancel()
+            lastMatchedPolyline = routePolyline
             // Off Main: polyline decode, candidate file IO, and segment matching are all heavier
-            // than a frame. Default is fine; loadCandidates does file IO but never overlaps a save
+            // than a frame. Default is fine; loadTopCandidates does file IO but never overlaps a save
             // in practice (save runs at ride-end, matching at route-load).
-            scope.launch(Dispatchers.Default) {
+            matchJob = scope.launch(Dispatchers.Default) {
                 runCatching {
                     val path = PolylinePath(Polyline.decode(routePolyline))
                     val bbox = BBox.around(path.points)
                         ?: return@launch clearRouteMode()
-                    val tracks = trackStore.loadCandidates(bbox)
+                    // Pre-cap candidates by ROUTE OVERLAP (relevance), parsing only the top tracks.
+                    val tracks = trackStore.loadTopCandidates(bbox, SegmentMatcher.Params().maxTracks)
+                    // A superseding route should cancel this stale match promptly: bail before the
+                    // expensive match if we've been cancelled.
+                    currentCoroutineContext().ensureActive()
                     val matched = SegmentMatcher.match(
                         path,
                         tracks,
@@ -299,17 +325,26 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                     routeMode = RouteMode(path, withElevation)
                     Timber.d("route mode ON: ${withElevation.size} segment(s) on '${state.name}'")
                 }.onFailure { e ->
+                    // A cancellation (superseding route / teardown) must propagate, not be swallowed
+                    // as a match failure — otherwise clearRouteMode() would wipe the NEW route's state.
+                    if (e is kotlinx.coroutines.CancellationException) throw e
                     Timber.w(e, "route matching failed; staying in ① VP mode")
                     clearRouteMode()
                 }
             }
         } else {
-            clearRouteMode()
+            // Guard against transient thrash: only tear down when there's actually something to
+            // clear. A redundant clear would null lastMatchedPolyline and force a needless re-match
+            // on the next same-route re-emit.
+            if (routeMode != null || lastMatchedPolyline != null) clearRouteMode()
         }
     }
 
     /** Clears ② route mode so the tick falls back to ① Virtual Partner behavior. */
     private fun clearRouteMode() {
+        // Cancel any in-flight match and drop the dedup key so a later same-route emit re-matches.
+        matchJob?.cancel()
+        lastMatchedPolyline = null
         routeMode = null
         SegmentInfoHolder.clear()
         // publishGhostMarker is internally synchronized on mapLock, so it is safe to call directly
