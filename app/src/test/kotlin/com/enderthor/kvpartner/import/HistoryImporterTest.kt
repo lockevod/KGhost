@@ -5,6 +5,8 @@ import com.enderthor.kvpartner.geo.Source
 import com.enderthor.kvpartner.geo.TrackDecimator
 import com.enderthor.kvpartner.geo.TrackPointDto
 import com.enderthor.kvpartner.geo.TrackStore
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -215,6 +217,65 @@ class HistoryImporterTest {
         importer.import(onlyNew = false).toList()
 
         assertEquals(0, setCalls)
+    }
+
+    @Test fun `cancellation mid-run preserves already-flushed chunks and advances lastScan past them`() = runTest {
+        val fitFilesDir = tmp.newFolder("fitfiles")
+        val importDir = tmp.newFolder("import")
+        val tracksDir = tmp.newFolder("tracks")
+
+        // 30 files (> 1 chunk of FLUSH_EVERY=25) so the first flush lands before the run ends.
+        // Increasing lastModified per file so the flushed prefix has a well-defined max.
+        val n = 30
+        repeat(n) { i ->
+            touch(fitFilesDir, "f%02d.fit".format(i)).apply { setLastModified(1_000L + i) }
+        }
+
+        val store = TrackStore(tracksDir)
+
+        var lastScan = 0L
+        // listFiles() order is OS-defined, so drive the cancel off a decode counter, not filenames:
+        // the 26th decoded file throws CancellationException. By then the first chunk of 25 has
+        // already been flushed; the cancel discards the rest. Track ids/keys are unique per file.
+        var decodeCount = 0
+        val importer = HistoryImporter(
+            fitFilesDir = fitFilesDir,
+            importDir = importDir,
+            trackStore = store,
+            decimate = { it },
+            fitDecode = { f, _ ->
+                decodeCount++
+                if (decodeCount == 26) throw CancellationException("user cancel")
+                val id = f.name.removeSuffix(".fit")
+                track("t$id", "key-$id")
+            },
+            gpxParse = { null },
+            lastScanProvider = { lastScan },
+            lastScanSetter = { lastScan = it },
+        )
+
+        // CancellationException propagates out of the flow; the already-executed flush (+ its
+        // lastScanSetter call) for the first chunk has taken effect. Catch it so the test can assert
+        // on the surviving state rather than failing on the propagated cancel.
+        var cancelled = false
+        importer.import(onlyNew = false)
+            .catch { e -> if (e is CancellationException) cancelled = true else throw e }
+            .toList()
+
+        // The run was cancelled mid-flight (no DONE).
+        assertEquals(true, cancelled)
+
+        // The first flushed chunk (25 files) MUST be persisted despite the cancel.
+        val storedIds = store.allTrackIds()
+        assertEquals(25, storedIds.size)
+
+        // lastScan was advanced to the max lastModified among the FLUSHED files (success-only), so a
+        // re-run with onlyNew won't reprocess them. (listFiles() order is OS-defined, so derive the
+        // expected max from the files that actually got stored rather than hardcoding an index.)
+        val expectedMax = storedIds
+            .map { File(fitFilesDir, it.removePrefix("t") + ".fit").lastModified() }
+            .max()
+        assertEquals(expectedMax, lastScan)
     }
 
     @Test fun `onlyNew with future lastScan processes nothing`() = runTest {

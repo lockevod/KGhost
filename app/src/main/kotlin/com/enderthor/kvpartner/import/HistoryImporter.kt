@@ -4,6 +4,9 @@ import com.enderthor.kvpartner.geo.RecordedTrack
 import com.enderthor.kvpartner.geo.Source
 import com.enderthor.kvpartner.geo.TrackDecimator
 import com.enderthor.kvpartner.geo.TrackStore
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import timber.log.Timber
@@ -63,15 +66,44 @@ class HistoryImporter(
         emit(ImportProgress(ImportProgress.Phase.SCANNING, current = 0, total = total, 0, 0, 0))
 
         // --- PARSING ---
-        // The expensive decode stays per-file (one FIT buffer at a time); only the STORE write is
-        // batched via addAll after the loop, so imported/skipped stay 0 during PARSING and are
-        // finalized once the batch lands.
+        // The expensive decode stays per-file (one FIT buffer at a time). The STORE write is now
+        // flushed in chunks of FLUSH_EVERY (plus a final flush at end-of-loop) instead of a single
+        // addAll after the loop, so:
+        //   - already-flushed chunks SURVIVE a later cancel (the user's Cancel keeps prior work),
+        //   - cancellation is cooperative within ONE file via ensureActive() at the top of each
+        //     iteration (cancel latency is one file, not PROGRESS_EVERY files).
+        // running totals — accumulated across flushes, finalized identically to the old single addAll.
         var failed = 0
-        val accumulated = ArrayList<RecordedTrack>()
-        // L-F2: advance lastScan only past files that were actually processed without failure.
-        var maxProcessedLastModified = Long.MIN_VALUE
+        var imported = 0
+        var skippedDuplicates = 0
+        // Chunk buffer plus the lastModified of the file each buffered track came from, so a flush
+        // advances lastScan only past files whose tracks were actually written (L-F2 preserved).
+        val chunk = ArrayList<RecordedTrack>(FLUSH_EVERY)
+        val chunkLastModified = ArrayList<Long>(FLUSH_EVERY)
+        // L-F2: highest lastModified among files whose decoded tracks have been FLUSHED so far.
+        var maxFlushedLastModified = Long.MIN_VALUE
+
+        // Flush the current chunk into the store, fold its counts into the running totals, advance
+        // lastScan past the flushed files (success-only), and clear the buffer. Called per full
+        // chunk and once more at end-of-loop. Each flush + lastScanSetter takes effect immediately,
+        // so a CancellationException thrown afterwards cannot undo already-persisted work.
+        suspend fun flushChunk() {
+            if (chunk.isEmpty()) return
+            val added = trackStore.addAll(chunk)
+            imported += added
+            skippedDuplicates += (chunk.size - added)
+            val chunkMax = chunkLastModified.max()
+            if (chunkMax > maxFlushedLastModified) maxFlushedLastModified = chunkMax
+            // L-F2: advance per successful flush so a cancel after some flushes still leaves lastScan
+            // correctly past them (re-run with onlyNew won't reprocess flushed files).
+            if (maxFlushedLastModified > lastScanProvider()) lastScanSetter(maxFlushedLastModified)
+            chunk.clear()
+            chunkLastModified.clear()
+        }
 
         workList.forEachIndexed { index, item ->
+            // Per-file cooperative cancellation: a cancel is honored within one file, not ten.
+            currentCoroutineContext().ensureActive()
             try {
                 val track = when (item.kind) {
                     Kind.FITFILES_FIT -> fitDecode(item.file, Source.FITFILES_SCAN)
@@ -87,15 +119,21 @@ class HistoryImporter(
                         failed++
                         Timber.w("import dropped %s: decimated to %d point(s)", item.file.name, decimated.points.size)
                     } else {
-                        accumulated.add(decimated)
-                        val lm = item.file.lastModified()
-                        if (lm > maxProcessedLastModified) maxProcessedLastModified = lm
+                        chunk.add(decimated)
+                        chunkLastModified.add(item.file.lastModified())
                     }
                 }
+            } catch (e: CancellationException) {
+                // A cooperative cancel must propagate (not be counted as a per-file failure); the
+                // chunks flushed before it persist.
+                throw e
             } catch (e: Exception) {
                 failed++
                 Timber.w(e, "import failed for %s", item.file.name)
             }
+
+            // Chunked flush: independent of the PROGRESS_EVERY emit cadence below.
+            if (chunk.size >= FLUSH_EVERY) flushChunk()
 
             val current = index + 1
             if (current % PROGRESS_EVERY == 0 || current == total) {
@@ -104,24 +142,23 @@ class HistoryImporter(
                         ImportProgress.Phase.PARSING,
                         current = current,
                         total = total,
-                        imported = 0,
-                        skippedDuplicates = 0,
+                        imported = imported,
+                        skippedDuplicates = skippedDuplicates,
                         failed = failed,
                     ),
                 )
             }
         }
 
-        // --- STORE (batched, O(n)) ---
-        val added = trackStore.addAll(accumulated)
-        val imported = added
-        val skippedDuplicates = accumulated.size - added
+        // --- STORE (final flush of the trailing partial chunk) ---
+        flushChunk()
 
         // --- DONE ---
-        // L-F2: only advance lastScan past files that decoded AND passed the <2-point guard. A
-        // failed/unreadable file (lastModified still > lastScan) is therefore retried next run, and
-        // a pure-failure or empty run never advances lastScan.
-        if (maxProcessedLastModified > lastScanProvider()) lastScanSetter(maxProcessedLastModified)
+        // L-F2: lastScan has already been advanced per flush above to the highest lastModified among
+        // FLUSHED files (success-only). A failed/unreadable file never entered a chunk, so it is
+        // retried next run, and a pure-failure or empty run never advances lastScan. The completed
+        // invariant imported + skippedDuplicates + failed == total holds (every file ends in exactly
+        // one of: a flushed chunk → imported|skipped, or the failed path).
         emit(
             ImportProgress(
                 ImportProgress.Phase.DONE,
@@ -137,6 +174,13 @@ class HistoryImporter(
     companion object {
         /** Emit a PARSING progress every this many processed files (plus always on the last). */
         private const val PROGRESS_EVERY = 10
+
+        /**
+         * Flush decoded+decimated tracks to the [TrackStore] every this many buffered items (plus a
+         * final flush at end-of-loop). Flushing in chunks means a mid-run cancel keeps already-
+         * flushed work instead of discarding the whole batch.
+         */
+        private const val FLUSH_EVERY = 25
 
         /**
          * Production decimation: drop samples closer than 20 m (by cumulative ride distance) to the
