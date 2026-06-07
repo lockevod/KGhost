@@ -36,10 +36,35 @@ import kotlin.math.sqrt
  * equirectangular formula as [PolylinePath.nearestPerpDistM], so the value it returns for the
  * winning segment matches brute exactly.
  */
-internal class PointGrid(
+internal class PointGrid private constructor(
     private val path: PolylinePath,
     private val queryToleranceM: Double,
+    /**
+     * Optional clip box (lat/lng degrees). When non-null, only the path SEGMENTS whose own segment
+     * bbox INTERSECTS this box are indexed; segments fully outside it are skipped. The clip box must
+     * be the area the grid will ever be queried against, FATTENED by at least [queryToleranceM] on
+     * every side, so this is COVERAGE-IDENTICAL: a segment whose bbox lies entirely outside the
+     * fattened clip cannot have a perpendicular foot within [queryToleranceM] of any query inside the
+     * clip, so dropping it never changes a `< tol` decision. Clipping bounds memory (and the metric
+     * grid extent) to the clip area instead of the path's full span — preventing OOM on a track that
+     * crosses the route then continues for tens of km.
+     */
+    private val clip: BBox? = null,
 ) {
+    constructor(path: PolylinePath, queryToleranceM: Double) :
+        this(path, queryToleranceM, null)
+
+    companion object {
+        /**
+         * Builds a grid over only the path segments whose segment-bbox intersects [clipBBox]
+         * (segments fully outside are skipped). [clipBBox] must already be fattened by at least
+         * [cellSizeM]'s tolerance on every side by the caller. COVERAGE-IDENTICAL for queries inside
+         * the clip; see [clip].
+         */
+        fun forPathClippedTo(path: PolylinePath, cellSizeM: Double, clipBBox: BBox): PointGrid =
+            PointGrid(path, cellSizeM, clipBBox)
+    }
+
     // Local metric plane: metres east/north of the path's first point. Latitude scale is constant;
     // longitude scale uses the cosine at the reference latitude. This is the same per-degree scaling
     // PolylinePath uses per-segment; using a single reference latitude here only affects which CELL a
@@ -63,6 +88,12 @@ internal class PointGrid(
     // Buckets: cell index -> list of segment indices (segment i = points[i]..points[i+1]).
     private val buckets: Array<IntArray>
 
+    /**
+     * Number of grid cells allocated (cols × rows). Exposed for tests to assert the grid is bounded
+     * to the clip area (not the full track span) — the memory-bound proof for the clip fix.
+     */
+    internal val cellCount: Int get() = cols * rows
+
     private fun xOf(lng: Double): Double = (lng - refLng) * mPerDegLng
     private fun yOf(lat: Double): Double = (lat - refLat) * mPerDegLat
     private fun cellX(x: Double): Int = floor(x / cell).toInt()
@@ -70,15 +101,52 @@ internal class PointGrid(
 
     init {
         val n = pts.size
-        // Metric bbox of the path.
+        // Metric bbox of the path — restricted to the KEPT segments (those passing the clip), so the
+        // grid extent (and hence cell count / memory) is bounded to the clip area, not the path span.
+        // Falls back to the path's full vertex bbox when no segment is kept (degenerate) so the array
+        // is still valid.
+        //
+        // Crucially, when a kept segment BRIDGES out of the clip (one endpoint inside, the other tens
+        // of km away — the on-route→tail jump), we must NOT let its far endpoint expand the grid to
+        // the whole track span (that would defeat the clip / re-introduce the OOM). The grid is only
+        // ever queried at points inside the clip, so we CLAMP each endpoint's metric coordinate to the
+        // clip's metric rectangle before growing the extent. The bridging segment is still indexed
+        // into the boundary cells it touches WITHIN the clip (forEachSegmentCellWithSeg walks its real
+        // fat-bbox cells; cellIndex() returns -1 for cells outside the grid, so out-of-clip cells are
+        // simply ignored) — coverage inside the clip is unchanged.
+        val clipMinX: Double; val clipMaxX: Double; val clipMinY: Double; val clipMaxY: Double
+        if (clip != null) {
+            val cx0 = xOf(clip.minLng); val cx1 = xOf(clip.maxLng)
+            val cy0 = yOf(clip.minLat); val cy1 = yOf(clip.maxLat)
+            clipMinX = minOf(cx0, cx1); clipMaxX = maxOf(cx0, cx1)
+            clipMinY = minOf(cy0, cy1); clipMaxY = maxOf(cy0, cy1)
+        } else {
+            clipMinX = Double.NEGATIVE_INFINITY; clipMaxX = Double.POSITIVE_INFINITY
+            clipMinY = Double.NEGATIVE_INFINITY; clipMaxY = Double.POSITIVE_INFINITY
+        }
         var minX = Double.POSITIVE_INFINITY
         var maxX = Double.NEGATIVE_INFINITY
         var minY = Double.POSITIVE_INFINITY
         var maxY = Double.NEGATIVE_INFINITY
-        for (p in pts) {
+        var anyKept = false
+        for (i in 0 until n - 1) {
+            if (!segmentKept(i)) continue
+            anyKept = true
+            val a = pts[i]; val b = pts[i + 1]
+            for (p in listOf(a, b)) {
+                // Clamp to the clip metric rect so a far bridging endpoint can't blow up the extent.
+                val x = xOf(p.lng).coerceIn(clipMinX, clipMaxX)
+                val y = yOf(p.lat).coerceIn(clipMinY, clipMaxY)
+                if (x < minX) minX = x; if (x > maxX) maxX = x
+                if (y < minY) minY = y; if (y > maxY) maxY = y
+            }
+        }
+        if (!anyKept) {
+            // No segment intersects the clip (or degenerate single-point path): use the first point
+            // so the grid is a valid 1×1 cell that returns MAX_VALUE for every far query.
+            val p = pts.first()
             val x = xOf(p.lng); val y = yOf(p.lat)
-            if (x < minX) minX = x; if (x > maxX) maxX = x
-            if (y < minY) minY = y; if (y > maxY) maxY = y
+            minX = x; maxX = x; minY = y; maxY = y
         }
         // Pad the grid by the tolerance so a fat bbox never indexes outside the array.
         minCx = cellX(minX - queryToleranceM)
@@ -105,6 +173,20 @@ internal class PointGrid(
         return oy * cols + ox
     }
 
+    /**
+     * True when segment [i] (points[i]..points[i+1]) should be indexed: either there is no clip, or
+     * the segment's lat/lng bbox intersects the clip box. A segment fully outside the clip is skipped
+     * — coverage-identical because the caller fattened the clip by the tolerance (see [clip]).
+     */
+    private fun segmentKept(i: Int): Boolean {
+        val c = clip ?: return true
+        val a = pts[i]; val b = pts[i + 1]
+        val segMinLat = minOf(a.lat, b.lat); val segMaxLat = maxOf(a.lat, b.lat)
+        val segMinLng = minOf(a.lng, b.lng); val segMaxLng = maxOf(a.lng, b.lng)
+        return segMinLat <= c.maxLat && segMaxLat >= c.minLat &&
+            segMinLng <= c.maxLng && segMaxLng >= c.minLng
+    }
+
     private inline fun forEachSegmentCell(n: Int, body: (Int) -> Unit) {
         forEachSegmentCellWithSeg(n) { idx, _ -> body(idx) }
     }
@@ -116,6 +198,7 @@ internal class PointGrid(
      */
     private inline fun forEachSegmentCellWithSeg(n: Int, body: (Int, Int) -> Unit) {
         for (i in 0 until n - 1) {
+            if (!segmentKept(i)) continue
             val a = pts[i]; val b = pts[i + 1]
             val ax = xOf(a.lng); val ay = yOf(a.lat)
             val bx = xOf(b.lng); val by = yOf(b.lat)

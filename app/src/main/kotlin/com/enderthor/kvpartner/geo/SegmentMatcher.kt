@@ -54,13 +54,20 @@ object SegmentMatcher {
         val minSegmentM: Double = 300.0,
         val mergeGapM: Double = 80.0,
         /**
-         * Safety budget: process at most this many candidate tracks. When more candidates are
-         * supplied, the [maxTracks] most RECENT (largest [RecordedTrack.startedAtEpoch]) are kept
-         * and the rest are skipped (logged, never silently dropped). Deterministic given the same
-         * inputs (stable sort by epoch descending), so tests stay reproducible. With ~79 long
-         * tracks over a 42 km route this is what guarantees `match` always completes quickly.
+         * Safety budget / high backstop: process at most this many candidate tracks. When more
+         * candidates are supplied, the [maxTracks] most RECENT (largest [RecordedTrack.startedAtEpoch])
+         * are kept and the rest are skipped (logged, never silently dropped). Deterministic given the
+         * same inputs (stable sort by epoch descending), so tests stay reproducible.
+         *
+         * This is NOT the primary cap: the primary, relevance-ranked cap is [TrackStore.loadTopCandidates],
+         * which pre-ranks by route overlap before parsing. This in-matcher cap is only a HIGH safety
+         * backstop and is intentionally set well above realistic histories (e.g. 79 tracks) so it never
+         * triggers in practice and so a short perfect-match ride is never evicted in favour of long
+         * "neighbour" rides. Since the grid made matching O(n) per track, a tight cap is no longer
+         * needed. (Long-term: rank candidates by true along-route overlap / index tracks by PATH cells
+         * instead of bbox cells — deferred.)
          */
-        val maxTracks: Int = 24,
+        val maxTracks: Int = 120,
     )
 
     /** A segment candidate produced by a single track before cross-track [GhostPick] resolution. */
@@ -102,9 +109,13 @@ object SegmentMatcher {
     ): List<LiveSegment> {
         val candidates = ArrayList<Candidate>()
 
-        // Safety budget (B): cap the candidate set to the maxTracks most-recent tracks so a large
-        // history (e.g. 79 long tracks over a 42 km route) can never make match() grind. The cap is
-        // deterministic — a stable sort by startedAtEpoch descending — so tests stay reproducible.
+        // Safety budget (B), HIGH BACKSTOP ONLY: cap the candidate set to the maxTracks most-recent
+        // tracks so a pathologically large history can never make match() grind. With the default
+        // maxTracks=120 this will NOT trigger at realistic histories (≤120 tracks); the PRIMARY,
+        // relevance-ranked cap is TrackStore.loadTopCandidates (pre-ranks by route overlap before
+        // parsing). The cap here is deterministic — a stable sort by startedAtEpoch descending — so
+        // tests stay reproducible. (The cap test in SegmentMatcherTest passes an explicit small
+        // maxTracks to exercise this path.)
         val selected = if (tracks.size > params.maxTracks) {
             Timber.w(
                 "SegmentMatcher: capped to %d of %d candidate tracks (most-recent kept)",
@@ -200,7 +211,33 @@ object SegmentMatcher {
         // PointGridDiffTest to agree with the brute-force full scan on the coverage decision
         // `(< tol)` for every sample and on the distance value itself whenever `< tol`, so the
         // covered-run/interval folding below is unchanged.
-        val grid = PointGrid(trackPath, tol)
+        //
+        // CLIP TO THE ROUTE AREA: a recorded track that crosses the route then continues for tens of
+        // km would otherwise build a grid over its WHOLE bbox → O(trackBBox / cell²) memory → possible
+        // OutOfMemoryError. We only ever query the grid at ROUTE samples, so any track segment whose
+        // bbox lies outside the route bbox fattened by `tol` can never be within `tol` of any route
+        // sample → dropping it is COVERAGE-IDENTICAL. Clip the grid to that fattened route bbox so its
+        // memory is bounded to the route area, not the track span.
+        val routeBBox = BBox.around(route.points)
+        val grid = if (routeBBox != null) {
+            // Fatten by `tol` (plus a tiny epsilon) in degrees. Latitude: tol / metresPerDegLat.
+            // Longitude: tol / (metresPerDegLng at the route's mid latitude) — divide by cos(lat),
+            // guarding the cos→0 pole case. The margin is a SUPERSET (we over-include), so coverage
+            // stays identical; it only ever keeps a few extra harmless boundary segments.
+            val padLat = tol / 111_320.0
+            val midLatRad = Math.toRadians((routeBBox.minLat + routeBBox.maxLat) / 2.0)
+            val cosLat = kotlin.math.cos(midLatRad).coerceAtLeast(1e-6)
+            val padLng = tol / (111_320.0 * cosLat)
+            val clip = BBox(
+                minLat = routeBBox.minLat - padLat,
+                maxLat = routeBBox.maxLat + padLat,
+                minLng = routeBBox.minLng - padLng,
+                maxLng = routeBBox.maxLng + padLng,
+            )
+            PointGrid.forPathClippedTo(trackPath, tol, clip)
+        } else {
+            PointGrid(trackPath, tol)
+        }
 
         val runs = ArrayList<Pair<Double, Double>>()
         var runStart = -1.0
