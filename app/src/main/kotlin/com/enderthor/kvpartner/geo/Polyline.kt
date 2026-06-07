@@ -35,7 +35,20 @@ object Polyline {
         val h = sin(dLat / 2) * sin(dLat / 2) + cos(la1) * cos(la2) * sin(dLng / 2) * sin(dLng / 2)
         return 2 * EARTH_R_M * atan2(sqrt(h), sqrt(1 - h))
     }
+
+    /** Initial great-circle bearing from [a] to [b] in degrees, normalised to [0, 360). */
+    fun bearingDeg(a: LatLng, b: LatLng): Double {
+        val la1 = Math.toRadians(a.lat); val la2 = Math.toRadians(b.lat)
+        val dLng = Math.toRadians(b.lng - a.lng)
+        val y = sin(dLng) * cos(la2)
+        val x = cos(la1) * sin(la2) - sin(la1) * cos(la2) * cos(dLng)
+        val deg = Math.toDegrees(atan2(y, x))
+        return (deg + 360.0) % 360.0
+    }
 }
+
+/** A sampled point along a [PolylinePath]: its coordinate and the heading (deg, 0..360) there. */
+data class RouteSample(val location: LatLng, val bearingDeg: Double)
 
 /** Result of projecting a point onto a [PolylinePath]. */
 data class Projection(val distanceAlongM: Double, val perpDistM: Double, val vertexIndex: Int)
@@ -48,6 +61,24 @@ class PolylinePath(val points: List<LatLng>) {
         for (i in 1 until points.size) c[i] = c[i - 1] + Polyline.haversineM(points[i - 1], points[i])
     }
     val totalM: Double get() = cumulativeM.last()
+
+    /**
+     * Point + heading at cumulative route distance [distanceAlongM] (metres), clamped to
+     * `[0, totalM]`. Linearly interpolates the coordinate within the containing segment; the bearing
+     * is that segment's initial bearing. Used to place a marker (e.g. a ghost) on the map at a known
+     * distance along the route.
+     */
+    fun sampleAt(distanceAlongM: Double): RouteSample {
+        val d = distanceAlongM.coerceIn(0.0, totalM)
+        var i = 0
+        while (i < points.size - 2 && cumulativeM[i + 1] < d) i++
+        val a = points[i]; val b = points[i + 1]
+        val segLen = cumulativeM[i + 1] - cumulativeM[i]
+        val f = if (segLen > 0.0) ((d - cumulativeM[i]) / segLen).coerceIn(0.0, 1.0) else 0.0
+        val lat = a.lat + f * (b.lat - a.lat)
+        val lng = a.lng + f * (b.lng - a.lng)
+        return RouteSample(LatLng(lat, lng), Polyline.bearingDeg(a, b))
+    }
 
     /**
      * Nearest projection of [p] onto the path. Uses an equirectangular local approximation for
