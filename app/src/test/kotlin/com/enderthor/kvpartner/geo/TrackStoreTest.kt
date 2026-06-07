@@ -73,6 +73,35 @@ class TrackStoreTest {
         assertEquals(listOf("A"), store.allTrackIds())
     }
 
+    @Test fun `saving a second track preserves the first in the index merge`() {
+        // Proves the index read-modify-write in save() folds B in WITHOUT dropping A: after saving
+        // A then B, a query box around A still returns A (the second save must not overwrite A's
+        // index entry).
+        val store = TrackStore(tmp.newFolder("tracks"))
+        val a = track("A", 40.0, -3.0)
+        val b = track("B", 50.0, 7.0)
+        store.save(a)
+        store.save(b)
+
+        val queryA = BBox.around(a.points.map { LatLng(it.lat, it.lng) })!!
+        assertEquals(listOf("A"), store.loadCandidates(queryA).map { it.id })
+    }
+
+    @Test fun `a corrupt index_json yields empty candidates without throwing`() {
+        val dir = tmp.newFolder("tracks")
+        val store = TrackStore(dir)
+        val a = track("A", 40.0, -3.0)
+        store.save(a)
+
+        // Corrupt the on-disk index with garbage that cannot parse as the snapshot map.
+        dir.resolve("index.json").writeText("{ this is not valid json ]]")
+
+        val queryA = BBox.around(a.points.map { LatLng(it.lat, it.lng) })!!
+        // readSnapshot() must treat the corrupt-but-present index as empty (logged), not crash.
+        val candidates = store.loadCandidates(queryA)
+        assertTrue(candidates.isEmpty())
+    }
+
     @Test fun `pure updatedSnapshot then candidateIds selects the overlapping track`() {
         val a = track("A", 40.0, -3.0)
         val b = track("B", 50.0, 7.0)

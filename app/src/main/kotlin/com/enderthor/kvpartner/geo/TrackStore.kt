@@ -3,6 +3,7 @@ package com.enderthor.kvpartner.geo
 import com.enderthor.kvpartner.extension.jsonForStorage
 import com.enderthor.kvpartner.extension.jsonWithUnknownKeys
 import kotlinx.serialization.encodeToString
+import timber.log.Timber
 import java.io.File
 
 /**
@@ -25,6 +26,14 @@ import java.io.File
  */
 class TrackStore(private val dir: File) {
 
+    /**
+     * Serializes the `index.json` read→modify→write in [save] against the read in [loadCandidates]
+     * so two overlapping saves can't lose a track from the index and a load can't observe the index
+     * mid-modify. The per-track `<id>.json` writes are already isolated (distinct files); only the
+     * shared index needs guarding.
+     */
+    private val indexLock = Any()
+
     /** Reads all stored track ids by listing the `<id>.json` files (excludes `index.json`). */
     fun allTrackIds(): List<String> {
         val files = dir.listFiles() ?: return emptyList()
@@ -42,12 +51,14 @@ class TrackStore(private val dir: File) {
     fun save(track: RecordedTrack) {
         ensureDir()
 
-        File(dir, track.id + JSON_SUFFIX)
-            .writeText(jsonForStorage.encodeToString(track))
+        atomicWriteText(File(dir, track.id + JSON_SUFFIX), jsonForStorage.encodeToString(track))
 
         val bbox = BBox.around(track.points.map { LatLng(it.lat, it.lng) }) ?: return
-        val newSnapshot = updatedSnapshot(readSnapshot(), track.id, bbox, INDEX_PRECISION)
-        writeSnapshot(newSnapshot)
+        // Read-modify-write of the shared index must be atomic against concurrent saves/loads.
+        synchronized(indexLock) {
+            val newSnapshot = updatedSnapshot(readSnapshot(), track.id, bbox, INDEX_PRECISION)
+            writeSnapshot(newSnapshot)
+        }
     }
 
     /**
@@ -55,7 +66,8 @@ class TrackStore(private val dir: File) {
      * candidate `<id>.json` files. Tracks whose file is missing or unparseable are skipped.
      */
     fun loadCandidates(routeBBox: BBox): List<RecordedTrack> {
-        val ids = candidateIds(readSnapshot(), routeBBox, INDEX_PRECISION)
+        // Snapshot the index under the lock so we never read it mid-modify (torn file → empty).
+        val ids = synchronized(indexLock) { candidateIds(readSnapshot(), routeBBox, INDEX_PRECISION) }
         return ids.mapNotNull { id ->
             val f = File(dir, id + JSON_SUFFIX)
             if (!f.isFile) return@mapNotNull null
@@ -72,20 +84,46 @@ class TrackStore(private val dir: File) {
 
     private fun readSnapshot(): Map<String, Set<String>> {
         val f = File(dir, INDEX_FILE)
+        // An absent index is a normal cold-start state → empty, no log.
         if (!f.isFile) return emptyMap()
         return runCatching {
             jsonWithUnknownKeys.decodeFromString<Map<String, Set<String>>>(f.readText())
-        }.getOrDefault(emptyMap())
+        }.getOrElse { e ->
+            // A PRESENT-but-unparseable index is a corruption (e.g. a torn write or disk damage).
+            // Treating it silently as empty would drop every candidate; surface it instead.
+            Timber.w(e, "index.json present but failed to parse; treating as empty (corrupt index?)")
+            emptyMap()
+        }
     }
 
     private fun writeSnapshot(snapshot: Map<String, Set<String>>) {
         ensureDir()
-        File(dir, INDEX_FILE).writeText(jsonForStorage.encodeToString(snapshot))
+        atomicWriteText(File(dir, INDEX_FILE), jsonForStorage.encodeToString(snapshot))
+    }
+
+    /**
+     * Writes [text] to [target] atomically: serialize to a temp file in the same directory, then
+     * [File.renameTo] (an atomic move on the same filesystem) so a reader never observes a
+     * half-written file. If the rename fails (returns false — e.g. some exotic filesystem) we fall
+     * back to a direct truncate-then-write as best effort and log the degradation via Timber.
+     */
+    private fun atomicWriteText(target: File, text: String) {
+        val tmp = File(target.parentFile, target.name + TMP_SUFFIX)
+        tmp.writeText(text)
+        if (!tmp.renameTo(target)) {
+            Timber.w("atomic rename failed for %s; falling back to direct write", target.name)
+            runCatching { target.writeText(text) }
+                .onFailure { Timber.w(it, "fallback direct write failed for %s", target.name) }
+            tmp.delete()
+        }
     }
 
     companion object {
         private const val JSON_SUFFIX = ".json"
         private const val INDEX_FILE = "index.json"
+
+        /** Suffix for the same-dir temp file used by the atomic write-then-rename. */
+        private const val TMP_SUFFIX = ".tmp"
 
         /** Geohash precision for the on-disk index. Matches [SpatialIndex]'s default (≈ 1.2 km cells). */
         const val INDEX_PRECISION: Int = 6

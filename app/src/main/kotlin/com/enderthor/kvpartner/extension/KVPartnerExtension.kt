@@ -178,8 +178,11 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                     // Freeze the tick by leaving it running but receiving no emissions; do not reset.
                 }
                 is RideState.Idle -> {
-                    stopTick()
+                    // finishAndSaveRecording() reads recordingStartedEpoch (captured synchronously
+                    // before its async save), then clears it; run it before stopTick() so the saved
+                    // track keeps the live epoch. stopTick() also clears the epoch as a backstop.
                     finishAndSaveRecording()
+                    stopTick()
                 }
                 else -> {}
             }
@@ -287,7 +290,14 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     @OptIn(kotlinx.coroutines.FlowPreview::class)
     private fun startTick() {
         if (tickJob?.isActive == true) return
-        recordingStartedEpoch = System.currentTimeMillis()
+        // Only stamp the epoch on a genuinely fresh start. If the tick coroutine previously died
+        // mid-ride (e.g. an exception) a later Recording emission re-enters startTick; without this
+        // guard it would reset the epoch mid-ride → wrong track id / partial double-save risk. The
+        // epoch is cleared to 0L by stopTick()/finishAndSaveRecording(), so the next ride after an
+        // Idle still gets a fresh stamp.
+        if (recordingStartedEpoch == 0L) {
+            recordingStartedEpoch = System.currentTimeMillis()
+        }
         // ① Virtual Partner state (used when route mode is OFF).
         val progress = DistanceProgress()
         // Cache the ghost curve and rebuild it only when the target speed changes.
@@ -418,6 +428,9 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     private fun stopTick() {
         tickJob?.cancel()
         tickJob = null
+        // Clear the epoch so the next ride's startTick() gets a fresh stamp. A re-entered startTick()
+        // during the SAME ride (tick coroutine died) sees a non-zero epoch and leaves it intact.
+        recordingStartedEpoch = 0L
         GapStateHolder.clear()
         SegmentInfoHolder.clear()
     }
@@ -434,6 +447,9 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
             scope.launch(Dispatchers.IO) { trackStore.save(track) }
         }
         recorder.reset()
+        // Done with this ride's epoch; clear it so a fresh ride re-stamps in startTick(). stopTick()
+        // also clears it, but reset here too so the non-Idle save paths stay correct.
+        recordingStartedEpoch = 0L
     }
 
     override fun onDestroy() {
