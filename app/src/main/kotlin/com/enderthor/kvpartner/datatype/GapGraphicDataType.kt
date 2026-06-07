@@ -78,8 +78,10 @@ class GapGraphicDataType(
     private companion object {
         const val PLACEHOLDER = "---"
 
-        /** Half-width of the visible window in metres: ghost is clamped to ±this around you. */
-        const val WINDOW_M = 120.0
+        /** Half-width of the visible window in metres: ghost is clamped to ±this around you.
+         *  Shown on the field as the "±N m" scale label. Larger = more range before the dot pins
+         *  to an edge, at the cost of less sensitivity to small gaps near the centre. */
+        const val WINDOW_M = 300.0
 
         /** Fallback bitmap size when [ViewConfig.viewSize] is unavailable or non-positive. */
         const val FALLBACK_W = 200
