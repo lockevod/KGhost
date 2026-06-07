@@ -13,8 +13,14 @@ class TrackRecorder(private val decimator: TrackDecimator = TrackDecimator()) {
 
     private val buffer = mutableListOf<TrackPoint>()
 
+    // The most recent sample fed to [onSample], regardless of whether the decimator kept it. The
+    // genuine ride endpoint is usually < minSpacingM past the last kept point, so the decimator
+    // drops it; [build] re-appends it so the track is not truncated and the sourceKey is stable.
+    private var lastFed: TrackPoint? = null
+
     /** Appends a [TrackPoint] iff the [decimator] decides this sample is far enough from the last. */
     fun onSample(lat: Double, lng: Double, distanceM: Double, timeS: Double) {
+        lastFed = TrackPoint(lat, lng, distanceM, timeS)
         if (decimator.shouldKeep(lat, lng, distanceM)) {
             buffer.add(TrackPoint(lat, lng, distanceM, timeS))
         }
@@ -25,6 +31,14 @@ class TrackRecorder(private val decimator: TrackDecimator = TrackDecimator()) {
      * (a single point cannot form a comparable segment).
      */
     fun build(id: String, startedAtEpoch: Long): RecordedTrack? {
+        // Always include the true ride endpoint: if the last fed sample was decimated away (it is
+        // not already the last kept point), append it before snapshotting. This restores the up-to
+        // ~minSpacingM of track that would otherwise be lost and keeps the sourceKey stable across
+        // re-ingests of the same ride (live recording vs. later FitFiles scan).
+        val fed = lastFed
+        if (fed != null && buffer.lastOrNull() != fed) {
+            buffer.add(fed)
+        }
         if (buffer.size < 2) return null
         // total = the LAST kept point's cumulative ride distance. Drives the dedup sourceKey so a
         // later FitFiles scan re-ingesting the SAME ride collapses onto this track (same key).
@@ -44,6 +58,7 @@ class TrackRecorder(private val decimator: TrackDecimator = TrackDecimator()) {
     /** Clears the buffer and resets the decimator so the recorder can be reused for a new ride. */
     fun reset() {
         buffer.clear()
+        lastFed = null
         decimator.reset()
     }
 }
