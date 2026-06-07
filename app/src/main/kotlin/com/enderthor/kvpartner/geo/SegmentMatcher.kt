@@ -3,6 +3,7 @@ package com.enderthor.kvpartner.geo
 import com.enderthor.kvpartner.engine.GhostPick
 import com.enderthor.kvpartner.engine.LiveSegment
 import com.enderthor.kvpartner.engine.RecordedGhostSource
+import timber.log.Timber
 import java.util.Locale
 
 /**
@@ -52,6 +53,14 @@ object SegmentMatcher {
         val toleranceM: Double = 25.0,
         val minSegmentM: Double = 300.0,
         val mergeGapM: Double = 80.0,
+        /**
+         * Safety budget: process at most this many candidate tracks. When more candidates are
+         * supplied, the [maxTracks] most RECENT (largest [RecordedTrack.startedAtEpoch]) are kept
+         * and the rest are skipped (logged, never silently dropped). Deterministic given the same
+         * inputs (stable sort by epoch descending), so tests stay reproducible. With ~79 long
+         * tracks over a 42 km route this is what guarantees `match` always completes quickly.
+         */
+        val maxTracks: Int = 24,
     )
 
     /** A segment candidate produced by a single track before cross-track [GhostPick] resolution. */
@@ -72,7 +81,20 @@ object SegmentMatcher {
     ): List<LiveSegment> {
         val candidates = ArrayList<Candidate>()
 
-        for (track in tracks) {
+        // Safety budget (B): cap the candidate set to the maxTracks most-recent tracks so a large
+        // history (e.g. 79 long tracks over a 42 km route) can never make match() grind. The cap is
+        // deterministic — a stable sort by startedAtEpoch descending — so tests stay reproducible.
+        val selected = if (tracks.size > params.maxTracks) {
+            Timber.w(
+                "SegmentMatcher: capped to %d of %d candidate tracks (most-recent kept)",
+                params.maxTracks, tracks.size,
+            )
+            tracks.sortedByDescending { it.startedAtEpoch }.take(params.maxTracks)
+        } else {
+            tracks
+        }
+
+        for (track in selected) {
             val modelPoints = track.points.map { it.toModel() }
             if (modelPoints.size < 2) continue
             val trackPath = PolylinePath(modelPoints.map { LatLng(it.lat, it.lng) })
@@ -139,23 +161,28 @@ object SegmentMatcher {
     ): List<Pair<Double, Double>> {
         val total = route.totalM
         val step = coverageStepM.coerceAtMost(total)
-        val samples = ArrayList<Pair<Double, Boolean>>() // (distanceAlong, covered)
-        var d = 0.0
-        while (d < total) {
-            val p = route.pointAtDistance(d)
-            samples += d to (trackPath.nearestProjection(p).perpDistM < params.toleranceM)
-            d += step
-        }
-        // Always include the route end as a sample so a covered run reaching the end closes cleanly.
-        run {
-            val p = route.pointAtDistance(total)
-            samples += total to (trackPath.nearestProjection(p).perpDistM < params.toleranceM)
-        }
+        val tol = params.toleranceM
+
+        // Allocation-free coverage scan. The original code built an ArrayList<Pair<Double, Boolean>>
+        // of every sample and allocated a LatLng + a Projection per sample (route.totalM/25 ≈ 1700
+        // samples × N tracks → the GC storm). Here we:
+        //   - compute each sample's coordinate into the scratch DoubleArray below (no LatLng), and
+        //   - call trackPath.nearestPerpDistM (no Projection), and
+        //   - fold runs on the fly (no samples list).
+        // Result: ~O(1) allocation per sample instead of one object per sample. The run/interval
+        // boundary logic is identical to the original, so the intervals it returns are unchanged.
+        val coord = scratchCoord.get()!!
 
         val runs = ArrayList<Pair<Double, Double>>()
         var runStart = -1.0
         var prevDist = 0.0
-        for ((dist, cov) in samples) {
+        var d = 0.0
+        // Walk samples at `step`, then one final sample exactly at `total` (so a covered run reaching
+        // the end closes cleanly — same as the original explicit end sample).
+        while (true) {
+            val dist = if (d < total) d else total
+            route.pointAtDistanceInto(dist, coord)
+            val cov = trackPath.nearestPerpDistM(coord[0], coord[1]) < tol
             if (cov) {
                 if (runStart < 0.0) runStart = dist
             } else if (runStart >= 0.0) {
@@ -163,6 +190,8 @@ object SegmentMatcher {
                 runStart = -1.0
             }
             prevDist = dist
+            if (dist >= total) break
+            d += step
         }
         if (runStart >= 0.0) runs += runStart to total
 
@@ -392,16 +421,28 @@ object SegmentMatcher {
     }
 
     /**
-     * The lat/lng on [this] route at cumulative distance [distM], by linear interpolation between
-     * the two enclosing vertices. Clamps to the endpoints when out of range.
+     * Reusable scratch for [pointAtDistanceInto]'s `[lat, lng]` output, so the per-sample coverage
+     * scan never allocates a [LatLng]. ThreadLocal because `match` may be called concurrently (each
+     * thread gets its own 2-element buffer); the matcher itself is otherwise stateless.
      */
-    private fun PolylinePath.pointAtDistance(distM: Double): LatLng {
-        if (distM <= 0.0) return points.first()
-        if (distM >= totalM) return points.last()
-        // Lower-bound binary search over the non-decreasing cumulativeM: the smallest index `hi`
-        // with cumulativeM[hi] >= distM. Identical result to indexOfFirst { it >= distM } (it returns
-        // the FIRST such index, and on ties picks the lowest index — so does this lower bound), but
-        // O(log n). distM is strictly in (0, totalM) here, so such an index always exists and hi >= 1.
+    private val scratchCoord = ThreadLocal.withInitial { DoubleArray(2) }
+
+    /**
+     * The lat/lng on [this] route at cumulative distance [distM], by linear interpolation between
+     * the two enclosing vertices (clamped to the endpoints when out of range), written into the
+     * caller-supplied `out` (`out[0] = lat`, `out[1] = lng`). Allocation-free so the per-sample
+     * coverage scan in [coveredRunsToIntervals] never allocates a [LatLng] per route sample. The
+     * arithmetic (and the binary-search vertex lookup) is the original `pointAtDistance` logic that
+     * [PointAtDistanceDiffTest] pins against the brute-force reference.
+     */
+    private fun PolylinePath.pointAtDistanceInto(distM: Double, out: DoubleArray) {
+        if (distM <= 0.0) {
+            val p = points.first(); out[0] = p.lat; out[1] = p.lng; return
+        }
+        if (distM >= totalM) {
+            val p = points.last(); out[0] = p.lat; out[1] = p.lng; return
+        }
+        // Lower-bound binary search over the non-decreasing cumulativeM (see pointAtDistance).
         val hi = run {
             var lo = 0
             var high = cumulativeM.size // exclusive
@@ -414,7 +455,8 @@ object SegmentMatcher {
         val a = points[hi - 1]; val b = points[hi]
         val da = cumulativeM[hi - 1]; val db = cumulativeM[hi]
         val f = if (db == da) 0.0 else (distM - da) / (db - da)
-        return LatLng(a.lat + f * (b.lat - a.lat), a.lng + f * (b.lng - a.lng))
+        out[0] = a.lat + f * (b.lat - a.lat)
+        out[1] = a.lng + f * (b.lng - a.lng)
     }
 
     /** `BEST` -> "PR m:ss"; `LAST` -> "Last m:ss". Deterministic for tests. */

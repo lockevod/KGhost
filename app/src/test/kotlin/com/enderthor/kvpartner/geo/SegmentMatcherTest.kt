@@ -240,6 +240,45 @@ class SegmentMatcherTest {
         assertTrue("ghost time must be positive", s.ghost.totalTimeS > 0.0)
     }
 
+    /**
+     * Candidate cap (safety budget, perf fix B): when more than `maxTracks` candidates are supplied
+     * the matcher must process EXACTLY the `maxTracks` most-RECENT (largest startedAtEpoch) tracks
+     * and ignore the rest — deterministically. We give the 3 OLDEST tracks a much FASTER ghost than
+     * the 2 NEWEST. With `maxTracks = 2` keeping only the two newest, a `BEST` pick can only choose
+     * the faster of the two newest; if the cap leaked an old (faster) track, BEST would pick it and
+     * the chosen time would be far smaller. So the chosen ghost time pins which tracks were processed.
+     */
+    @Test fun `match caps to the maxTracks most-recent candidates and ignores older ones`() {
+        // All five tracks ride the SAME middle stretch (lng 0.004..0.013) so they group together.
+        // secPerStep encodes the ghost speed; epoch encodes recency.
+        fun track(id: String, epoch: Long, secPerStep: Double) =
+            com.enderthor.kvpartner.geo.RecordedTrack(
+                id, epoch,
+                (0..18).map { i -> pt(0.004 + i * 0.0005, i * 55.0, i * secPerStep).toDto() },
+            )
+
+        // Oldest three are FAST (5..7 s/step); newest two are SLOW (15, 18 s/step).
+        val old1 = track("old1", epoch = 1_000L, secPerStep = 5.0)
+        val old2 = track("old2", epoch = 2_000L, secPerStep = 6.0)
+        val old3 = track("old3", epoch = 3_000L, secPerStep = 7.0)
+        val new1 = track("new1", epoch = 10_000L, secPerStep = 15.0)
+        val new2 = track("new2", epoch = 11_000L, secPerStep = 18.0)
+        val all = listOf(old1, new2, old3, new1, old2) // deliberately unsorted input
+
+        val capped = params.copy(maxTracks = 2)
+        val segs = SegmentMatcher.match(route, all, GhostPick.BEST, capped)
+        assertEquals(1, segs.size)
+
+        // Only new1 (15 s/step) and new2 (18 s/step) were processed; BEST picks new1's ghost.
+        // new1 covers ~18 steps; its total time is ~18 * 15 = 270 s. An old (fast) track, if leaked,
+        // would yield ~90..126 s. Assert the chosen time is the slow new1, proving the cap held.
+        val chosenTime = segs.first().ghost.totalTimeS
+        assertTrue(
+            "expected new1's slow ghost (~270 s), got $chosenTime — cap must exclude faster old tracks",
+            chosenTime > 200.0,
+        )
+    }
+
     @Test fun `out-and-back track rides the shared stretch twice and yields one clean pass`() {
         // Route: A(0,0) -> B(0,0.018) east (~2 km) -> back to A. Total ~4 km.
         // Densely vertexed (~67 m) like a real decimated route, so the per-segment window of the

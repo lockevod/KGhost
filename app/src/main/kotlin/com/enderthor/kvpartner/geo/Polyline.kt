@@ -89,6 +89,40 @@ class PolylinePath(val points: List<LatLng>) {
         nearestProjectionInRange(p, Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY)
 
     /**
+     * Allocation-free perpendicular distance (m) from the point ([pLat], [pLng]) to the nearest
+     * segment of this path — the same value as `nearestProjection(LatLng(pLat, pLng)).perpDistM`,
+     * but WITHOUT allocating a [LatLng] for the query or a [Projection] for the result.
+     *
+     * This is the hot path for the coverage scan in [SegmentMatcher]: it runs once per route
+     * sample × per track (hundreds of thousands of times), and the only thing the caller needs is
+     * "is the perpendicular distance below tolerance?". Returning a primitive `Double` here removes
+     * the per-sample object churn that otherwise drives the GC storm.
+     *
+     * The arithmetic is byte-for-byte identical to [nearestProjectionInRange] over the full path
+     * (infinite window), so the perpendicular distance it returns matches `nearestProjection`
+     * exactly (proven by a differential test). Returns [Double.MAX_VALUE] only for the degenerate
+     * empty path (cannot happen: the path requires >= 2 points).
+     */
+    fun nearestPerpDistM(pLat: Double, pLng: Double): Double {
+        var bestPerp = Double.MAX_VALUE
+        val pts = points
+        val n = pts.size
+        for (i in 0 until n - 1) {
+            val a = pts[i]; val b = pts[i + 1]
+            val mPerDegLat = 111_320.0
+            val mPerDegLng = 111_320.0 * cos(Math.toRadians(a.lat))
+            val bx = (b.lng - a.lng) * mPerDegLng; val by = (b.lat - a.lat) * mPerDegLat
+            val px = (pLng - a.lng) * mPerDegLng; val py = (pLat - a.lat) * mPerDegLat
+            val segLen2 = bx * bx + by * by
+            val t = if (segLen2 == 0.0) 0.0 else ((px * bx + py * by) / segLen2).coerceIn(0.0, 1.0)
+            val fx = t * bx; val fy = t * by
+            val perp = sqrt((px - fx) * (px - fx) + (py - fy) * (py - fy))
+            if (perp < bestPerp) bestPerp = perp
+        }
+        return bestPerp
+    }
+
+    /**
      * Windowed, forward-biased projection used for live progress on out-and-back / self-overlapping
      * routes. Only considers route segments whose cumulative-distance range intersects the window
      * `[aroundDistanceM - backWindowM, aroundDistanceM + fwdWindowM]`.

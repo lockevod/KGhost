@@ -188,4 +188,24 @@ class PolylineProjectionDiffTest {
             )
         }
     }
+
+    /**
+     * Allocation-free hot-path helper (perf fix A): [PolylinePath.nearestPerpDistM] must return the
+     * SAME perpendicular distance as `nearestProjection(p).perpDistM` across random inputs. This is
+     * the value `SegmentMatcher.coveredRunsToIntervals` reads per route sample; the optimization
+     * only removes the per-call `LatLng`/`Projection` allocation, never changes the number.
+     */
+    @Test fun `nearestPerpDistM equals nearestProjection perpDistM over random inputs`() {
+        val rnd = Random(42)
+        repeat(50) {
+            val path = randomPath(rnd, rnd.nextInt(2, 80))
+            repeat(30) {
+                val q = randomQuery(rnd, path)
+                val expected = path.nearestProjection(q).perpDistM
+                val actual = path.nearestPerpDistM(q.lat, q.lng)
+                // Identical arithmetic path → bit-for-bit equal; assert with a hairline tolerance.
+                assertEquals(expected, actual, 1e-9)
+            }
+        }
+    }
 }
