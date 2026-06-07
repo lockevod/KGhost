@@ -21,8 +21,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -58,6 +60,17 @@ class GapNumericDataType(
 
     private companion object {
         const val PLACEHOLDER = "---"
+
+        /**
+         * Slow re-emit cadence so a frame ALWAYS lands after karoo-ext 1.1.9's 900 ms ViewEmitter
+         * throttle window. On a ride re-start the host re-calls [startView], but the synchronous seed
+         * frame can be throttle-dropped ("ignoring updateView, too soon"); the change-driven render
+         * loop then emits only on a real state CHANGE, so a static/inactive gap state leaves the
+         * field stuck showing its NAME (the host's default header) forever. Re-rendering the CURRENT
+         * state every [HEARTBEAT_MS] guarantees a post-throttle frame even when nothing changes. The
+         * build is cheap and ~3 s is spaced well beyond the 900 ms throttle so it always lands.
+         */
+        const val HEARTBEAT_MS = 3000L
 
         /**
          * Synthetic state shown in the profile-editor gallery (config.preview = true).
@@ -104,8 +117,21 @@ class GapNumericDataType(
 
         val viewJob = scope.launch {
             try {
-                combine(GapStateHolder.state, RenderPrefs.gapDisplay) { state, gapDisplay -> state to gapDisplay }
-                    .distinctUntilChanged()
+                // Change-driven source: emits on every real state/pref change. GapStateHolder.state
+                // is a StateFlow (dedups its own value), so this still only fires on a genuine change
+                // — no .distinctUntilChanged() here, because the heartbeat below MUST NOT be deduped
+                // against it (it intentionally re-emits the SAME current value).
+                val changes = combine(GapStateHolder.state, RenderPrefs.gapDisplay) { state, gapDisplay -> state to gapDisplay }
+                // Heartbeat: re-emits the CURRENT state every HEARTBEAT_MS so a throttle-dropped
+                // seed/first-frame can't leave the field stuck on its name. Merged INTO this single
+                // collect so all rendering stays in one coroutine.
+                val heartbeat = flow {
+                    while (true) {
+                        delay(HEARTBEAT_MS)
+                        emit(GapStateHolder.state.value to RenderPrefs.gapDisplay.value)
+                    }
+                }
+                merge(changes, heartbeat)
                     .collect { (liveState, gapDisplay) ->
                         // In preview (profile editor gallery) render a synthetic demo state so the
                         // field shows a meaningful sample instead of the inactive `---` placeholder.

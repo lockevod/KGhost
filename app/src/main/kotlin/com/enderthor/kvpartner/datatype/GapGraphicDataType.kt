@@ -24,9 +24,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -77,6 +79,18 @@ class GapGraphicDataType(
 
     private companion object {
         const val PLACEHOLDER = "---"
+
+        /**
+         * Slow re-emit cadence so a frame ALWAYS lands after karoo-ext 1.1.9's 900 ms ViewEmitter
+         * throttle window. On a ride re-start the host re-calls [startView], but the synchronous seed
+         * frame can be throttle-dropped ("ignoring updateView, too soon"); the change-driven render
+         * loop then emits only on a real state CHANGE, so a static/inactive gap state leaves the
+         * field stuck showing its NAME (the host's default header) forever. Re-rendering the CURRENT
+         * state every [HEARTBEAT_MS] guarantees a post-throttle frame even when nothing changes. The
+         * render is cheap (reused bitmap) and ~3 s is spaced well beyond the 900 ms throttle so it
+         * always lands.
+         */
+        const val HEARTBEAT_MS = 3000L
 
         /** Half-width of the visible window in metres: ghost is clamped to ±this around you.
          *  Shown on the field as the "±N m" scale label. Larger = more range before the dot pins
@@ -151,14 +165,34 @@ class GapGraphicDataType(
             // seed has already completed synchronously before this launch, so there is no concurrent
             // access to the renderer.
             try {
-                combine(
+                // Change-driven source: emits on every real state/pref/mode change. GapStateHolder
+                // .state is a StateFlow (dedups its own value), so this still only fires on a genuine
+                // change — no .distinctUntilChanged() here, because the heartbeat below MUST NOT be
+                // deduped against it (it intentionally re-emits the SAME current value).
+                val changes = combine(
                     GapStateHolder.state,
                     RenderPrefs.gapDisplay,
                     // Map to Boolean so we don't re-render on every segment-detail change — only on
                     // the route/virtual-partner mode transition.
                     SegmentInfoHolder.info.map { it != null },
                 ) { state, gapDisplay, isRoute -> Triple(state, gapDisplay, isRoute) }
-                    .distinctUntilChanged()
+                // Heartbeat: re-emits the CURRENT state every HEARTBEAT_MS so a throttle-dropped
+                // seed/first-frame can't leave the field stuck on its name. Merged INTO this single
+                // collect (NOT a separate coroutine) so the per-coroutine renderer/buffers are never
+                // touched from another coroutine — see the class KDoc.
+                val heartbeat = flow {
+                    while (true) {
+                        delay(HEARTBEAT_MS)
+                        emit(
+                            Triple(
+                                GapStateHolder.state.value,
+                                RenderPrefs.gapDisplay.value,
+                                SegmentInfoHolder.info.value != null,
+                            ),
+                        )
+                    }
+                }
+                merge(changes, heartbeat)
                     .collect { (liveState, gapDisplay, liveIsRoute) ->
                         // In preview (profile editor gallery) render a synthetic demo state so the
                         // field shows a meaningful sample instead of the inactive `---` placeholder.
