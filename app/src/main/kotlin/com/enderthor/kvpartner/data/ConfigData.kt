@@ -46,8 +46,6 @@ data class KVPartnerConfig(
     val ghostIcon: GhostIcon = GhostIcon.GHOST,
     /** On-map ghost icon size (selects a different-sized drawable; the SDK has no size field). */
     val ghostSize: GhostSize = GhostSize.MEDIUM,
-    /** When racing a route, show the fixed-pace Virtual Partner gap on stretches with no recorded-segment history (instead of `---`). */
-    val fillGapsWithVP: Boolean = true,
     /**
      * Epoch millis of the last successful history-import scan. Used by "Import new only" to skip
      * files not modified since. 0L means no scan has run yet (import everything).

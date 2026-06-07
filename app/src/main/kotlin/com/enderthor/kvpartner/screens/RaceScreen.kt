@@ -239,20 +239,6 @@ fun RaceScreen(
 
         HorizontalDivider()
 
-        // ── Fill-gaps-with-VP switch ──────────────────────────────────────────
-        SwitchRow(
-            label = stringResource(R.string.race_fill_gaps_vp),
-            description = stringResource(R.string.race_fill_gaps_vp_desc),
-            checked = config.fillGapsWithVP,
-            onCheckedChange = { fill ->
-                scope.launch {
-                    saveFailed = !configManager.updateConfig { it.copy(fillGapsWithVP = fill) }
-                }
-            },
-        )
-
-        HorizontalDivider()
-
         // ── History import ────────────────────────────────────────────────────
         ImportSection(config = config, configManager = configManager, scope = scope)
 

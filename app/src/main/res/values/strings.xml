@@ -52,8 +52,6 @@
     <string name="race_ghost_size_small">S</string>
     <string name="race_ghost_size_medium">M</string>
     <string name="race_ghost_size_large">L</string>
-    <string name="race_fill_gaps_vp">Virtual Partner in gaps</string>
-    <string name="race_fill_gaps_vp_desc">On a route, show the fixed-pace Virtual Partner gap where you have no recorded history (instead of ---).</string>
 
     <!-- Settings UI: Race tab — history import -->
     <string name="import_title">Import history</string>
