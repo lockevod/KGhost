@@ -152,7 +152,7 @@ class GapNumericDataType(
             // Three-state classification with a small epsilon so an exactly-on-pace gap renders
             // neutral (no sign, day/night colour) rather than a misleading green "+0:00".
             val status = GapDisplayLogic.gapStatus(state.gapTimeS)
-            val stateColor = context.gapStatusColor(status, neutral)
+            val stateColor = context.gapStatusColor(status, neutral, dark)
             val timeText = fmtTime(state.gapTimeS, status)
             val distText = fmtDistance(state.gapDistanceM)
             when (gapDisplay) {

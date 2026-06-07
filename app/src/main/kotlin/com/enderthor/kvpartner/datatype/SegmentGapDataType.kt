@@ -292,7 +292,7 @@ class SegmentGapDataType(
             }
 
             val status = GapDisplayLogic.gapStatus(state.gapTimeS)
-            val stateColor = context.gapStatusColor(status, neutral)
+            val stateColor = context.gapStatusColor(status, neutral, dark)
             val timeText = fmtTime(state.gapTimeS, status)
 
             if (info.hasElevation && !info.elevationProfile.isNullOrEmpty()) {
@@ -380,7 +380,7 @@ class SegmentGapDataType(
                 profilePath.lineTo(lastX, plotBottom)
                 profilePath.lineTo(firstX, plotBottom)
                 profilePath.close()
-                profileFillPaint.color = (neutral and 0x00FFFFFF) or 0x22000000
+                profileFillPaint.color = (0x22 shl 24) or (neutral and 0x00FFFFFF)
                 canvas.drawPath(profilePath, profileFillPaint)
             }
 

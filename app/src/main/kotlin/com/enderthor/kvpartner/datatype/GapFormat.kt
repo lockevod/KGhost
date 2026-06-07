@@ -16,7 +16,7 @@ import kotlin.math.roundToInt
  *
  * The pure string helpers ([fmtTime]/[fmtDistance]) are intentionally free of Android types and
  * live as top-level `internal` functions (covered by `FmtTimeTest`); the colour helper takes a
- * [Context] for the day/night-aware neutral and the `gap_ahead`/`gap_behind` resources.
+ * [Context] for the day/night-aware ahead/behind/neutral resources.
  */
 
 /** Neutral placeholder shown when there is no data or the value is non-finite. */
@@ -71,13 +71,18 @@ internal fun fmtDistance(gapDistanceM: Double): String {
 
 /**
  * Resolves the display colour for a [GapStatus]: the day/night-aware neutral for on-pace
- * ([GapStatus.NEUTRAL]), `gap_ahead` (green) when ahead and `gap_behind` (red) when behind. The
- * same three-state colour is used for both the marker/dot hue and the gap text across all fields.
+ * ([GapStatus.NEUTRAL]), a green when ahead and a red when behind. ALL three states are
+ * day/night-aware so they stay sunlight-readable: the caller passes the same [dark] flag it used to
+ * pick [neutral] (white-on-black night / black-on-white day), and ahead/behind likewise select the
+ * bright `*_night` hues on the black night background or the darkened `*_day` hues on the white day
+ * background (the bright originals were nearly invisible on white in direct sun). The same
+ * three-state colour is used for both the marker/dot hue and the gap text across all fields.
  *
  * @param neutral the already-resolved neutral colour for the current day/night mode.
+ * @param dark the current day/night mode (the SAME flag used to pick [neutral]): true = night.
  */
-internal fun Context.gapStatusColor(status: GapStatus, neutral: Int): Int = when (status) {
+internal fun Context.gapStatusColor(status: GapStatus, neutral: Int, dark: Boolean): Int = when (status) {
     GapStatus.NEUTRAL -> neutral
-    GapStatus.AHEAD -> getColor(R.color.gap_ahead)
-    GapStatus.BEHIND -> getColor(R.color.gap_behind)
+    GapStatus.AHEAD -> getColor(if (dark) R.color.gap_ahead_night else R.color.gap_ahead_day)
+    GapStatus.BEHIND -> getColor(if (dark) R.color.gap_behind_night else R.color.gap_behind_day)
 }

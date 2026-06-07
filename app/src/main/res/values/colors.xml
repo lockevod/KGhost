@@ -1,5 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="gap_ahead">#FF16C64F</color>
-    <color name="gap_behind">#FFFF3B30</color>
+    <!--
+        Gap status hues are day/night-aware for sunlight readability (mirrors how the neutral
+        text colour is chosen black-on-white / white-on-black at render time). The *_night hues
+        are the original bright values (high contrast on the black night background); the *_day
+        hues are darkened so they clear WCAG AA (>=4.5:1) on the white day background, where the
+        bright originals were nearly invisible in direct sun (green was ~2.3:1).
+    -->
+    <!-- Night (black background): bright green ~9.2:1, bright red ~5.9:1. -->
+    <color name="gap_ahead_night">#FF16C64F</color>
+    <color name="gap_behind_night">#FFFF3B30</color>
+    <!-- Day (white background): dark forest green ~5.3:1, dark red ~6.2:1. -->
+    <color name="gap_ahead_day">#FF0A7D2C</color>
+    <color name="gap_behind_day">#FFC1121F</color>
 </resources>

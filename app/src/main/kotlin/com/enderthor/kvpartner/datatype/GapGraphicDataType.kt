@@ -280,7 +280,7 @@ class GapGraphicDataType(
             // Three-state classification with a small epsilon: an exactly-on-pace gap renders neutral
             // (day/night colour, no leading sign) rather than a misleading green "+0:00".
             val status = GapDisplayLogic.gapStatus(state.gapTimeS)
-            val stateColor = context.gapStatusColor(status, neutral)
+            val stateColor = context.gapStatusColor(status, neutral, dark)
 
             val dotR = (h * 0.07f).coerceIn(3f, 14f)
             // Ghost dot (grey) first so an overlap draws your dot on top.
