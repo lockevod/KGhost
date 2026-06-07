@@ -24,12 +24,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.enderthor.kvpartner.R
 import com.enderthor.kvpartner.data.KVPartnerConfig
 import com.enderthor.kvpartner.geo.TrackStore
+import com.enderthor.kvpartner.geo.TrackStorage
 import com.enderthor.kvpartner.managers.ConfigurationManager
 import com.enderthor.kvpartner.screens.PartnerScreen
 import com.enderthor.kvpartner.screens.RaceScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.File
 
 /**
  * Settings UI for the KVPartner extension.
@@ -74,7 +74,7 @@ fun TabLayout() {
     var trackCount by remember { mutableStateOf<Int?>(null) }
     LaunchedEffect(Unit) {
         trackCount = withContext(Dispatchers.IO) {
-            try { TrackStore(File(context.filesDir, "tracks")).allTrackIds().size } catch (_: Exception) { null }
+            try { TrackStore(TrackStorage.tracksDir(context)).allTrackIds().size } catch (_: Exception) { null }
         }
     }
 

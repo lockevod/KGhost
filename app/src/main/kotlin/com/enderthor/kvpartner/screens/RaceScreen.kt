@@ -36,6 +36,7 @@ import com.enderthor.kvpartner.R
 import com.enderthor.kvpartner.data.KVPartnerConfig
 import com.enderthor.kvpartner.engine.GhostPick
 import com.enderthor.kvpartner.geo.TrackStore
+import com.enderthor.kvpartner.geo.TrackStorage
 import com.enderthor.kvpartner.import_.HistoryImporter
 import com.enderthor.kvpartner.import_.ImportProgress
 import com.enderthor.kvpartner.managers.ConfigurationManager
@@ -45,6 +46,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.File
 
@@ -286,17 +288,21 @@ private fun ImportSection(
     fun startImport(onlyNew: Boolean) {
         progress = null
         canceled = false
-        val importer = HistoryImporter(
-            fitFilesDir = File("/sdcard/FitFiles"),
-            importDir = File("/sdcard/KVPartner"),
-            trackStore = TrackStore(File(context.filesDir, "tracks")),
-            decimate = HistoryImporter::defaultDecimate,
-            lastScanProvider = { currentConfig.lastScanEpoch },
-            lastScanSetter = { epoch ->
-                scope.launch { configManager.updateConfig { it.copy(lastScanEpoch = epoch) } }
-            },
-        )
         importJob = scope.launch {
+            // TrackStorage.tracksDir() does file IO (mkdirs + one-time migration), so build the
+            // store on Dispatchers.IO rather than on the Main-thread button click.
+            val importer = withContext(Dispatchers.IO) {
+                HistoryImporter(
+                    fitFilesDir = File("/sdcard/FitFiles"),
+                    importDir = File("/sdcard/KVPartner"),
+                    trackStore = TrackStore(TrackStorage.tracksDir(context)),
+                    decimate = HistoryImporter::defaultDecimate,
+                    lastScanProvider = { currentConfig.lastScanEpoch },
+                    lastScanSetter = { epoch ->
+                        scope.launch { configManager.updateConfig { it.copy(lastScanEpoch = epoch) } }
+                    },
+                )
+            }
             importer.import(onlyNew = onlyNew)
                 .flowOn(Dispatchers.IO)
                 .collect { progress = it }

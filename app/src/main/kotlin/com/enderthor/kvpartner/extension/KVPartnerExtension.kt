@@ -22,6 +22,7 @@ import com.enderthor.kvpartner.geo.PolylinePath
 import com.enderthor.kvpartner.geo.SegmentMatcher
 import com.enderthor.kvpartner.geo.TrackRecorder
 import com.enderthor.kvpartner.geo.TrackStore
+import com.enderthor.kvpartner.geo.TrackStorage
 import com.enderthor.kvpartner.managers.ConfigurationManager
 import com.enderthor.kvpartner.map.GhostMapPresenter
 import com.enderthor.kvpartner.map.GhostMarker
@@ -177,7 +178,10 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         instance = this
         configManager = ConfigurationManager(applicationContext)
         karooSystem = KarooSystemService(applicationContext)
-        trackStore = TrackStore(File(applicationContext.filesDir, "tracks"))
+        // tracksDir() does file IO (mkdirs + one-time migration); onCreate runs off the main
+        // thread for an extension service, so it's safe here. Resolves shared external storage
+        // when all-files access is granted, else falls back to internal.
+        trackStore = TrackStore(TrackStorage.tracksDir(applicationContext))
         // loadConfigFlow() already applies migrateToLatest(); no need to migrate again here.
         configManager.loadConfigFlow().onEach { activeConfig.value = it }.launchIn(scope)
         // Feed the render-prefs holder so the data fields don't each open their own DataStore
