@@ -49,7 +49,7 @@ object GpxParser {
         val text = raw.trim()
         if (text.isEmpty()) return null
         return runCatching { Instant.parse(text).toEpochMilli() }.getOrNull()
-            ?: runCatching { fallbackFormat.parse(text).time }.getOrNull()
+            ?: runCatching { fallbackFormat.parse(text)?.time }.getOrNull()
     }
 
     private class GpxHandler : DefaultHandler() {
@@ -111,8 +111,9 @@ object GpxParser {
         }
 
         override fun endDocument() {
-            // Need at least one point, and every point must have a parsed time to race against.
-            if (raw.isEmpty() || raw.any { it.timeEpochMs == null }) {
+            // Need at least two points (parity with FitDecoder's >= 2 rule — a single-point track
+            // is not a usable ride), and every point must have a parsed time to race against.
+            if (raw.size < 2 || raw.any { it.timeEpochMs == null }) {
                 result = null
                 return
             }

@@ -43,4 +43,8 @@ class GpxParserTest {
     @Test fun `returns null when any trackpoint lacks a time`() {
         assertNull(GpxParser.parse(resource("sample_notime.gpx")))
     }
+
+    @Test fun `returns null for a single-trackpoint GPX (parity with FitDecoder's two-point rule)`() {
+        assertNull(GpxParser.parse(resource("sample_single.gpx")))
+    }
 }

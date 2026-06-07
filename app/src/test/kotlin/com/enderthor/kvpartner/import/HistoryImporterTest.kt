@@ -2,6 +2,7 @@ package com.enderthor.kvpartner.import_
 
 import com.enderthor.kvpartner.geo.RecordedTrack
 import com.enderthor.kvpartner.geo.Source
+import com.enderthor.kvpartner.geo.TrackDecimator
 import com.enderthor.kvpartner.geo.TrackPointDto
 import com.enderthor.kvpartner.geo.TrackStore
 import kotlinx.coroutines.flow.toList
@@ -79,6 +80,45 @@ class HistoryImporterTest {
 
         // sanity: the unique track was actually persisted.
         assertEquals(listOf("unique"), store.allTrackIds())
+    }
+
+    @Test fun `defaultDecimate keys off decimated total, matching the recorder path`() {
+        // DEFECT 1 regression: ② (TrackRecorder) keys off the DECIMATED tail; ③ (FitDecoder/
+        // GpxParser) key off the RAW pre-decimation total. When the dropped tail crosses a 10 m
+        // bucket boundary the two keys diverge and the same ride is stored twice.
+        val startedAt = 1_700_000_000_000L
+
+        // Dense ride: 51 points 0..250 m at 5 m spacing. A TrackDecimator(20.0) keeps
+        // 0, 20, 40, ... 240 (decimated tail = 240 m, bucket 24), but the raw tail is 250 m
+        // (bucket 25) — so the raw-keyed and decimated-keyed sourceKeys differ.
+        val rawPoints = (0..50).map { i ->
+            TrackPointDto(lat = 0.0, lng = 0.0, distanceM = i * 5.0, timeS = i.toDouble())
+        }
+
+        // What FitDecoder/GpxParser produce: sourceKey from the RAW total.
+        val rawLastDistance = rawPoints.last().distanceM
+        val rawTrack = RecordedTrack(
+            id = "scan",
+            startedAtEpoch = startedAt,
+            points = rawPoints,
+            sourceKey = sourceKeyOf(startedAt, rawLastDistance),
+            source = Source.FITFILES_SCAN,
+        )
+
+        // ②'s path: run the same raw points through the decimator and key off the decimated tail.
+        val decimator = TrackDecimator(20.0)
+        val decimatedTotal = rawPoints
+            .filter { decimator.shouldKeep(it.lat, it.lng, it.distanceM) }
+            .last().distanceM
+        val recorderKey = sourceKeyOf(startedAt, decimatedTotal)
+
+        // Guard: the raw-keyed and decimated-keyed sourceKeys MUST differ, otherwise the test
+        // would pass even on the buggy code and prove nothing.
+        assertEquals(false, rawTrack.sourceKey == recorderKey)
+
+        // ③'s path after the fix: defaultDecimate must recompute the key off the decimated tail.
+        val decimatedTrack = HistoryImporter.defaultDecimate(rawTrack)
+        assertEquals(recorderKey, decimatedTrack.sourceKey)
     }
 
     @Test fun `onlyNew with future lastScan processes nothing`() = runTest {

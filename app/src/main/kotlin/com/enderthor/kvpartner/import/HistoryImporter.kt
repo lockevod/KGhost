@@ -127,7 +127,10 @@ class HistoryImporter(
         fun defaultDecimate(track: RecordedTrack): RecordedTrack {
             val decimator = TrackDecimator(20.0)
             val kept = track.points.filter { decimator.shouldKeep(it.lat, it.lng, it.distanceM) }
-            return track.copy(points = kept)
+            // Recompute the dedup key off the DECIMATED tail so a scanned/imported ride collapses
+            // onto the same key ② (TrackRecorder) produces from its already-decimated buffer.
+            val total = kept.lastOrNull()?.distanceM ?: 0.0
+            return track.copy(points = kept, sourceKey = sourceKeyOf(track.startedAtEpoch, total))
         }
     }
 }
