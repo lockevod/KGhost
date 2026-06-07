@@ -111,6 +111,56 @@ class SegmentMatcherTest {
      * (frozen tail). The pass-segregated extraction walks the track in recorded order and keeps the
      * longest contiguous monotonic pass, so the ghost again covers the full segment width.
      */
+    /**
+     * F1 regression: a CLEAN single-pass overlap that is split into two contiguous runs by ONE
+     * disruptive point (a GPS spike / roundabout / brief off-route blip) in the middle.
+     *
+     * The coverage interval stays ONE wide span because neighbouring track points still cover the
+     * route around the blip (so the coverage gap is < mergeGapM and the interval is not split). But
+     * the blip breaks the monotonic walk inside [extractTrackSlice] into two runs. The longest-run
+     * code kept only the longer half, so ghost.totalDistanceM ≈ half the span and the frozen tail
+     * returned for the uncovered remainder. The stitch fix keeps the monotonic SUBSEQUENCE across
+     * the whole interval (skipping the blip but not terminating the run), so the ghost again covers
+     * the full span.
+     */
+    @Test fun `single-pass overlap split by a mid-segment blip still yields full-span ghost`() {
+        // Track rides the middle ~1 km east (lng 0.004..0.013), 19 points at 5 m/s, EXCEPT point #9
+        // which spikes off-route (a GPS glitch: it jumps back west AND ~167 m north). The single
+        // spike does NOT uncover the surrounding route samples, so the coverage interval stays ONE
+        // wide span (~1025 m); but it breaks the forward-biased monotonic walk into two contiguous
+        // runs. Distances/times stay cumulative (a real ride never rewinds the odometer).
+        val pts = (0..18).map { i ->
+            val lng = 0.004 + i * 0.0005
+            if (i == 9) {
+                // Off-route spike: west of the run start (lng 0.0005) and ~167 m north of the route.
+                com.enderthor.kvpartner.geo.TrackPoint(
+                    lat = 0.0015, lng = 0.0005, distanceM = i * 55.0, timeS = i * 11.0,
+                )
+            } else {
+                pt(lng, distanceM = i * 55.0, t = i * 11.0)
+            }
+        }
+        val track = com.enderthor.kvpartner.geo.RecordedTrack(
+            id = "blip", startedAtEpoch = 1_000L,
+            points = pts.map { it.toDto() },
+        )
+
+        val segs = SegmentMatcher.match(route, listOf(track), GhostPick.BEST, params)
+        assertTrue("expected at least one segment, got ${segs.size}", segs.isNotEmpty())
+
+        val s = segs.first()
+        val span = s.routeEndM - s.routeStartM
+        val ghostM = s.ghost.totalDistanceM
+        val ratio = ghostM / span
+        // On the longest-run code this is ~0.5 (the blip halves the kept run). After the stitch fix
+        // the monotonic subsequence spans the whole interval, so the ghost is within ~15 %.
+        assertTrue(
+            "ghost.totalDistanceM ($ghostM) should be within 15% of span ($span), ratio=$ratio",
+            ratio in 0.85..1.15,
+        )
+        assertEquals(0.0, s.ghost.timeAt(0.0), 1e-6)
+    }
+
     @Test fun `out-and-back track rides the shared stretch twice and yields one clean pass`() {
         // Route: A(0,0) -> B(0,0.018) east (~2 km) -> back to A. Total ~4 km.
         // Densely vertexed (~67 m) like a real decimated route, so the per-segment window of the

@@ -82,7 +82,7 @@ object SegmentMatcher {
 
             // Step 4 + 5 (ghost): one candidate per interval.
             for (interval in intervals) {
-                val slice = extractTrackSlice(route, modelPoints, interval)
+                val slice = extractTrackSlice(route, modelPoints, interval, params.toleranceM)
                     ?: continue // < 2 usable points after extraction/dedup
                 val label0 = "" // filled below once we know the ghost time
                 val ghost = RecordedGhostSource.fromTrackSlice(slice, label0).curve()
@@ -196,89 +196,126 @@ object SegmentMatcher {
     private const val sliceBackWindowM = 30.0
 
     /**
-     * Extracts ONE clean monotonic pass of the track over `[interval]` of the route.
+     * Extracts ONE clean monotonic pass of the track over `[interval]` of the route by STITCHING the
+     * monotonic subsequence of in-interval track points across the whole interval.
      *
-     * The old implementation projected every track point by GLOBAL nearest and bucketed by
-     * `[startM, endM]`. On an out-and-back route the outbound track points were geometrically valid
-     * on BOTH the outbound and return vertex ranges, so they smeared across both intervals: the
-     * resulting per-interval slice was non-monotonic in route-distance, the dedup dropped points,
-     * and the ghost shrank (frozen tail re-emerged).
+     * The original (pre-②) implementation projected every track point by GLOBAL nearest and bucketed
+     * by `[startM, endM]`. On an out-and-back route the outbound track points were geometrically
+     * valid on BOTH the outbound and return vertex ranges, so they smeared across both intervals: the
+     * per-interval slice became non-monotonic in route-distance, the dedup dropped points, and the
+     * ghost shrank (frozen tail re-emerged).
      *
-     * Instead we walk the TRACK in recorded order and collect the LONGEST contiguous run of points
-     * whose route-projection — seeded forward-biased from the previous kept point's route-distance —
-     * stays inside `[startM, endM]` and is monotonic in route-distance. That yields a single pass
-     * over the interval. The first point of each candidate run is seeded with a GLOBAL projection so
-     * a run can start anywhere; every following point is projected within a window ahead of the
-     * previous one, so the OTHER pass (whose route-distance runs the opposite way) is never picked.
+     * The out-and-back fix then walked the track in recorded order and kept only the LONGEST
+     * contiguous run of in-interval, monotonic points. That cured the smear but OVER-restricted: on a
+     * normal SINGLE-PASS overlap split into two runs by ONE disruptive point (GPS spike, roundabout,
+     * brief off-route blip) — where `mergeGapM` bridged the coverage gap so the interval stays one
+     * wide span — it kept only the longer half, so `ghost.totalDistanceM` ≈ half the span and the
+     * frozen tail returned for the remainder (F1).
      *
-     * Reverse detection is preserved: if the chosen run descends in track distance it is reversed so
-     * the slice ascends before the ghost is built. Returns null when fewer than two usable
-     * (strictly-increasing-distance) points remain in the best run.
+     * The current implementation STITCHES the monotonic subsequence of in-interval points. Starting
+     * from a seed point it walks forward; a point is KEPT (appended to the chain) when:
+     *  - its forward-biased projection's `perpDistM < toleranceM` (F2 — the off-route guard; a spike
+     *    that jumps off the road is rejected here),
+     *  - its route-distance lands inside `[startM, endM]`,
+     *  - its track `distanceM` is STRICTLY greater than the last kept point's track distance
+     *    (monotonic in odometer — a real ride never rewinds), AND
+     *  - its route-distance does not run BACKWARD past the previous kept point (monotonic in route,
+     *    the out-and-back segregator).
+     * A point that fails any test is SKIPPED, but the walk CONTINUES (it is NOT a run boundary) and a
+     * skipped point does NOT advance the seed, so a single mid-segment blip no longer truncates the
+     * ghost — the chain stitches straight across it.
+     *
+     * Because an out-and-back route doubles back over the SAME road, a single seed chosen greedily in
+     * recorded order can latch onto the WRONG pass for an interval (e.g. an outbound point is
+     * geometrically valid on the return interval too, yet yields a degenerate chain). So we build a
+     * candidate chain from EACH possible seed point and keep the one covering the most track odometer.
+     * The track-point count is small, so the O(n²) walk is cheap.
+     *
+     * Out-and-back segregation is preserved: on the shared road the return pass is geometrically valid
+     * (perpDist≈0) on THIS interval's outbound vertices, so the windowed projection
+     * ([PolylinePath.nearestProjectionNear]) and the perpDist/interval tests alone cannot reject it.
+     * But its route-distance runs BACKWARD relative to the previous kept point, so the route-monotonic
+     * test skips it; a skip does not advance the seed, so an outbound chain never absorbs the return
+     * pass (and vice-versa). The two passes therefore form separate candidate chains, and the chain
+     * matching THIS interval's direction wins on odometer span.
+     *
+     * Reverse detection is preserved: if the kept subsequence descends in track distance overall it
+     * is reversed so the slice ascends before the ghost is built. Returns null when fewer than two
+     * usable (strictly-increasing-distance) points remain.
      */
     private fun extractTrackSlice(
         route: PolylinePath,
         trackPoints: List<TrackPoint>,
         interval: Pair<Double, Double>,
+        toleranceM: Double,
     ): List<TrackPoint>? {
         val (startM, endM) = interval
 
-        var bestRun: List<Pair<TrackPoint, Double>> = emptyList()
-        var currentRun = ArrayList<Pair<TrackPoint, Double>>()
-        var prevRouteM = Double.NaN
-
-        fun closeRun() {
-            if (currentRun.size > bestRun.size) bestRun = currentRun
-            currentRun = ArrayList()
-            prevRouteM = Double.NaN
-        }
-
-        // Seed projection for a run-start point: constrained to the interval so an ambiguous shared
-        // point (valid on both passes of an out-and-back route) is forced onto THIS interval's pass
-        // rather than the global nearest, which may belong to the other pass.
-        fun seedProjection(ll: LatLng): Double =
+        // Seed projection for a chain's first point: constrained to the interval so an ambiguous
+        // shared point (valid on both passes of an out-and-back route) is forced onto THIS interval's
+        // pass rather than the global nearest, which may belong to the other pass.
+        fun seedProjection(ll: LatLng): Projection =
             route.nearestProjectionNear(
                 ll,
                 aroundDistanceM = startM,
                 backWindowM = 0.0,
                 fwdWindowM = endM - startM,
-            ).distanceAlongM
+            )
 
-        for (tp in trackPoints) {
-            val ll = LatLng(tp.lat, tp.lng)
-            // Seed the first point of a run inside the interval; extend forward-biased thereafter.
-            val routeM = if (currentRun.isEmpty()) {
-                seedProjection(ll)
-            } else {
-                route.nearestProjectionNear(
-                    ll,
-                    aroundDistanceM = prevRouteM,
-                    backWindowM = sliceBackWindowM,
-                    fwdWindowM = sliceFwdWindowM,
-                ).distanceAlongM
-            }
-
-            val insideInterval = routeM in startM..endM
-            // Monotonic forward in route-distance (allow equal: dedup handles it later).
-            val monotonic = currentRun.isEmpty() || routeM >= prevRouteM - sliceBackWindowM
-
-            if (insideInterval && monotonic) {
-                currentRun.add(tp to routeM)
-                prevRouteM = routeM
-            } else {
-                closeRun()
-                // The breaking point may itself start a fresh run if it lands inside the interval.
-                val seedM = seedProjection(ll)
-                if (seedM in startM..endM) {
-                    currentRun.add(tp to seedM)
-                    prevRouteM = seedM
+        // Builds the stitched chain that starts at [seedIndex] (skipping blips, never terminating on
+        // one). Returns the kept (point, routeM) pairs; empty if the seed itself is not in-interval.
+        fun buildChain(seedIndex: Int): List<Pair<TrackPoint, Double>> {
+            val kept = ArrayList<Pair<TrackPoint, Double>>()
+            var prevRouteM = Double.NaN
+            for (i in seedIndex until trackPoints.size) {
+                val tp = trackPoints[i]
+                val ll = LatLng(tp.lat, tp.lng)
+                val proj = if (kept.isEmpty()) {
+                    seedProjection(ll)
+                } else {
+                    route.nearestProjectionNear(
+                        ll,
+                        aroundDistanceM = prevRouteM,
+                        backWindowM = sliceBackWindowM,
+                        fwdWindowM = sliceFwdWindowM,
+                    )
                 }
+                val routeM = proj.distanceAlongM
+                val onRoute = proj.perpDistM < toleranceM
+                val insideInterval = routeM in startM..endM
+                val monotonicOdometer = kept.isEmpty() || tp.distanceM > kept.last().first.distanceM
+                val monotonicRoute = kept.isEmpty() || routeM >= prevRouteM - sliceBackWindowM
+                if (onRoute && insideInterval && monotonicOdometer && monotonicRoute) {
+                    kept.add(tp to routeM)
+                    prevRouteM = routeM
+                }
+                // else: skip but continue — a single blip does not break the chain.
+            }
+            return kept
+        }
+
+        // Build a candidate chain from every possible seed and keep the one that COVERS the most of
+        // the interval — measured by route-distance span (last routeM − first routeM), with kept
+        // point-count as a tiebreaker. A greedy single seed can latch onto the wrong pass of an
+        // out-and-back route and produce a degenerate 2-point chain whose ODOMETER span is huge but
+        // whose ROUTE coverage is tiny; ranking by route-span (not odometer-span) rejects it.
+        var best: List<Pair<TrackPoint, Double>> = emptyList()
+        var bestRouteSpan = -1.0
+        for (seed in trackPoints.indices) {
+            val chain = buildChain(seed)
+            if (chain.size < 2) continue
+            val routeSpan = chain.last().second - chain.first().second
+            if (routeSpan > bestRouteSpan ||
+                (routeSpan == bestRouteSpan && chain.size > best.size)
+            ) {
+                bestRouteSpan = routeSpan
+                best = chain
             }
         }
-        closeRun()
 
-        if (bestRun.size < 2) return null
+        if (best.size < 2) return null
 
-        val inside = bestRun.map { it.first }
+        val inside = best.map { it.first }
 
         // Reverse detection: if track distance decreases as route distance increases, the track
         // was ridden opposite to the route -> reverse so the slice ascends in track distance.
