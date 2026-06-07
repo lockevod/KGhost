@@ -52,8 +52,8 @@
     <string name="import_permission_title">Storage access needed</string>
     <string name="import_permission_description">KVPartner needs all-files access to read your recorded rides from /sdcard/FitFiles and the files you drop in /sdcard/KVPartner.</string>
     <string name="import_permission_grant">Grant access</string>
-    <string name="import_all">Import history</string>
-    <string name="import_new_only">Import new only</string>
+    <string name="import_all">All</string>
+    <string name="import_new_only">New only</string>
     <string name="import_cancel">Cancel</string>
     <string name="import_scanning">Scanning files…</string>
     <string name="import_parsing">Parsing %1$d / %2$d…</string>
