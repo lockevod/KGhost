@@ -165,21 +165,27 @@ class GapGraphicDataType(
             // seed has already completed synchronously before this launch, so there is no concurrent
             // access to the renderer.
             try {
-                // Change-driven source: emits on every real state/pref/mode change. GapStateHolder
-                // .state is a StateFlow (dedups its own value), so this still only fires on a genuine
-                // change — no .distinctUntilChanged() here, because the heartbeat below MUST NOT be
-                // deduped against it (it intentionally re-emits the SAME current value).
+                // Wall-clock (ms) of the last frame we actually emitted. Makes the heartbeat
+                // IDLE-ONLY: it re-emits only when no change frame went out in the last HEARTBEAT_MS,
+                // so it no longer collides with the ~1 Hz change emits (which the host would drop with
+                // "ignoring updateView, too soon") while still guaranteeing a post-throttle frame when
+                // the state is static (anti-stuck).
+                var lastEmitMs = 0L
+                // Change-driven source (isHeartbeat = false): emits on every real state/pref/mode
+                // change. GapStateHolder.state is a StateFlow (dedups its own value), so this still
+                // only fires on a genuine change — no .distinctUntilChanged() here, because the
+                // heartbeat below MUST NOT be deduped against it (it re-emits the SAME current value).
                 val changes = combine(
                     GapStateHolder.state,
                     RenderPrefs.gapDisplay,
                     // Map to Boolean so we don't re-render on every segment-detail change — only on
                     // the route/virtual-partner mode transition.
                     SegmentInfoHolder.info.map { it != null },
-                ) { state, gapDisplay, isRoute -> Triple(state, gapDisplay, isRoute) }
-                // Heartbeat: re-emits the CURRENT state every HEARTBEAT_MS so a throttle-dropped
-                // seed/first-frame can't leave the field stuck on its name. Merged INTO this single
-                // collect (NOT a separate coroutine) so the per-coroutine renderer/buffers are never
-                // touched from another coroutine — see the class KDoc.
+                ) { state, gapDisplay, isRoute -> Triple(state, gapDisplay, isRoute) to false }
+                // Heartbeat (isHeartbeat = true): re-emits the CURRENT state every HEARTBEAT_MS so a
+                // throttle-dropped seed/first-frame can't leave the field stuck on its name. Merged
+                // INTO this single collect (NOT a separate coroutine) so the per-coroutine
+                // renderer/buffers are never touched from another coroutine — see the class KDoc.
                 val heartbeat = flow {
                     while (true) {
                         delay(HEARTBEAT_MS)
@@ -188,12 +194,17 @@ class GapGraphicDataType(
                                 GapStateHolder.state.value,
                                 RenderPrefs.gapDisplay.value,
                                 SegmentInfoHolder.info.value != null,
-                            ),
+                            ) to true,
                         )
                     }
                 }
                 merge(changes, heartbeat)
-                    .collect { (liveState, gapDisplay, liveIsRoute) ->
+                    .collect { (data, isHeartbeat) ->
+                        val now = System.currentTimeMillis()
+                        // Drop the periodic heartbeat if a real frame already went out recently — this
+                        // is what removes the every-3 s "too soon" collisions during a ride.
+                        if (isHeartbeat && now - lastEmitMs < HEARTBEAT_MS) return@collect
+                        val (liveState, gapDisplay, liveIsRoute) = data
                         // In preview (profile editor gallery) render a synthetic demo state so the
                         // field shows a meaningful sample instead of the inactive `---` placeholder.
                         val state = if (config.preview) DEMO_STATE else liveState
@@ -203,6 +214,7 @@ class GapGraphicDataType(
                         val rv = RemoteViews(context.packageName, R.layout.field_gap)
                         rv.setImageViewBitmap(R.id.field_gap_image, bmp)
                         emitter.updateView(rv)
+                        lastEmitMs = now
                     }
             } catch (_: CancellationException) {
                 Timber.d("KVP gap-graphic loop cancelled (field removed)")
