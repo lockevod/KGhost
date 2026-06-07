@@ -27,7 +27,6 @@ import com.enderthor.kvpartner.geo.TrackStore
 import com.enderthor.kvpartner.managers.ConfigurationManager
 import com.enderthor.kvpartner.screens.PartnerScreen
 import com.enderthor.kvpartner.screens.RaceScreen
-import com.enderthor.kvpartner.screens.SettingsScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -83,7 +82,6 @@ fun TabLayout() {
     val tabTitles = listOf(
         stringResource(R.string.tab_partner),
         stringResource(R.string.tab_race),
-        stringResource(R.string.tab_settings),
     )
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -92,14 +90,20 @@ fun TabLayout() {
                 Tab(
                     selected = selectedTab == index,
                     onClick = { selectedTab = index },
-                    text = { Text(title) },
+                    text = {
+                        Text(
+                            text = title,
+                            maxLines = 1,
+                            softWrap = false,
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                    },
                 )
             }
         }
         when (selectedTab) {
             0 -> PartnerScreen(config = config, configManager = configManager)
-            1 -> RaceScreen(config = config, configManager = configManager, recordedCount = trackCount)
-            else -> SettingsScreen(config = config, configManager = configManager)
+            else -> RaceScreen(config = config, configManager = configManager, recordedCount = trackCount)
         }
     }
 }

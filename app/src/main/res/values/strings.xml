@@ -12,7 +12,6 @@
 
     <!-- Settings UI: tabs -->
     <string name="tab_partner">Partner</string>
-    <string name="tab_settings">Settings</string>
 
     <!-- Settings UI: Partner tab -->
     <string name="partner_title">Virtual Partner target</string>
@@ -26,10 +25,6 @@
     <string name="partner_clear">Clear target</string>
     <string name="partner_invalid">Enter a target greater than 0.</string>
     <string name="settings_save_failed">Could not save. Please try again.</string>
-
-    <!-- Settings UI: Settings tab -->
-    <string name="settings_title">Display preferences</string>
-    <string name="settings_gap_display">Gap display</string>
 
     <!-- Settings UI: Race tab -->
     <string name="tab_race">Race</string>
