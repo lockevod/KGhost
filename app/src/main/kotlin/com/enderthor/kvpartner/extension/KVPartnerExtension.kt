@@ -1,5 +1,6 @@
 package com.enderthor.kvpartner.extension
 
+import com.enderthor.kvpartner.R
 import com.enderthor.kvpartner.data.KVPartnerConfig
 import com.enderthor.kvpartner.datatype.GapGraphicDataType
 import com.enderthor.kvpartner.datatype.GapNumericDataType
@@ -23,12 +24,21 @@ import com.enderthor.kvpartner.geo.SegmentMatcher
 import com.enderthor.kvpartner.geo.TrackRecorder
 import com.enderthor.kvpartner.geo.TrackStore
 import com.enderthor.kvpartner.managers.ConfigurationManager
+import com.enderthor.kvpartner.map.GhostMapPresenter
+import com.enderthor.kvpartner.map.GhostMarker
+import com.enderthor.kvpartner.map.MapEmit
+import com.enderthor.kvpartner.map.decideMapEmit
 import io.hammerhead.karooext.KarooSystemService
 import io.hammerhead.karooext.extension.KarooExtension
+import io.hammerhead.karooext.internal.Emitter
 import io.hammerhead.karooext.models.DataType
+import io.hammerhead.karooext.models.HideSymbols
+import io.hammerhead.karooext.models.MapEffect
 import io.hammerhead.karooext.models.OnNavigationState
 import io.hammerhead.karooext.models.RideState
+import io.hammerhead.karooext.models.ShowSymbols
 import io.hammerhead.karooext.models.StreamState
+import io.hammerhead.karooext.models.Symbol
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -88,6 +98,12 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
          * two-dot track render (render B). Keeps flat segments from showing a noisy flat silhouette.
          */
         private const val ELEV_GAIN_THRESHOLD_M = 30.0
+
+        /** Stable id for the ghost map symbol — re-emitting the same id MOVES the marker. */
+        private const val GHOST_SYMBOL_ID = "kvpartner-ghost"
+
+        /** Minimum projected movement (m) before re-emitting ShowSymbols (suppresses jitter/stops). */
+        private const val MARKER_MIN_MOVE_M = 5.0
     }
 
     lateinit var karooSystem: KarooSystemService
@@ -128,6 +144,14 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     // navigation-state collector (off Main), read by the tick — hence @Volatile.
     @Volatile
     private var routeMode: RouteMode? = null
+
+    // ④ map overlay. The map emitter is supplied by the host via startMap() on its own thread, so it
+    // is @Volatile. lastGhostMarker is the last marker we emitted (edge-trigger state); read on the
+    // tick (Main) AND written from clear/stop paths, so it is @Volatile too.
+    @Volatile
+    private var mapEmitter: Emitter<MapEffect>? = null
+    @Volatile
+    private var lastGhostMarker: GhostMarker? = null
 
     // The on-screen data fields rendering the GapState. typeIds must match extension_info.xml
     // exactly ("kvpartner-gap", "kvpartner-gap-num" and "kvpartner-segment").
@@ -193,6 +217,44 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     }
 
     /**
+     * The host calls this to receive map overlay effects. We keep the emitter and feed it the ghost
+     * marker from the ② branch of the tick. setCancellable nulls it when the host tears the map down.
+     */
+    override fun startMap(emitter: Emitter<MapEffect>) {
+        mapEmitter = emitter
+        lastGhostMarker = null
+        emitter.setCancellable {
+            mapEmitter = null
+            lastGhostMarker = null
+        }
+    }
+
+    /**
+     * Reconciles the desired ghost marker against what is currently shown and emits the minimal
+     * MapEffect: Show (first time or moved >= MARKER_MIN_MOVE_M), Hide (was shown, now gone), or
+     * nothing. Idempotent and safe to call from any path (tick, clear, stop).
+     */
+    private fun publishGhostMarker(next: GhostMarker?) {
+        val em = mapEmitter ?: return
+        when (val decision = decideMapEmit(lastGhostMarker, next, MARKER_MIN_MOVE_M)) {
+            is MapEmit.Show -> {
+                val m = decision.marker
+                em.onNext(
+                    ShowSymbols(
+                        listOf(Symbol.Icon(GHOST_SYMBOL_ID, m.lat, m.lng, R.drawable.ic_ghost, m.bearingDeg)),
+                    ),
+                )
+                lastGhostMarker = m
+            }
+            MapEmit.Hide -> {
+                em.onNext(HideSymbols(listOf(GHOST_SYMBOL_ID)))
+                lastGhostMarker = null
+            }
+            MapEmit.None -> {}
+        }
+    }
+
+    /**
      * Reacts to a navigation-state change. On [OnNavigationState.NavigationState.NavigatingRoute]
      * (and only when racing is enabled) it decodes the route, loads candidate tracks, runs the
      * matcher, fills the per-segment elevation profile, and switches the tick to route mode. Any
@@ -238,6 +300,7 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     private fun clearRouteMode() {
         routeMode = null
         SegmentInfoHolder.clear()
+        publishGhostMarker(null)
     }
 
     /**
@@ -384,6 +447,7 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                             activeSegmentStartM = null
                             GapStateHolder.clear()
                             SegmentInfoHolder.clear()
+                            publishGhostMarker(null)
                             return@onEach
                         }
                         // Per-segment entry clock: when the active segment changes (or we just
@@ -396,13 +460,20 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                         val progressM = routeDist - seg.routeStartM
                         val elapsedInSeg = elapsedS - segmentEntryElapsedS
                         val fresh = StalenessLogic.isTrustworthy(rp.isFresh && rp.onRoute, speedMs)
-                        GapStateHolder.update(
-                            GapCalculator.compute(progressM, elapsedInSeg, seg.ghost, fresh),
-                        )
+                        val gap = GapCalculator.compute(progressM, elapsedInSeg, seg.ghost, fresh)
+                        GapStateHolder.update(gap)
                         SegmentInfoHolder.set(seg.toInfo())
+                        // ④ ghost-on-map: project the ghost's time-based route position and emit.
+                        val marker = if (activeConfig.value.showGhostOnMap) {
+                            GhostMapPresenter.marker(seg.routeStartM + gap.ghostProgressM, rm.path, fresh)
+                        } else {
+                            null
+                        }
+                        publishGhostMarker(marker)
                     } else {
                         // ① Virtual Partner mode — unchanged from sub-project ①.
                         SegmentInfoHolder.clear()
+                        publishGhostMarker(null)
                         val target = activeConfig.value.validTargetOrNull()
                         if (target == null) {
                             GapStateHolder.clear()
@@ -433,6 +504,7 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         recordingStartedEpoch = 0L
         GapStateHolder.clear()
         SegmentInfoHolder.clear()
+        publishGhostMarker(null)
     }
 
     /**
