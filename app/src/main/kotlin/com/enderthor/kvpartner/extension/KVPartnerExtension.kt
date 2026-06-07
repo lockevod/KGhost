@@ -515,7 +515,10 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                             GapCalculator.compute(progress.progressM, elapsedS, cachedCurve!!, trustworthy),
                         )
                     }
-                    }.onFailure { Timber.e(it, "tick iteration failed") }
+                    }.onFailure { e ->
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        Timber.e(e, "tick iteration failed")
+                    }
                 }
                 .collect {}
         }
