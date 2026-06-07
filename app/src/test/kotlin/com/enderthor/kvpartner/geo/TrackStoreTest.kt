@@ -312,6 +312,74 @@ class TrackStoreTest {
         assertEquals(listOf("DIAG"), store.loadCandidates(onPath).map { it.id })
     }
 
+    @Test fun `save before the first candidate read migrates the legacy bbox index first`() {
+        // PRE-EMPTION-FIX PROOF.
+        //
+        // On an upgraded device the on-disk index.json is legacy (bbox-cell) and the .pathcells marker
+        // is absent. If a ride ends (-> save/addAll) BEFORE any route is loaded, the new track used to
+        // be folded onto the LEGACY snapshot and the marker written, so readPathCellSnapshot() later
+        // saw the marker and the path-cell rebuild NEVER ran. Now save() builds on the MIGRATED
+        // snapshot, so the legacy track is reindexed by its path cells first.
+        val dir = tmp.newFolder("tracks")
+
+        // A pre-existing LEGACY track: a thin diagonal whose bbox covers a wide rectangle.
+        val sw = 41.000 to 2.000
+        val ne = 41.090 to 2.090
+        val n = 200
+        val diagPts = (0..n).map { i ->
+            val f = i.toDouble() / n
+            TrackPointDto(sw.first + f * (ne.first - sw.first), sw.second + f * (ne.second - sw.second), i * 20.0, i * 4.0)
+        }
+        val diag = RecordedTrack("DIAG", 1_000L, diagPts)
+
+        // Write DIAG's <id>.json (so the migration can re-read it) and an OLD bbox-cell index.json,
+        // with NO marker — exactly the upgraded-device-before-first-load state.
+        dir.resolve("DIAG.json").writeText(
+            com.enderthor.kvpartner.extension.jsonForStorage.encodeToString(
+                kotlinx.serialization.serializer<RecordedTrack>(), diag,
+            ),
+        )
+        val diagBBox = BBox.around(diag.points.map { LatLng(it.lat, it.lng) })!!
+        val bboxSnapshot = SpatialIndex(TrackStore.INDEX_PRECISION).let { idx ->
+            idx.add("DIAG", diagBBox); idx.snapshot()
+        }
+        dir.resolve("index.json").writeText(
+            com.enderthor.kvpartner.extension.jsonForStorage.encodeToString(
+                kotlinx.serialization.serializer<Map<String, Set<String>>>(), bboxSnapshot,
+            ),
+        )
+        assertFalse("precondition: no marker (upgraded device)", dir.resolve(".pathcells").exists())
+
+        // The NW corner cell of DIAG's bbox is OFF its diagonal path: present in the legacy bbox
+        // index, must be gone after the path-cell rebuild.
+        val nwCorner = geohash(diagBBox.maxLat, diagBBox.minLng, TrackStore.INDEX_PRECISION)
+        assertTrue("legacy bbox index contains DIAG's off-path NW corner", nwCorner in bboxSnapshot.keys)
+
+        // A ride ends -> save() a NEW track BEFORE any candidate read.
+        val store = TrackStore(dir)
+        val fresh = track("FRESH", 40.0, -3.0)
+        store.save(fresh)
+
+        // Migration happened: DIAG's off-path NW corner cell is gone (legacy index was reindexed by
+        // path cells, not just folded onto).
+        val rebuilt = com.enderthor.kvpartner.extension.jsonWithUnknownKeys.decodeFromString(
+            kotlinx.serialization.serializer<Map<String, Set<String>>>(),
+            dir.resolve("index.json").readText(),
+        )
+        assertFalse("off-path NW corner must be gone after migrate-first save", nwCorner in rebuilt.keys)
+
+        // The marker now exists (single marker-creation path via readPathCellSnapshot()).
+        assertTrue("marker must exist after migrate-first save", dir.resolve(".pathcells").exists())
+
+        // The legacy track survives the migration and is still findable on its path.
+        val onDiag = BBox(41.045 - 0.001, 41.045 + 0.001, 2.045 - 0.001, 2.045 + 0.001)
+        assertEquals(listOf("DIAG"), store.loadCandidates(onDiag).map { it.id })
+
+        // The new track is present and findable.
+        val queryFresh = BBox.around(fresh.points.map { LatLng(it.lat, it.lng) })!!
+        assertEquals(listOf("FRESH"), store.loadCandidates(queryFresh).map { it.id })
+    }
+
     @Test fun `pure updatedSnapshot then candidateIds selects the overlapping track`() {
         val a = track("A", 40.0, -3.0)
         val b = track("B", 50.0, 7.0)

@@ -95,7 +95,10 @@ class TrackStore(private val dir: File) {
         ensureDir()
         return synchronized(indexLock) {
             val known = readSourceKeys().toMutableSet()
-            val index = SpatialIndex(INDEX_PRECISION, readSnapshot())
+            // Build on the MIGRATED snapshot (see save()): readPathCellSnapshot() does the one-time
+            // legacy bbox→path-cell rebuild + marker if needed, so a batch import before the first
+            // candidate read migrates the legacy index first instead of folding onto (and pinning) it.
+            val index = SpatialIndex(INDEX_PRECISION, readPathCellSnapshot())
             var added = 0
             for (t in tracks) {
                 if (t.sourceKey.isNotEmpty() && t.sourceKey in known) continue
@@ -106,7 +109,6 @@ class TrackStore(private val dir: File) {
                 added++
             }
             writeSnapshot(index.snapshot())
-            markPathCells()
             writeSourceKeys(known)
             added
         }
@@ -130,9 +132,12 @@ class TrackStore(private val dir: File) {
         if (cells.isEmpty()) return
         // Read-modify-write of the shared index must be atomic against concurrent saves/loads.
         synchronized(indexLock) {
-            val newSnapshot = updatedSnapshot(readSnapshot(), track.id, cells, INDEX_PRECISION)
+            // Build on the MIGRATED snapshot, not the raw one: readPathCellSnapshot() performs the
+            // one-time legacy bbox→path-cell rebuild (and writes the marker) if needed BEFORE we fold
+            // in the new track. Otherwise a save before the first candidate read would fold onto the
+            // legacy bbox index and leave the marker in place, pre-empting the rebuild forever.
+            val newSnapshot = updatedSnapshot(readPathCellSnapshot(), track.id, cells, INDEX_PRECISION)
             writeSnapshot(newSnapshot)
-            markPathCells()
         }
     }
 
@@ -231,18 +236,6 @@ class TrackStore(private val dir: File) {
             Timber.w(e, "index.json present but failed to parse; treating as empty (corrupt index?)")
             emptyMap()
         }
-    }
-
-    /**
-     * Ensures the [INDEX_PATHCELLS_MARKER] exists so a path-cell-written index is not needlessly
-     * rebuilt by [readPathCellSnapshot]. Idempotent; called after every index write. Best effort.
-     */
-    private fun markPathCells() {
-        val marker = File(dir, INDEX_PATHCELLS_MARKER)
-        if (marker.exists()) return
-        ensureDir()
-        runCatching { marker.writeText("1") }
-            .onFailure { Timber.w(it, "failed to write path-cells marker") }
     }
 
     private fun writeSnapshot(snapshot: Map<String, Set<String>>) {

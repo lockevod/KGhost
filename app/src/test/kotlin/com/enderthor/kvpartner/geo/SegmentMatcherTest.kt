@@ -13,6 +13,11 @@ class SegmentMatcherTest {
 
     private val params = SegmentMatcher.Params(toleranceM = 25.0, minSegmentM = 300.0, mergeGapM = 80.0)
 
+    @Test fun `production default toleranceM is pinned`() {
+        // Guards against an accidental future edit of the production default.
+        assertEquals(35.0, SegmentMatcher.Params().toleranceM, 0.0)
+    }
+
     @Test fun `finds the overlapping middle stretch as one segment`() {
         // Track rides exactly along the route's middle ~1 km (lng 0.004..0.013), at 5 m/s.
         val track = com.enderthor.kvpartner.geo.RecordedTrack(
