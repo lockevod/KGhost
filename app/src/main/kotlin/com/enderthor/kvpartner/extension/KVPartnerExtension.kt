@@ -291,23 +291,35 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         if (state is OnNavigationState.NavigationState.NavigatingRoute && activeConfig.value.raceEnabled) {
             val routePolyline = state.routePolyline
             val elevPolyline = state.routeElevationPolyline
-            // Dedup: the host re-emits the SAME NavigatingRoute many times as it computes
-            // climbs/progress. If this is a re-emit of the route we already matched (and ② is live),
-            // ignore it — re-running the full match would saturate the Default pool and starve the
-            // assignment of routeMode. Compare BEFORE launching anything.
-            if (routePolyline == lastMatchedPolyline && routeMode != null) return
+            // Dedup ON POLYLINE ALONE: the host re-emits the SAME NavigatingRoute many times as it
+            // computes climbs/progress. If this is a re-emit of the route we already claimed, ignore
+            // it — re-running the full match would saturate the Default pool and starve the
+            // assignment of routeMode. We deliberately do NOT also require `routeMode != null`:
+            // lastMatchedPolyline is set BEFORE the launch (so the in-flight first match is covered),
+            // and clearRouteMode() nulls it on failure/non-route — so a genuinely failed/cleared route
+            // re-matches on the next emit. Requiring routeMode != null here would, while the FIRST
+            // match is still running (routeMode still null), let same-route re-emits cancel+restart it
+            // (churn/starvation). Compare BEFORE launching anything.
+            if (routePolyline == lastMatchedPolyline) return
             // A different (or first) route: cancel any in-flight match for the previous route so a
-            // stale O(n²) match can't run concurrently with the new one, then claim this polyline.
+            // stale O(n) match can't run concurrently with the new one, then claim this polyline.
             matchJob?.cancel()
             lastMatchedPolyline = routePolyline
+            // Capture the polyline this match OWNS. Every state mutation below is guarded by
+            // `lastMatchedPolyline == mine`, so only the match owning the CURRENT polyline can
+            // publish/clear: a superseded match (a newer route claimed lastMatchedPolyline) becomes a
+            // no-op and can never overwrite/wipe the NEWER route's state.
+            val mine = routePolyline
             // Off Main: polyline decode, candidate file IO, and segment matching are all heavier
             // than a frame. Default is fine; loadTopCandidates does file IO but never overlaps a save
             // in practice (save runs at ride-end, matching at route-load).
             matchJob = scope.launch(Dispatchers.Default) {
                 runCatching {
                     val path = PolylinePath(Polyline.decode(routePolyline))
-                    val bbox = BBox.around(path.points)
-                        ?: return@launch clearRouteMode()
+                    val bbox = BBox.around(path.points) ?: run {
+                        if (lastMatchedPolyline == mine) clearRouteMode()
+                        return@launch
+                    }
                     // Pre-cap candidates by ROUTE OVERLAP (relevance), parsing only the top tracks.
                     val tracks = trackStore.loadTopCandidates(bbox, SegmentMatcher.Params().maxTracks)
                     // A superseding route should cancel this stale match promptly: bail before the
@@ -321,15 +333,18 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                     )
                     val withElevation = applyElevation(matched, elevPolyline)
                     // Single atomic publish: path + segments together so the tick never sees a NEW
-                    // path paired with OLD segments.
-                    routeMode = RouteMode(path, withElevation)
-                    Timber.d("route mode ON: ${withElevation.size} segment(s) on '${state.name}'")
+                    // path paired with OLD segments. Guarded: only publish if a newer route has not
+                    // superseded us (lastMatchedPolyline still ours).
+                    if (lastMatchedPolyline == mine) {
+                        routeMode = RouteMode(path, withElevation)
+                        Timber.d("route mode ON: ${withElevation.size} segment(s) on '${state.name}'")
+                    }
                 }.onFailure { e ->
                     // A cancellation (superseding route / teardown) must propagate, not be swallowed
                     // as a match failure — otherwise clearRouteMode() would wipe the NEW route's state.
                     if (e is kotlinx.coroutines.CancellationException) throw e
                     Timber.w(e, "route matching failed; staying in ① VP mode")
-                    clearRouteMode()
+                    if (lastMatchedPolyline == mine) clearRouteMode()
                 }
             }
         } else {
