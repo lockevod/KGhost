@@ -73,6 +73,27 @@ object SegmentMatcher {
         val startedAtEpoch: Long,
     )
 
+    /**
+     * Seed strategy for [extractTrackSlice]'s candidate-chain loop.
+     *
+     *  - ALL_SEEDS: the original behaviour — build one candidate chain per track point.
+     *  - CAN_START: build a chain only from points that can actually START a non-empty chain, i.e.
+     *    whose seed projection is on-route (`perpDist < tol`) AND lands inside the interval. This is
+     *    PROVEN result-identical to ALL_SEEDS by [SegmentSliceSeedDiffTest]: a seed that is not
+     *    "can-start" keeps nothing as its first point, so `buildChain` returns an empty chain that the
+     *    `size < 2` filter already discards — dropping it from the loop cannot change the winner.
+     *  - CORRIDOR_ENTRY: a STRONGER bound (only can-start points whose predecessor was not can-start)
+     *    that is NOT result-identical (an out-and-back return pass and some random fixtures select a
+     *    different winning chain). It is retained ONLY so [SegmentSliceSeedDiffTest] can demonstrate
+     *    the difference and document why it is deferred. NEVER use it in production.
+     *
+     * Production default is [CAN_START]. The field is mutable only so the diff test can switch modes.
+     */
+    internal enum class SeedStrategy { ALL_SEEDS, CAN_START, CORRIDOR_ENTRY }
+
+    /** Production default: see [SeedStrategy]. */
+    @Volatile internal var seedStrategy: SeedStrategy = SeedStrategy.CAN_START
+
     fun match(
         route: PolylinePath,
         tracks: List<RecordedTrack>,
@@ -371,9 +392,40 @@ object SegmentMatcher {
         // point-count as a tiebreaker. A greedy single seed can latch onto the wrong pass of an
         // out-and-back route and produce a degenerate 2-point chain whose ODOMETER span is huge but
         // whose ROUTE coverage is tiny; ranking by route-span (not odometer-span) rejects it.
+        // A seed can only produce a non-empty chain if its FIRST point is kept, which in buildChain
+        // requires seedProjection(seed).perpDist < tol AND its routeM in [startM, endM] (the
+        // kept.isEmpty() branch of the per-point test, with the monotonic guards trivially true for
+        // the first point). Any seed failing this yields an empty chain that the size<2 filter below
+        // already discards. So the set of seeds that CAN contribute is exactly the points satisfying
+        // that predicate — call it "can-start".
+        //
+        // CAN_START (the proven-identical production bound) keeps every can-start point as a seed;
+        // CORRIDOR_ENTRY (deferred, test-only) keeps only the can-start points whose predecessor was
+        // not can-start.
+        fun canStart(i: Int): Boolean {
+            val tp = trackPoints[i]
+            val proj = seedProjection(LatLng(tp.lat, tp.lng))
+            return proj.perpDistM < toleranceM && proj.distanceAlongM in startM..endM
+        }
+
+        val seedIndices: Iterable<Int> = when (seedStrategy) {
+            SeedStrategy.ALL_SEEDS -> trackPoints.indices
+            SeedStrategy.CAN_START -> trackPoints.indices.filter { canStart(it) }
+            SeedStrategy.CORRIDOR_ENTRY -> {
+                val seeds = ArrayList<Int>()
+                var prevCanStart = false
+                for (i in trackPoints.indices) {
+                    val cs = canStart(i)
+                    if (cs && !prevCanStart) seeds += i
+                    prevCanStart = cs
+                }
+                seeds
+            }
+        }
+
         var best: List<Pair<TrackPoint, Double>> = emptyList()
         var bestRouteSpan = -1.0
-        for (seed in trackPoints.indices) {
+        for (seed in seedIndices) {
             val chain = buildChain(seed)
             if (chain.size < 2) continue
             val routeSpan = chain.last().second - chain.first().second
