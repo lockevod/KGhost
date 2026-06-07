@@ -9,9 +9,19 @@ data class TrackPoint(val lat: Double, val lng: Double, val distanceM: Double, v
 @Serializable
 data class TrackPointDto(val lat: Double, val lng: Double, val distanceM: Double, val timeS: Double)
 
+/** Where a track was ingested from. */
+@Serializable
+enum class Source { RECORDED, FIT_IMPORT, GPX_IMPORT, FITFILES_SCAN }
+
 /** A persisted ride track. */
 @Serializable
-data class RecordedTrack(val id: String, val startedAtEpoch: Long, val points: List<TrackPointDto>)
+data class RecordedTrack(
+    val id: String,
+    val startedAtEpoch: Long,
+    val points: List<TrackPointDto>,
+    val sourceKey: String = "",
+    val source: Source = Source.RECORDED,
+)
 
 fun TrackPoint.toDto() = TrackPointDto(lat, lng, distanceM, timeS)
 fun TrackPointDto.toModel() = TrackPoint(lat, lng, distanceM, timeS)
