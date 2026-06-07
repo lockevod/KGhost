@@ -30,6 +30,11 @@ data class KVPartnerConfig(
     val ghostPick: GhostPick = GhostPick.BEST,
     /** Whether to emit an in-ride alert when the rider enters a recorded segment. */
     val segmentEntryAlert: Boolean = false,
+    /**
+     * Epoch millis of the last successful history-import scan. Used by "Import new only" to skip
+     * files not modified since. 0L means no scan has run yet (import everything).
+     */
+    val lastScanEpoch: Long = 0L,
 ) {
     /**
      * Returns the target speed if valid (> 0), or null when no target is configured.
