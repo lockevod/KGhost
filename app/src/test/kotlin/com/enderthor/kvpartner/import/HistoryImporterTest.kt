@@ -66,7 +66,6 @@ class HistoryImporterTest {
             gpxParse = gpxParse,
             lastScanProvider = { 0L },
             lastScanSetter = {},
-            nowProvider = { 42L },
         )
 
         val emissions = importer.import(onlyNew = false).toList()
@@ -121,6 +120,103 @@ class HistoryImporterTest {
         assertEquals(recorderKey, decimatedTrack.sourceKey)
     }
 
+    @Test fun `L-F1 a track decimating to under two points is failed and not stored`() = runTest {
+        val fitFilesDir = tmp.newFolder("fitfiles")
+        val importDir = tmp.newFolder("import")
+        val tracksDir = tmp.newFolder("tracks")
+
+        touch(fitFilesDir, "ok.fit")
+        touch(fitFilesDir, "tiny.fit")
+
+        val store = TrackStore(tracksDir)
+
+        // Identity decimate; "tiny" returns a 1-point track → must be counted as failed & dropped.
+        val onePoint = RecordedTrack(
+            id = "tiny",
+            startedAtEpoch = 1_000L,
+            points = listOf(TrackPointDto(0.0, 0.0, 0.0, 0.0)),
+            sourceKey = "tiny",
+            source = Source.FITFILES_SCAN,
+        )
+
+        val importer = HistoryImporter(
+            fitFilesDir = fitFilesDir,
+            importDir = importDir,
+            trackStore = store,
+            decimate = { it },
+            fitDecode = { f, _ -> if (f.name == "ok.fit") track("ok", "ok-key") else onePoint },
+            gpxParse = { null },
+            lastScanProvider = { 0L },
+            lastScanSetter = {},
+        )
+
+        val last = importer.import(onlyNew = false).toList().last()
+
+        assertEquals(ImportProgress.Phase.DONE, last.phase)
+        assertEquals(2, last.total)
+        assertEquals(1, last.imported)
+        assertEquals(0, last.skippedDuplicates)
+        assertEquals(1, last.failed)
+        assertEquals(listOf("ok"), store.allTrackIds())
+    }
+
+    @Test fun `L-F2 lastScan advances only past successfully processed files`() = runTest {
+        val fitFilesDir = tmp.newFolder("fitfiles")
+        val importDir = tmp.newFolder("import")
+        val tracksDir = tmp.newFolder("tracks")
+
+        val okFile = touch(fitFilesDir, "ok.fit").apply { setLastModified(5_000L) }
+        touch(fitFilesDir, "boom.fit").apply { setLastModified(9_000L) }
+
+        val store = TrackStore(tracksDir)
+
+        var lastScan = 0L
+        val importer = HistoryImporter(
+            fitFilesDir = fitFilesDir,
+            importDir = importDir,
+            trackStore = store,
+            decimate = { it },
+            fitDecode = { f, _ ->
+                if (f.name == "ok.fit") track("ok", "ok-key") else throw RuntimeException("boom")
+            },
+            gpxParse = { null },
+            lastScanProvider = { lastScan },
+            lastScanSetter = { lastScan = it },
+        )
+
+        importer.import(onlyNew = false).toList()
+
+        // Advanced to the OK file's lastModified, NOT past the failed file (9_000) and NOT now().
+        assertEquals(okFile.lastModified(), lastScan)
+    }
+
+    @Test fun `L-F2 lastScan never advances when every file fails`() = runTest {
+        val fitFilesDir = tmp.newFolder("fitfiles")
+        val importDir = tmp.newFolder("import")
+        val tracksDir = tmp.newFolder("tracks")
+
+        touch(fitFilesDir, "a.fit").apply { setLastModified(9_000L) }
+        touch(importDir, "b.gpx").apply { setLastModified(9_000L) }
+
+        val store = TrackStore(tracksDir)
+
+        var setCalls = 0
+        val importer = HistoryImporter(
+            fitFilesDir = fitFilesDir,
+            importDir = importDir,
+            trackStore = store,
+            decimate = { it },
+            fitDecode = { _, _ -> null },
+            gpxParse = { null },
+            lastScanProvider = { 0L },
+            lastScanSetter = { setCalls++ },
+        )
+
+        importer.import(onlyNew = false).toList()
+
+        assertEquals(0, setCalls)
+    }
+
     @Test fun `onlyNew with future lastScan processes nothing`() = runTest {
         val fitFilesDir = tmp.newFolder("fitfiles")
         val importDir = tmp.newFolder("import")
@@ -142,7 +238,6 @@ class HistoryImporterTest {
             // lastScan in the far future → every file's lastModified() is older → filtered out.
             lastScanProvider = { Long.MAX_VALUE },
             lastScanSetter = {},
-            nowProvider = { 7L },
         )
 
         val emissions = importer.import(onlyNew = true).toList()

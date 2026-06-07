@@ -17,7 +17,7 @@ import java.io.File
  *   - [fitFilesDir]: `.fit` files written by other apps / the Karoo (Source.FITFILES_SCAN).
  *   - [importDir]: user-dropped `.fit` (Source.FIT_IMPORT) and `.gpx` (Source.GPX_IMPORT) files.
  *
- * De-duplication is delegated to [TrackStore.add] via each track's sourceKey, so re-running the
+ * De-duplication is delegated to [TrackStore.addAll] via each track's sourceKey, so re-running the
  * sweep is idempotent. A corrupt or throwing file is counted as a failure and never aborts the
  * batch. With `onlyNew = true`, only files modified after the last recorded scan time are processed.
  *
@@ -34,7 +34,6 @@ class HistoryImporter(
     private val gpxParse: (File) -> RecordedTrack? = GpxParser::parse,
     private val lastScanProvider: () -> Long = { 0L },
     private val lastScanSetter: (Long) -> Unit = {},
-    private val nowProvider: () -> Long = { System.currentTimeMillis() },
 ) {
 
     private enum class Kind { FITFILES_FIT, IMPORT_FIT, IMPORT_GPX }
@@ -64,9 +63,13 @@ class HistoryImporter(
         emit(ImportProgress(ImportProgress.Phase.SCANNING, current = 0, total = total, 0, 0, 0))
 
         // --- PARSING ---
-        var imported = 0
-        var skippedDuplicates = 0
+        // The expensive decode stays per-file (one FIT buffer at a time); only the STORE write is
+        // batched via addAll after the loop, so imported/skipped stay 0 during PARSING and are
+        // finalized once the batch lands.
         var failed = 0
+        val accumulated = ArrayList<RecordedTrack>()
+        // L-F2: advance lastScan only past files that were actually processed without failure.
+        var maxProcessedLastModified = Long.MIN_VALUE
 
         workList.forEachIndexed { index, item ->
             try {
@@ -79,7 +82,15 @@ class HistoryImporter(
                     failed++
                 } else {
                     val decimated = decimate(track)
-                    if (trackStore.add(decimated)) imported++ else skippedDuplicates++
+                    if (decimated.points.size < 2) {
+                        // L-F1: a <2-point track is unusable/unraceable; count as failure, drop it.
+                        failed++
+                        Timber.w("import dropped %s: decimated to %d point(s)", item.file.name, decimated.points.size)
+                    } else {
+                        accumulated.add(decimated)
+                        val lm = item.file.lastModified()
+                        if (lm > maxProcessedLastModified) maxProcessedLastModified = lm
+                    }
                 }
             } catch (e: Exception) {
                 failed++
@@ -93,16 +104,24 @@ class HistoryImporter(
                         ImportProgress.Phase.PARSING,
                         current = current,
                         total = total,
-                        imported = imported,
-                        skippedDuplicates = skippedDuplicates,
+                        imported = 0,
+                        skippedDuplicates = 0,
                         failed = failed,
                     ),
                 )
             }
         }
 
+        // --- STORE (batched, O(n)) ---
+        val added = trackStore.addAll(accumulated)
+        val imported = added
+        val skippedDuplicates = accumulated.size - added
+
         // --- DONE ---
-        lastScanSetter(nowProvider())
+        // L-F2: only advance lastScan past files that decoded AND passed the <2-point guard. A
+        // failed/unreadable file (lastModified still > lastScan) is therefore retried next run, and
+        // a pure-failure or empty run never advances lastScan.
+        if (maxProcessedLastModified > lastScanProvider()) lastScanSetter(maxProcessedLastModified)
         emit(
             ImportProgress(
                 ImportProgress.Phase.DONE,
