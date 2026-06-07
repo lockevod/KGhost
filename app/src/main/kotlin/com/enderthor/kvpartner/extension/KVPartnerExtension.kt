@@ -12,6 +12,7 @@ import com.enderthor.kvpartner.engine.GapStateHolder
 import com.enderthor.kvpartner.engine.GhostCurve
 import com.enderthor.kvpartner.engine.LiveSegment
 import com.enderthor.kvpartner.engine.RenderPrefs
+import com.enderthor.kvpartner.engine.RouteGhost
 import com.enderthor.kvpartner.engine.RouteProjectedProgress
 import com.enderthor.kvpartner.engine.SegmentInfoHolder
 import com.enderthor.kvpartner.engine.VirtualPartnerSource
@@ -112,6 +113,16 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         private const val MARKER_MIN_MOVE_M = 5.0
 
         /**
+         * Heartbeat cadence (ms) for re-asserting the ghost map symbol. The Karoo host drops our
+         * symbol when it redraws the map layer (zoom / pan / map re-init), and a STATIONARY ghost
+         * (clamped at a segment end, or the rider stopped) never crosses [MARKER_MIN_MOVE_M] again —
+         * so without this it would vanish for the rest of the stop. Re-emitting the CURRENT marker
+         * every heartbeat guarantees the symbol comes back within ~this long after any host redraw.
+         * Mirrors the data fields' HEARTBEAT_MS; > the 1 Hz tick so it doesn't churn every tick.
+         */
+        private const val GHOST_HEARTBEAT_MS = 3000L
+
+        /**
          * Grace period (ms) before a non-route nav state tears route mode down. The host can emit a
          * transient Idle/NavigatingToDestination blip BETWEEN NavigatingRoute re-emits during active
          * route navigation; clearing immediately would null routeMode/lastMatchedPolyline and force a
@@ -157,7 +168,16 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
      * the tick could otherwise pair a NEW [path] with the OLD segments (two separate sequential
      * writes were observable as a torn read).
      */
-    private data class RouteMode(val path: PolylinePath, val segments: List<LiveSegment>)
+    private data class RouteMode(
+        val path: PolylinePath,
+        val segments: List<LiveSegment>,
+        /**
+         * The continuous whole-route ghost — recorded stretches stitched with VP-pace fills (see
+         * [RouteGhost]). Distance axis is ROUTE distance `[0, path.totalM]`. Null only when it could
+         * not be built (no fill pace and gaps present); the tick then falls back to ① VP.
+         */
+        val routeGhost: GhostCurve?,
+    )
 
     // Route mode state. When non-null AND [RouteMode.segments] is non-empty the tick runs the
     // per-segment ② logic; otherwise it runs the ① Virtual Partner logic. Written by the
@@ -190,6 +210,9 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     private var mapEmitter: Emitter<MapEffect>? = null
     @Volatile
     private var lastGhostMarker: GhostMarker? = null
+    // Wall-clock (ms) of the last ShowSymbols we emitted. Drives the GHOST_HEARTBEAT_MS re-assert so a
+    // host map redraw (zoom/pan) can't permanently drop a stationary ghost. Guarded by mapLock.
+    private var lastGhostEmitMs: Long = 0L
     // Serialises publishGhostMarker across threads. The tick now runs on Dispatchers.Default and
     // publishGhostMarker is also called from clearRouteMode()/stop paths (potentially other threads),
     // so the read-modify-write of lastGhostMarker + the emitter call must be mutually exclusive.
@@ -262,11 +285,24 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
      * marker from the ② branch of the tick. setCancellable nulls it when the host tears the map down.
      */
     override fun startMap(emitter: Emitter<MapEffect>) {
-        mapEmitter = emitter
-        lastGhostMarker = null
-        emitter.setCancellable {
-            mapEmitter = null
+        // Mutate the map state under mapLock — the tick's publishGhostMarker also reads/writes
+        // mapEmitter/lastGhostMarker inside synchronized(mapLock), and the host calls startMap /
+        // the cancellable from its OWN thread; without the lock those interleave. Reset
+        // lastGhostMarker (force a fresh Show on the next tick) and the heartbeat clock so the new
+        // map gets the symbol promptly.
+        synchronized(mapLock) {
+            mapEmitter = emitter
             lastGhostMarker = null
+            lastGhostEmitMs = 0L
+        }
+        Timber.d("KVP startMap")
+        emitter.setCancellable {
+            synchronized(mapLock) {
+                mapEmitter = null
+                lastGhostMarker = null
+                lastGhostEmitMs = 0L
+            }
+            Timber.d("KVP stopMap (cancellable)")
         }
     }
 
@@ -277,8 +313,18 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
      */
     private fun publishGhostMarker(next: GhostMarker?) {
         synchronized(mapLock) {
-            val em = mapEmitter ?: return
-            when (val decision = decideMapEmit(lastGhostMarker, next, MARKER_MIN_MOVE_M)) {
+            val em = mapEmitter
+            if (em == null) {
+                // No map layer (host hasn't called startMap, or tore it down). Nothing to emit; the
+                // next startMap resets state and the tick re-shows.
+                if (next != null) Timber.d("KVP ghost: no mapEmitter, skip")
+                return
+            }
+            val now = System.currentTimeMillis()
+            // Heartbeat: if the current marker hasn't moved enough to re-show on its own, force a
+            // re-assert once the heartbeat window elapses so a host map redraw can't drop it for good.
+            val force = next != null && (now - lastGhostEmitMs) >= GHOST_HEARTBEAT_MS
+            when (val decision = decideMapEmit(lastGhostMarker, next, MARKER_MIN_MOVE_M, force)) {
                 is MapEmit.Show -> {
                     val m = decision.marker
                     em.onNext(
@@ -287,10 +333,13 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                         ),
                     )
                     lastGhostMarker = m
+                    lastGhostEmitMs = now
+                    Timber.d("KVP ghost SHOW lat=${"%.5f".format(m.lat)} lng=${"%.5f".format(m.lng)} force=$force")
                 }
                 MapEmit.Hide -> {
                     em.onNext(HideSymbols(listOf(GHOST_SYMBOL_ID)))
                     lastGhostMarker = null
+                    Timber.d("KVP ghost HIDE")
                 }
                 MapEmit.None -> {}
             }
@@ -355,12 +404,25 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                         SegmentMatcher.Params(),
                     )
                     val withElevation = applyElevation(matched, elevPolyline)
-                    // Single atomic publish: path + segments together so the tick never sees a NEW
-                    // path paired with OLD segments. Guarded: only publish if a newer route has not
+                    // Build the ONE continuous whole-route ghost (recorded stretches + VP-pace fills).
+                    // Fill pace = the VP target, falling back to the segments' own average so the ghost
+                    // still flows even with no target configured.
+                    val fillSpeedM = activeConfig.value.validTargetOrNull()
+                        ?: RouteGhost.averageSegmentSpeedM(withElevation)
+                    val routeGhost = if (fillSpeedM != null && fillSpeedM > 0.0) {
+                        RouteGhost.build(path.totalM, withElevation, fillSpeedM)
+                    } else {
+                        null
+                    }
+                    // Single atomic publish: path + segments + ghost together so the tick never sees a
+                    // NEW path paired with OLD segments. Guarded: only publish if a newer route has not
                     // superseded us (lastMatchedPolyline still ours).
                     if (lastMatchedPolyline == mine) {
-                        routeMode = RouteMode(path, withElevation)
-                        Timber.d("route mode ON: ${withElevation.size} segment(s) on '${state.name}'")
+                        routeMode = RouteMode(path, withElevation, routeGhost)
+                        Timber.d(
+                            "route mode ON: ${withElevation.size} segment(s), routeGhost=${routeGhost != null} " +
+                                "on '${state.name}'",
+                        )
                     }
                 }.onFailure { e ->
                     // A cancellation (superseding route / teardown) must propagate, not be swallowed
@@ -504,12 +566,14 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         // advances the route distance during a GPS gap (the rider keeps moving along the route),
         // which is exactly the desired behavior for segment selection and the gap.
         var coastRoute: CoastingEstimator? = null
-        // The route-distance start of the segment currently being raced, used to detect when the
-        // active segment changes (to reset the per-segment entry clock). null = no active segment.
-        var activeSegmentStartM: Double? = null
-        // Ride-elapsed seconds at which the rider first entered the active segment. The per-segment
-        // gap clock is `elapsedS - segmentEntryElapsedS`.
-        var segmentEntryElapsedS = 0.0
+        // Ride-elapsed seconds corresponding to the whole-route ghost's t=0, set ONCE per route so the
+        // ghost starts beside the rider when racing begins (back-date by the ghost's time at the
+        // rider's entry route-distance). null until the first route-mode tick of the current route.
+        var ghostStartElapsedS: Double? = null
+        // Throttle for the per-tick route-mode diagnostic log (≤ ~once per DIAG_LOG_MS). Kept local
+        // to the tick so it resets per ride. Set to 0 to disable.
+        var lastDiagLogMs = 0L
+        val diagLogMs = 2500L
 
         tickJob = scope.launch(Dispatchers.Default) {
             val distance = karooSystem.streamDataFlow(DataType.Type.DISTANCE)
@@ -580,7 +644,7 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                             routeProjector = RouteProjectedProgress(rm.path)
                             coastRoute = CoastingEstimator()
                             projectorRoute = rm.path
-                            activeSegmentStartM = null
+                            ghostStartElapsedS = null
                         }
                         val rp = routeProjector!!
                         val cr = coastRoute!!
@@ -596,41 +660,62 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                         // is folded in below only as a hard gate when the fix IS fresh).
                         cr.update(rp.progressM, speedMs)
                         val routeDist = cr.effectiveDistanceM
-                        val seg = rm.segments.firstOrNull { routeDist in it.routeStartM..it.routeEndM }
-                        if (seg == null) {
-                            // Between segments / off the matched stretch: no active segment. Instead
-                            // of blanking to `---`, fall back to the ① Virtual Partner gap (if a
-                            // target is set) so the field ALWAYS shows something, Garmin-style. Clear
-                            // the segment info (tag reads "VP") and hide the map ghost (VP has none).
-                            activeSegmentStartM = null
-                            SegmentInfoHolder.clear()
-                            publishGhostMarker(null)
-                            val vp = if (activeConfig.value.fillGapsWithVP) vpGapOrNull() else null
-                            if (vp != null) GapStateHolder.update(vp) else GapStateHolder.clear()
-                            return@runCatching
-                        }
-                        val progressM = routeDist - seg.routeStartM
-                        // Per-segment entry clock. Back-date to the ghost's time at the rider's entry
-                        // distance so a mid-segment entry races EVEN from the entry point (the ghost
-                        // marker and gap start beside the rider, not at the segment start). For a
-                        // normal full-segment entry progressM≈0 → ghost.timeAt(0)=0 → no-op.
-                        if (activeSegmentStartM != seg.routeStartM) {
-                            activeSegmentStartM = seg.routeStartM
-                            segmentEntryElapsedS = elapsedS - seg.ghost.timeAt(progressM)
-                        }
-                        val elapsedInSeg = elapsedS - segmentEntryElapsedS
                         // The estimator owns trustworthiness (handles the GPS-gap/coast case). We add
                         // ONE hard gate: when the projector fix IS fresh (a new position arrived) but
                         // the rider is off-route, do not trust — a genuine deviation, not a dropout.
                         // While coasting (frozen projection) onRoute reflects the last good fix, so we
-                        // don't let a stale off-route flag override the coast decision.
+                        // don't let a stale off-route flag override the coast decision. This gates the
+                        // GAP's staleness only — the map ghost is time-based and shown regardless.
                         val fresh = cr.trustworthy && (!rp.isFresh || rp.onRoute)
-                        val gap = GapCalculator.compute(progressM, elapsedInSeg, seg.ghost, fresh)
+                        // Which recorded stretch the rider is currently on — for the segment field's
+                        // elevation/track visualization only. The ghost itself is whole-route, not
+                        // per-segment, so this does NOT gate the ghost or the gap.
+                        val seg = rm.segments.firstOrNull { routeDist in it.routeStartM..it.routeEndM }
+                        run {
+                            val nowMs = System.currentTimeMillis()
+                            if (nowMs - lastDiagLogMs >= diagLogMs) {
+                                lastDiagLogMs = nowMs
+                                Timber.d(
+                                    "KVP tick route: routeDist=${"%.0f".format(routeDist)} " +
+                                        "seg=${seg?.let { "[${"%.0f".format(it.routeStartM)}..${"%.0f".format(it.routeEndM)}]" } ?: "none"} " +
+                                        "rg=${rm.routeGhost != null} fresh=$fresh rpFresh=${rp.isFresh} onRoute=${rp.onRoute} " +
+                                        "speed=${speedMs?.let { "%.1f".format(it) } ?: "null"} mapEmitter=${mapEmitter != null}",
+                                )
+                            }
+                        }
+                        val rg = rm.routeGhost
+                        if (rg == null) {
+                            // Couldn't build the continuous whole-route ghost (no fill pace and gaps
+                            // present). Fall back to the ① whole-ride Virtual Partner gap so the field
+                            // still shows something; no map ghost.
+                            SegmentInfoHolder.clear()
+                            publishGhostMarker(null)
+                            val vp = vpGapOrNull()
+                            if (vp != null) GapStateHolder.update(vp) else GapStateHolder.clear()
+                            return@runCatching
+                        }
+                        // Back-date the ghost clock ONCE per route so the ghost starts BESIDE the rider
+                        // when racing begins (or when a route loads mid-ride), rather than at the route
+                        // start. After this, ghostElapsed = elapsedS − ghostStartElapsedS drives the
+                        // whole-route ghost; it advances continuously and only freezes on pause (the
+                        // ride app stops ELAPSED_TIME), never just because a recorded stretch ended.
+                        if (ghostStartElapsedS == null) {
+                            ghostStartElapsedS = elapsedS - rg.timeAt(routeDist)
+                        }
+                        val ghostElapsed = elapsedS - ghostStartElapsedS!!
+                        // One gap against the whole-route ghost: progress = rider's route distance,
+                        // clock = ghostElapsed, curve = the continuous route ghost (route-distance axis).
+                        val gap = GapCalculator.compute(routeDist, ghostElapsed, rg, fresh)
                         GapStateHolder.update(gap)
-                        SegmentInfoHolder.set(seg.toInfo())
-                        // ④ ghost-on-map: project the ghost's time-based route position and emit.
+                        // Segment field viz: show the active recorded stretch, else clear. The gap shown
+                        // is still the whole-route gap (which, on a recorded stretch, races your past self).
+                        if (seg != null) SegmentInfoHolder.set(seg.toInfo()) else SegmentInfoHolder.clear()
+                        // ④ ghost-on-map: gap.ghostProgressM is already the ghost's ROUTE distance.
+                        // Drawn regardless of GPS freshness (fresh = true) — the ghost's position is
+                        // purely time-based, so a GPS dropout or a stop must NOT remove it; only pause
+                        // (frozen clock) or moving off the visible map (host-culled) hides it.
                         val marker = if (activeConfig.value.showGhostOnMap) {
-                            GhostMapPresenter.marker(seg.routeStartM + gap.ghostProgressM, rm.path, fresh)
+                            GhostMapPresenter.marker(gap.ghostProgressM, rm.path, fresh = true)
                         } else {
                             null
                         }

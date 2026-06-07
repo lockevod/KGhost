@@ -29,4 +29,31 @@ class MapEmitDecisionTest {
         val d = decideMapEmit(lastShown = marker(0.0), next = marker(0.0001), minMoveM = 5.0)
         assertTrue(d is MapEmit.Show)
     }
+
+    @Test fun `forceReassert re-shows a stationary marker`() {
+        // Heartbeat: a ghost that has NOT moved (below threshold) is re-shown so a host map redraw
+        // (zoom/pan) can't permanently drop it.
+        val d = decideMapEmit(
+            lastShown = marker(0.0),
+            next = marker(0.00001),
+            minMoveM = 5.0,
+            forceReassert = true,
+        )
+        assertTrue(d is MapEmit.Show && (d as MapEmit.Show).marker.lng == 0.00001)
+    }
+
+    @Test fun `forceReassert with no next still hides`() {
+        // A pending removal must win over the heartbeat re-assert (don't resurrect a gone ghost).
+        assertEquals(
+            MapEmit.Hide,
+            decideMapEmit(lastShown = marker(0.0), next = null, minMoveM = 5.0, forceReassert = true),
+        )
+    }
+
+    @Test fun `forceReassert with nothing shown emits nothing`() {
+        assertEquals(
+            MapEmit.None,
+            decideMapEmit(lastShown = null, next = null, minMoveM = 5.0, forceReassert = true),
+        )
+    }
 }
