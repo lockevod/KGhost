@@ -1,5 +1,7 @@
 package com.enderthor.kvpartner.geo
 
+import com.enderthor.kvpartner.import_.sourceKeyOf
+
 /**
  * Accumulates an in-memory ride track, decimating samples by cumulative distance.
  *
@@ -24,10 +26,15 @@ class TrackRecorder(private val decimator: TrackDecimator = TrackDecimator()) {
      */
     fun build(id: String, startedAtEpoch: Long): RecordedTrack? {
         if (buffer.size < 2) return null
+        // total = the LAST kept point's cumulative ride distance. Drives the dedup sourceKey so a
+        // later FitFiles scan re-ingesting the SAME ride collapses onto this track (same key).
+        val totalDistanceM = buffer.lastOrNull()?.distanceM ?: 0.0
         return RecordedTrack(
             id = id,
             startedAtEpoch = startedAtEpoch,
             points = buffer.map { it.toDto() },
+            sourceKey = sourceKeyOf(startedAtEpoch, totalDistanceM),
+            source = Source.RECORDED,
         )
     }
 

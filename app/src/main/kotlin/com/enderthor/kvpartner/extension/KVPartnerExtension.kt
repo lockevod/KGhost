@@ -444,7 +444,13 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         val started = recordingStartedEpoch
         val track = recorder.build(id = started.toString(), startedAtEpoch = started)
         if (track != null) {
-            scope.launch(Dispatchers.IO) { trackStore.save(track) }
+            // add() dedups on sourceKey (first writer wins). false means a same-key ride is already
+            // stored — e.g. a FitFiles scan ingested this ride first; nothing to do but note it.
+            scope.launch(Dispatchers.IO) {
+                if (!trackStore.add(track)) {
+                    Timber.d("recorded track ${track.id} skipped: sourceKey ${track.sourceKey} already stored")
+                }
+            }
         }
         recorder.reset()
         // Done with this ride's epoch; clear it so a fresh ride re-stamps in startTick(). stopTick()
