@@ -32,6 +32,8 @@ data class KVPartnerConfig(
     val segmentEntryAlert: Boolean = false,
     /** Whether to draw the ghost's live position on the map during a segment race. */
     val showGhostOnMap: Boolean = true,
+    /** When racing a route, show the fixed-pace Virtual Partner gap on stretches with no recorded-segment history (instead of `---`). */
+    val fillGapsWithVP: Boolean = true,
     /**
      * Epoch millis of the last successful history-import scan. Used by "Import new only" to skip
      * files not modified since. 0L means no scan has run yet (import everything).

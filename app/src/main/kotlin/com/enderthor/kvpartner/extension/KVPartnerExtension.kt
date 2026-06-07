@@ -517,7 +517,7 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                             activeSegmentStartM = null
                             SegmentInfoHolder.clear()
                             publishGhostMarker(null)
-                            val vp = vpGapOrNull()
+                            val vp = if (activeConfig.value.fillGapsWithVP) vpGapOrNull() else null
                             if (vp != null) GapStateHolder.update(vp) else GapStateHolder.clear()
                             return@runCatching
                         }
