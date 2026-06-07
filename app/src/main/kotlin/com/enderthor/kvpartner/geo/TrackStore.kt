@@ -27,12 +27,17 @@ import java.io.File
 class TrackStore(private val dir: File) {
 
     /**
-     * Serializes the `index.json` read→modify→write in [save] against the read in [loadCandidates]
-     * so two overlapping saves can't lose a track from the index and a load can't observe the index
-     * mid-modify. The per-track `<id>.json` writes are already isolated (distinct files); only the
-     * shared index needs guarding.
+     * Serializes the `index.json`/`sourcekeys.json` read→modify→write in [save]/[add]/[addAll]
+     * against the read in [loadCandidates] so two overlapping writes can't lose a track from the
+     * index and a load can't observe the index mid-modify. The per-track `<id>.json` writes are
+     * already isolated (distinct files); only the shared bookkeeping files need guarding.
+     *
+     * The monitor is keyed by the canonical directory path ([lockFor]) and shared process-wide, so
+     * two distinct [TrackStore] instances pointing at the SAME dir (e.g. the extension's ride-finish
+     * `add` and RaceScreen's import `addAll`) serialize against each other — a per-instance monitor
+     * would not, and concurrent writes would corrupt the bookkeeping files.
      */
-    private val indexLock = Any()
+    private val indexLock: Any = lockFor(dir)
 
     /**
      * Reads all stored track ids by listing the `<id>.json` files (excludes `index.json` and
@@ -76,6 +81,32 @@ class TrackStore(private val dir: File) {
                 writeSourceKeys(known + key)
             }
             return true
+        }
+    }
+
+    /**
+     * Batch insert. Reads index.json/sourcekeys.json once, folds all non-duplicate tracks into a
+     * single SpatialIndex and one source-key set, then writes both files once. O(n) IO/CPU vs add()'s
+     * O(n^2) when importing many tracks. Dedups within the batch AND against already-known keys
+     * (first occurrence of a key wins). Returns the number of tracks actually stored.
+     */
+    fun addAll(tracks: List<RecordedTrack>): Int {
+        if (tracks.isEmpty()) return 0
+        ensureDir()
+        return synchronized(indexLock) {
+            val known = readSourceKeys().toMutableSet()
+            val index = SpatialIndex(INDEX_PRECISION, readSnapshot())
+            var added = 0
+            for (t in tracks) {
+                if (t.sourceKey.isNotEmpty() && t.sourceKey in known) continue
+                atomicWriteText(File(dir, t.id + JSON_SUFFIX), jsonForStorage.encodeToString(t))
+                BBox.around(t.points.map { LatLng(it.lat, it.lng) })?.let { index.add(t.id, it) }
+                if (t.sourceKey.isNotEmpty()) known.add(t.sourceKey)
+                added++
+            }
+            writeSnapshot(index.snapshot())
+            writeSourceKeys(known)
+            added
         }
     }
 
@@ -174,6 +205,18 @@ class TrackStore(private val dir: File) {
     }
 
     companion object {
+        /**
+         * Process-wide locks keyed by canonical directory path so all [TrackStore] instances over
+         * the same dir share one monitor. Without this, per-instance monitors would let concurrent
+         * writers (extension `add` + RaceScreen `addAll`) corrupt the shared bookkeeping files.
+         */
+        private val dirLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+        private fun lockFor(dir: File): Any {
+            val key = runCatching { dir.canonicalPath }.getOrDefault(dir.absolutePath)
+            return dirLocks.computeIfAbsent(key) { Any() }
+        }
+
         private const val JSON_SUFFIX = ".json"
         private const val INDEX_FILE = "index.json"
 

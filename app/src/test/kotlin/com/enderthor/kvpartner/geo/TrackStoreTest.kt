@@ -112,6 +112,36 @@ class TrackStoreTest {
         assertEquals(1, store.allTrackIds().size)
     }
 
+    @Test fun `addAll dedups within the batch and against known keys`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        val k1 = RecordedTrack("k1", 1000L, listOf(TrackPointDto(0.0, 0.0, 0.0, 0.0), TrackPointDto(0.0, 0.001, 100.0, 20.0)), sourceKey = "k1")
+        store.add(k1) // pre-known key "k1"
+
+        val k1dup = RecordedTrack("k1dup", 1100L, listOf(TrackPointDto(0.0, 0.0, 0.0, 0.0), TrackPointDto(0.0, 0.001, 100.0, 20.0)), sourceKey = "k1")
+        val k2 = RecordedTrack("k2", 2000L, listOf(TrackPointDto(1.0, 1.0, 0.0, 0.0), TrackPointDto(1.0, 1.001, 100.0, 20.0)), sourceKey = "k2")
+        val k2dup = RecordedTrack("k2dup", 2100L, listOf(TrackPointDto(1.0, 1.0, 0.0, 0.0), TrackPointDto(1.0, 1.001, 100.0, 20.0)), sourceKey = "k2")
+        val k3 = RecordedTrack("k3", 3000L, listOf(TrackPointDto(2.0, 2.0, 0.0, 0.0), TrackPointDto(2.0, 2.001, 100.0, 20.0)), sourceKey = "k3")
+
+        val added = store.addAll(listOf(k1dup, k2, k2dup, k3))
+        assertEquals(2, added) // k2 and k3 stored; k1dup and k2dup skipped
+
+        assertEquals(3, store.allTrackIds().size) // k1 + k2 + k3
+        val known = store.knownSourceKeys()
+        assertTrue("k1" in known)
+        assertTrue("k2" in known)
+        assertTrue("k3" in known)
+    }
+
+    @Test fun `addAll registers tracks in the spatial index so loadCandidates finds them`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        val a = track("A", 40.0, -3.0)
+        val b = track("B", 50.0, 7.0)
+        store.addAll(listOf(a, b))
+
+        val queryA = BBox.around(a.points.map { LatLng(it.lat, it.lng) })!!
+        assertEquals(listOf("A"), store.loadCandidates(queryA).map { it.id })
+    }
+
     @Test fun `pure updatedSnapshot then candidateIds selects the overlapping track`() {
         val a = track("A", 40.0, -3.0)
         val b = track("B", 50.0, 7.0)
