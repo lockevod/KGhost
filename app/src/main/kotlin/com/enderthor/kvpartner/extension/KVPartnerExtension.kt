@@ -46,6 +46,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
@@ -109,6 +110,16 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
 
         /** Minimum projected movement (m) before re-emitting ShowSymbols (suppresses jitter/stops). */
         private const val MARKER_MIN_MOVE_M = 5.0
+
+        /**
+         * Grace period (ms) before a non-route nav state tears route mode down. The host can emit a
+         * transient Idle/NavigatingToDestination blip BETWEEN NavigatingRoute re-emits during active
+         * route navigation; clearing immediately would null routeMode/lastMatchedPolyline and force a
+         * full re-match (and a one-tick VP/`---` flicker) on the next same-route re-emit. We delay the
+         * clear by this grace and cancel it if a route comes back, so a blip shorter than this is a
+         * no-op. A real route END (sustained non-route) still clears after ~this long.
+         */
+        private const val ROUTE_CLEAR_GRACE_MS = 4000L
     }
 
     lateinit var karooSystem: KarooSystemService
@@ -164,6 +175,13 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     private var matchJob: Job? = null
     @Volatile
     private var lastMatchedPolyline: String? = null
+
+    // Debounce for non-route nav-state teardown. The host emits transient Idle/NavigatingToDestination
+    // blips between NavigatingRoute re-emits; this delayed job clears route mode only if no route comes
+    // back within ROUTE_CLEAR_GRACE_MS. A returning route cancels it (see onNavigationState). Launched
+    // on scope (Dispatchers.Main), read/written from the navigation-state collector and teardown.
+    @Volatile
+    private var clearJob: Job? = null
 
     // ④ map overlay. The map emitter is supplied by the host via startMap() on its own thread, so it
     // is @Volatile. lastGhostMarker is the last marker we emitted (edge-trigger state); read on the
@@ -289,6 +307,11 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         val state = event.state
         Timber.d("nav=$state")
         if (state is OnNavigationState.NavigationState.NavigatingRoute && activeConfig.value.raceEnabled) {
+            // A route is present → cancel any pending debounced teardown from a prior transient blip.
+            // Because lastMatchedPolyline is preserved across a cancelled pending-clear, a blip→same-
+            // route sequence dedups below and does NOT re-match.
+            clearJob?.cancel()
+            clearJob = null
             val routePolyline = state.routePolyline
             val elevPolyline = state.routeElevationPolyline
             // Dedup ON POLYLINE ALONE: the host re-emits the SAME NavigatingRoute many times as it
@@ -348,15 +371,30 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                 }
             }
         } else {
-            // Guard against transient thrash: only tear down when there's actually something to
-            // clear. A redundant clear would null lastMatchedPolyline and force a needless re-match
-            // on the next same-route re-emit.
-            if (routeMode != null || lastMatchedPolyline != null) clearRouteMode()
+            // Non-route state (or racing disabled). Debounce the teardown: the host can emit a
+            // transient Idle/NavigatingToDestination blip between NavigatingRoute re-emits. Clearing
+            // immediately would null routeMode/lastMatchedPolyline → a needless full re-match (and a
+            // one-tick VP/`---` flicker) on the next same-route re-emit. Schedule the clear after a
+            // grace; a returning route cancels it (above). Only schedule if there is something to
+            // clear and no clear is already pending.
+            if ((routeMode != null || lastMatchedPolyline != null) && clearJob?.isActive != true) {
+                clearJob = scope.launch { // scope is Dispatchers.Main
+                    delay(ROUTE_CLEAR_GRACE_MS)
+                    clearRouteMode()
+                    clearJob = null
+                }
+            }
         }
     }
 
     /** Clears ② route mode so the tick falls back to ① Virtual Partner behavior. */
     private fun clearRouteMode() {
+        // An explicit clear supersedes any pending debounced clear. The delayed clear path calls this
+        // then sets clearJob = null itself, so we only cancel a still-active job here (a direct caller:
+        // onDestroy/stopTick teardown, or a match failure). Cancelling the very coroutine that is
+        // running this is benign — there is no suspension point after this call — but the takeIf keeps
+        // it tidy. We deliberately do NOT null clearJob here; the delayed path nulls it on its own.
+        clearJob?.takeIf { it.isActive }?.cancel()
         // Cancel any in-flight match and drop the dedup key so a later same-route emit re-matches.
         matchJob?.cancel()
         lastMatchedPolyline = null
@@ -623,6 +661,10 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         tickJob = null
         locationJob?.cancel()
         locationJob = null
+        // Cancel any pending debounced route-mode teardown so a delayed clear can't fire after we've
+        // already torn down (onDestroy → stopTick, or a ride-end stop).
+        clearJob?.cancel()
+        clearJob = null
         // Clear the epoch so the next ride's startTick() gets a fresh stamp. A re-entered startTick()
         // during the SAME ride (tick coroutine died) sees a non-zero epoch and leaves it intact.
         recordingStartedEpoch = 0L
