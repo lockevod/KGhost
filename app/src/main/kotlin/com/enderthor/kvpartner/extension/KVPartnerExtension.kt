@@ -192,6 +192,7 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
 
     private fun onConnected() {
         karooSystem.streamRide().onEach { state ->
+            Timber.d("KVP ride state=$state tickActive=${tickJob?.isActive} route=${routeMode != null}")
             when (state) {
                 is RideState.Recording -> startTick()
                 is RideState.Paused -> {
@@ -360,7 +361,11 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     // `.sample()` is a @FlowPreview API; opting in here (same convention as KSafe's LocationManager).
     @OptIn(kotlinx.coroutines.FlowPreview::class)
     private fun startTick() {
-        if (tickJob?.isActive == true) return
+        if (tickJob?.isActive == true) {
+            Timber.d("KVP startTick SKIP (tick already active)")
+            return
+        }
+        Timber.d("KVP startTick START (route=${routeMode != null})")
         // Only stamp the epoch on a genuinely fresh start. If the tick coroutine previously died
         // mid-ride (e.g. an exception) a later Recording emission re-enters startTick; without this
         // guard it would reset the epoch mid-ride → wrong track id / partial double-save risk. The

@@ -75,6 +75,7 @@ class GapNumericDataType(
     }
 
     override fun startView(context: Context, config: ViewConfig, emitter: ViewEmitter) {
+        Timber.d("KVP gap-numeric startView preview=${config.preview}")
         // Re-entry guard: cancel any previous render scope before starting a new one.
         activeScopeJob?.cancel()
 

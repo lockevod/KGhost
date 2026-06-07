@@ -107,6 +107,7 @@ class GapGraphicDataType(
     }
 
     override fun startView(context: Context, config: ViewConfig, emitter: ViewEmitter) {
+        Timber.d("KVP gap-graphic startView preview=${config.preview}")
         // Re-entry guard: cancel any previous render scope before starting a new one.
         activeScopeJob?.cancel()
 
@@ -170,7 +171,7 @@ class GapGraphicDataType(
                         emitter.updateView(rv)
                     }
             } catch (_: CancellationException) {
-                // normal — field removed from the page.
+                Timber.d("KVP gap-graphic loop cancelled (field removed)")
             } catch (e: Exception) {
                 Timber.e(e, "GapGraphicDataType error: ${e.message}")
             } finally {
