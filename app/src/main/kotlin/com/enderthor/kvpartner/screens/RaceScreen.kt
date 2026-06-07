@@ -45,6 +45,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
+import timber.log.Timber
 import java.io.File
 
 /**
@@ -251,7 +252,13 @@ private fun ImportSection(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Button(
-                    onClick = { context.startActivity(StoragePermission.requestIntent(context)) },
+                    onClick = {
+                        // B-I4: some Karoo OS builds expose no all-files-access settings screen;
+                        // startActivity would then throw ActivityNotFoundException and crash the
+                        // settings UI. Guard it and log instead.
+                        runCatching { context.startActivity(StoragePermission.requestIntent(context)) }
+                            .onFailure { Timber.w(it, "could not open all-files-access settings") }
+                    },
                     modifier = Modifier.heightIn(min = 48.dp),
                 ) {
                     Text(stringResource(R.string.import_permission_grant))
