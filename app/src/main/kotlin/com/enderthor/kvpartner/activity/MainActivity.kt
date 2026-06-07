@@ -26,8 +26,7 @@ import com.enderthor.kvpartner.data.KVPartnerConfig
 import com.enderthor.kvpartner.geo.TrackStore
 import com.enderthor.kvpartner.geo.TrackStorage
 import com.enderthor.kvpartner.managers.ConfigurationManager
-import com.enderthor.kvpartner.screens.PartnerScreen
-import com.enderthor.kvpartner.screens.RaceScreen
+import com.enderthor.kvpartner.screens.SettingsScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -78,10 +77,12 @@ fun TabLayout() {
         }
     }
 
+    // Single combined tab for now. The TabRow scaffold is intentionally kept (not collapsed into a
+    // plain screen) so additional tabs can be added later without restructuring — see [SettingsScreen]
+    // for why Partner + Race were merged into one place.
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabTitles = listOf(
-        stringResource(R.string.tab_partner),
-        stringResource(R.string.tab_race),
+        stringResource(R.string.tab_main),
     )
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -101,9 +102,6 @@ fun TabLayout() {
                 )
             }
         }
-        when (selectedTab) {
-            0 -> PartnerScreen(config = config, configManager = configManager)
-            else -> RaceScreen(config = config, configManager = configManager, recordedCount = trackCount)
-        }
+        SettingsScreen(config = config, configManager = configManager, recordedCount = trackCount)
     }
 }

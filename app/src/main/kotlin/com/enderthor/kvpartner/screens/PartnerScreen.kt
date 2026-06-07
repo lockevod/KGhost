@@ -1,16 +1,13 @@
 package com.enderthor.kvpartner.screens
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -35,15 +32,21 @@ import java.util.Locale
 private enum class TargetMode { SPEED, PACE }
 
 /**
- * Partner tab: enter the Virtual Partner target as speed (km/h) or pace (min/km).
+ * Virtual Partner section: enter the fixed-pace target as speed (km/h) or pace (min/km).
+ *
+ * This is one half of the unified ghost (see [SettingsScreen]): the Virtual Partner pace is what the
+ * ghost runs at on stretches with no recorded history, and what it uses when no route is loaded.
  *
  * The toggle picks the entry mode; on save the value is converted to m/s via [kmhToMs] or
- * [paceMinKmToMs] and stored in [KVPartnerConfig.targetSpeedMs]. The target must be > 0 to be
- * saved; a blank or non-positive value persists 0.0, which keeps the Virtual Partner inactive
- * (the engine emits `GapState.inactive()` while the target is 0).
+ * [paceMinKmToMs] and stored in [KVPartnerConfig.targetSpeedMs]. The target must be > 0 to be saved;
+ * a blank or non-positive value persists 0.0, which keeps the Virtual Partner inactive (the engine
+ * emits `GapState.inactive()` while the target is 0).
+ *
+ * Emitted as direct children of the caller's scrolling Column (no wrapper here), so it stacks with
+ * the Race section under one scroll. Spacing comes from the parent Column's arrangement.
  */
 @Composable
-fun PartnerScreen(
+fun PartnerSection(
     config: KVPartnerConfig,
     configManager: ConfigurationManager,
 ) {
@@ -62,95 +65,92 @@ fun PartnerScreen(
         stringResource(R.string.partner_target_none)
     }
 
-    Column(
+    Text(text = stringResource(R.string.partner_title), style = MaterialTheme.typography.titleMedium)
+    Text(
+        text = stringResource(R.string.partner_description),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Text(text = stringResource(R.string.partner_current_target, currentLabel))
+
+    // Mode toggle: speed vs pace.
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = mode == TargetMode.SPEED,
+            onClick = { mode = TargetMode.SPEED },
+            label = { Text(stringResource(R.string.partner_mode_speed)) },
+            modifier = Modifier.heightIn(min = 48.dp),
+        )
+        FilterChip(
+            selected = mode == TargetMode.PACE,
+            onClick = { mode = TargetMode.PACE },
+            label = { Text(stringResource(R.string.partner_mode_pace)) },
+            modifier = Modifier.heightIn(min = 48.dp),
+        )
+    }
+
+    val fieldLabel = when (mode) {
+        TargetMode.SPEED -> stringResource(R.string.partner_input_speed)
+        TargetMode.PACE -> stringResource(R.string.partner_input_pace)
+    }
+    OutlinedTextField(
+        value = targetText,
+        onValueChange = { targetText = it; status = null },
+        label = { Text(fieldLabel) },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    Button(
+        onClick = {
+            val value = targetText.replace(',', '.').trim().toDoubleOrNull()
+            val targetMs = when (mode) {
+                TargetMode.SPEED -> value?.let { kmhToMs(it) } ?: 0.0
+                TargetMode.PACE -> value?.let { paceMinKmToMs(it) } ?: 0.0
+            }
+            // Only persist a finite, positive, physically-plausible target. 30 m/s (≈108 km/h)
+            // is a generous cycling ceiling; this also blocks "1e400"→Infinity and pathological
+            // pace inputs that would otherwise produce a non-finite or absurd m/s.
+            if (targetMs.isFinite() && targetMs > 0.0 && targetMs <= 30.0) {
+                scope.launch {
+                    val ok = configManager.updateConfig { it.copy(targetSpeedMs = targetMs) }
+                    status = if (ok) null else "saveFailed"
+                }
+            } else {
+                status = "invalid"
+            }
+        },
         modifier = Modifier
             .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .heightIn(min = 48.dp),
     ) {
-        Text(text = stringResource(R.string.partner_title), style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-        Text(text = stringResource(R.string.partner_current_target, currentLabel))
+        Text(stringResource(R.string.partner_save))
+    }
 
-        // Mode toggle: speed vs pace.
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                selected = mode == TargetMode.SPEED,
-                onClick = { mode = TargetMode.SPEED },
-                label = { Text(stringResource(R.string.partner_mode_speed)) },
-                modifier = Modifier.heightIn(min = 48.dp),
-            )
-            FilterChip(
-                selected = mode == TargetMode.PACE,
-                onClick = { mode = TargetMode.PACE },
-                label = { Text(stringResource(R.string.partner_mode_pace)) },
-                modifier = Modifier.heightIn(min = 48.dp),
-            )
-        }
+    if (status == "invalid") {
+        Text(text = stringResource(R.string.partner_invalid))
+    }
+    if (status == "saveFailed") {
+        Text(text = stringResource(R.string.settings_save_failed))
+    }
 
-        val fieldLabel = when (mode) {
-            TargetMode.SPEED -> stringResource(R.string.partner_input_speed)
-            TargetMode.PACE -> stringResource(R.string.partner_input_pace)
-        }
-        OutlinedTextField(
-            value = targetText,
-            onValueChange = { targetText = it; status = null },
-            label = { Text(fieldLabel) },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-            modifier = Modifier.fillMaxWidth(),
-        )
-
-        Button(
-            onClick = {
-                val value = targetText.replace(',', '.').trim().toDoubleOrNull()
-                val targetMs = when (mode) {
-                    TargetMode.SPEED -> value?.let { kmhToMs(it) } ?: 0.0
-                    TargetMode.PACE -> value?.let { paceMinKmToMs(it) } ?: 0.0
-                }
-                // Only persist a finite, positive, physically-plausible target. 30 m/s (≈108 km/h)
-                // is a generous cycling ceiling; this also blocks "1e400"→Infinity and pathological
-                // pace inputs that would otherwise produce a non-finite or absurd m/s.
-                if (targetMs.isFinite() && targetMs > 0.0 && targetMs <= 30.0) {
-                    scope.launch {
-                        val ok = configManager.updateConfig { it.copy(targetSpeedMs = targetMs) }
-                        status = if (ok) null else "saveFailed"
-                    }
+    Button(
+        onClick = {
+            scope.launch {
+                val ok = configManager.updateConfig { it.copy(targetSpeedMs = 0.0) }
+                if (ok) {
+                    targetText = ""
+                    status = null
                 } else {
-                    status = "invalid"
+                    status = "saveFailed"
                 }
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 48.dp),
-        ) {
-            Text(stringResource(R.string.partner_save))
-        }
-
-        if (status == "invalid") {
-            Text(text = stringResource(R.string.partner_invalid))
-        }
-        if (status == "saveFailed") {
-            Text(text = stringResource(R.string.settings_save_failed))
-        }
-
-        Button(
-            onClick = {
-                scope.launch {
-                    val ok = configManager.updateConfig { it.copy(targetSpeedMs = 0.0) }
-                    if (ok) {
-                        targetText = ""
-                        status = null
-                    } else {
-                        status = "saveFailed"
-                    }
-                }
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 48.dp),
-        ) {
-            Text(stringResource(R.string.partner_clear))
-        }
+            }
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp),
+    ) {
+        Text(stringResource(R.string.partner_clear))
     }
 }

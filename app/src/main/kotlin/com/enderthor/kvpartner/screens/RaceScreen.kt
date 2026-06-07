@@ -2,12 +2,12 @@ package com.enderthor.kvpartner.screens
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.FilterChip
@@ -64,8 +64,9 @@ import java.io.File
  * @param configManager  shared manager — never creates its own DataStore.
  * @param recordedCount  read-only count of stored tracks, or null to hide the info line.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun RaceScreen(
+fun RaceSection(
     config: KVPartnerConfig,
     configManager: ConfigurationManager,
     recordedCount: Int? = null,
@@ -73,18 +74,11 @@ fun RaceScreen(
     val scope = rememberCoroutineScope()
     var saveFailed by remember { mutableStateOf(false) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(
-            text = stringResource(R.string.race_title),
-            style = MaterialTheme.typography.titleMedium,
-        )
-        Text(text = stringResource(R.string.race_description))
+    Text(
+        text = stringResource(R.string.race_title),
+        style = MaterialTheme.typography.titleMedium,
+    )
+    Text(text = stringResource(R.string.race_description))
 
         HorizontalDivider()
 
@@ -191,7 +185,9 @@ fun RaceScreen(
             text = stringResource(R.string.race_ghost_icon_label),
             style = MaterialTheme.typography.bodyMedium,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // FlowRow so the four chips wrap to a second line on the narrow Karoo screen instead of the
+        // last label ("Arrow"/"Dot") being clipped off the right edge.
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             data class IconChoice(val icon: GhostIcon, val labelRes: Int)
             listOf(
                 IconChoice(GhostIcon.GHOST, R.string.race_ghost_icon_ghost),
@@ -246,7 +242,6 @@ fun RaceScreen(
         if (saveFailed) {
             Text(text = stringResource(R.string.settings_save_failed))
         }
-    }
 }
 
 /**

@@ -11,7 +11,15 @@
     <string name="segment_field_desc">Adaptive segment view: elevation profile or track, showing your gap versus your past best over the matched stretch.</string>
 
     <!-- Settings UI: tabs -->
+    <string name="tab_main">Virtual Partner</string>
     <string name="tab_partner">Partner</string>
+
+    <!-- Combined screen intro -->
+    <string name="combined_intro_title">How the ghost works</string>
+    <string name="combined_intro_body">KVPartner races you against a single ghost along your route. On stretches you have ridden before, the ghost is your past self (Race Your Own); everywhere else it keeps moving at the Virtual Partner pace below. The two combine into one continuous ghost over the whole ride.</string>
+
+    <!-- Virtual Partner section -->
+    <string name="partner_description">Fixed pace used when no route is loaded, and to fill the parts of a route where you have no recorded history.</string>
 
     <!-- Settings UI: Partner tab -->
     <string name="partner_title">Virtual Partner target</string>
