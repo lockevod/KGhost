@@ -453,14 +453,15 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                             publishGhostMarker(null)
                             return@onEach
                         }
-                        // Per-segment entry clock: when the active segment changes (or we just
-                        // entered one), start counting from now. Entering mid-segment simply starts
-                        // the comparison from the entry point (partial-entry marking omitted for now).
+                        val progressM = routeDist - seg.routeStartM
+                        // Per-segment entry clock. Back-date to the ghost's time at the rider's entry
+                        // distance so a mid-segment entry races EVEN from the entry point (the ghost
+                        // marker and gap start beside the rider, not at the segment start). For a
+                        // normal full-segment entry progressM≈0 → ghost.timeAt(0)=0 → no-op.
                         if (activeSegmentStartM != seg.routeStartM) {
                             activeSegmentStartM = seg.routeStartM
-                            segmentEntryElapsedS = elapsedS
+                            segmentEntryElapsedS = elapsedS - seg.ghost.timeAt(progressM)
                         }
-                        val progressM = routeDist - seg.routeStartM
                         val elapsedInSeg = elapsedS - segmentEntryElapsedS
                         val fresh = StalenessLogic.isTrustworthy(rp.isFresh && rp.onRoute, speedMs)
                         val gap = GapCalculator.compute(progressM, elapsedInSeg, seg.ghost, fresh)
