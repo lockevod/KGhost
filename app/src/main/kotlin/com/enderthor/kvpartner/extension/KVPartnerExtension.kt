@@ -43,7 +43,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -111,6 +113,10 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     private lateinit var configManager: ConfigurationManager
     private val activeConfig = MutableStateFlow(KVPartnerConfig())
     private var tickJob: Job? = null
+    // GPS location consumer. Subscribed only while Recording (started in startTick, cancelled in
+    // stopTick/stopTickAndJoin) so GPS fixes aren't consumed when the recorder/projector don't need
+    // them. Owned by [scope].
+    private var locationJob: Job? = null
 
     // --- ② route / history state -------------------------------------------
     // On-disk store of recorded tracks (history) + the in-memory recorder for the current ride.
@@ -152,6 +158,10 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     private var mapEmitter: Emitter<MapEffect>? = null
     @Volatile
     private var lastGhostMarker: GhostMarker? = null
+    // Serialises publishGhostMarker across threads. The tick now runs on Dispatchers.Default and
+    // publishGhostMarker is also called from clearRouteMode()/stop paths (potentially other threads),
+    // so the read-modify-write of lastGhostMarker + the emitter call must be mutually exclusive.
+    private val mapLock = Any()
 
     // The on-screen data fields rendering the GapState. typeIds must match extension_info.xml
     // exactly ("kvpartner-gap", "kvpartner-gap-num" and "kvpartner-segment").
@@ -182,18 +192,6 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     }
 
     private fun onConnected() {
-        // Keep the latest GPS fix available for the recorder and the route projector. Finite-guard
-        // on write so the tick/recorder never sees a NaN/±Inf coordinate. Tied to [scope] → torn
-        // down in onDestroy.
-        karooSystem.streamLocation().onEach { loc ->
-            val lat = loc.lat
-            val lng = loc.lng
-            if (lat.isFinite() && lng.isFinite()) {
-                lastLat = lat
-                lastLng = lng
-            }
-        }.launchIn(scope)
-
         karooSystem.streamRide().onEach { state ->
             when (state) {
                 is RideState.Recording -> startTick()
@@ -202,11 +200,18 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                     // Freeze the tick by leaving it running but receiving no emissions; do not reset.
                 }
                 is RideState.Idle -> {
-                    // finishAndSaveRecording() reads recordingStartedEpoch (captured synchronously
-                    // before its async save), then clears it; run it before stopTick() so the saved
-                    // track keeps the live epoch. stopTick() also clears the epoch as a backstop.
+                    // Order matters: fully stop+join the tick FIRST so the recorder is quiescent
+                    // (no onSample racing build/reset) before finishAndSaveRecording() touches it.
+                    // The tick never reads recordingStartedEpoch, and stopTickAndJoin() does not
+                    // clear it, so the epoch is still set when finish reads it. finish() reads the
+                    // epoch, builds from the now-idle recorder, launches the IO save, resets the
+                    // recorder, then clears the epoch. We clear the remaining state afterwards.
+                    stopTickAndJoin()
                     finishAndSaveRecording()
-                    stopTick()
+                    GapStateHolder.clear()
+                    SegmentInfoHolder.clear()
+                    publishGhostMarker(null)
+                    recordingStartedEpoch = 0L // backstop; finish() already cleared it
                 }
                 else -> {}
             }
@@ -235,22 +240,24 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
      * nothing. Idempotent and safe to call from any path (tick, clear, stop).
      */
     private fun publishGhostMarker(next: GhostMarker?) {
-        val em = mapEmitter ?: return
-        when (val decision = decideMapEmit(lastGhostMarker, next, MARKER_MIN_MOVE_M)) {
-            is MapEmit.Show -> {
-                val m = decision.marker
-                em.onNext(
-                    ShowSymbols(
-                        listOf(Symbol.Icon(GHOST_SYMBOL_ID, m.lat, m.lng, R.drawable.ic_ghost, m.bearingDeg)),
-                    ),
-                )
-                lastGhostMarker = m
+        synchronized(mapLock) {
+            val em = mapEmitter ?: return
+            when (val decision = decideMapEmit(lastGhostMarker, next, MARKER_MIN_MOVE_M)) {
+                is MapEmit.Show -> {
+                    val m = decision.marker
+                    em.onNext(
+                        ShowSymbols(
+                            listOf(Symbol.Icon(GHOST_SYMBOL_ID, m.lat, m.lng, R.drawable.ic_ghost, m.bearingDeg)),
+                        ),
+                    )
+                    lastGhostMarker = m
+                }
+                MapEmit.Hide -> {
+                    em.onNext(HideSymbols(listOf(GHOST_SYMBOL_ID)))
+                    lastGhostMarker = null
+                }
+                MapEmit.None -> {}
             }
-            MapEmit.Hide -> {
-                em.onNext(HideSymbols(listOf(GHOST_SYMBOL_ID)))
-                lastGhostMarker = null
-            }
-            MapEmit.None -> {}
         }
     }
 
@@ -300,10 +307,9 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     private fun clearRouteMode() {
         routeMode = null
         SegmentInfoHolder.clear()
-        // Confine the map publish to Main: clearRouteMode() can be called from a Default coroutine
-        // (onNavigationState), and publishGhostMarker mutates lastGhostMarker which the Main tick also
-        // touches. Posting to Main serialises all publishGhostMarker calls on one thread.
-        scope.launch(Dispatchers.Main) { publishGhostMarker(null) }
+        // publishGhostMarker is internally synchronized on mapLock, so it is safe to call directly
+        // from any caller thread (this can run on a Default coroutine via onNavigationState).
+        publishGhostMarker(null)
     }
 
     /**
@@ -364,6 +370,19 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         if (recordingStartedEpoch == 0L) {
             recordingStartedEpoch = System.currentTimeMillis()
         }
+        // GPS location consumer — subscribed only while Recording so fixes aren't consumed when the
+        // recorder/projector don't need them. Finite-guard on write so the tick/recorder never sees
+        // a NaN/±Inf coordinate. lastLat/lastLng stay @Volatile (written here, read on the tick).
+        if (locationJob?.isActive != true) {
+            locationJob = karooSystem.streamLocation().onEach { loc ->
+                val lat = loc.lat
+                val lng = loc.lng
+                if (lat.isFinite() && lng.isFinite()) {
+                    lastLat = lat
+                    lastLng = lng
+                }
+            }.launchIn(scope)
+        }
         // ① Virtual Partner state (used when route mode is OFF).
         val progress = DistanceProgress()
         // Cache the ghost curve and rebuild it only when the target speed changes.
@@ -386,7 +405,7 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         // gap clock is `elapsedS - segmentEntryElapsedS`.
         var segmentEntryElapsedS = 0.0
 
-        tickJob = scope.launch {
+        tickJob = scope.launch(Dispatchers.Default) {
             val distance = karooSystem.streamDataFlow(DataType.Type.DISTANCE)
             val elapsed = karooSystem.streamDataFlow(DataType.Type.ELAPSED_TIME)
             // SPEED (m/s) is streamed to distinguish "stopped at a light" (frozen distance is
@@ -496,19 +515,36 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                             GapCalculator.compute(progress.progressM, elapsedS, cachedCurve!!, trustworthy),
                         )
                     }
-                }.collect {}
+                }
+                .catch { Timber.e(it, "tick failed") }
+                .collect {}
         }
     }
 
     private fun stopTick() {
         tickJob?.cancel()
         tickJob = null
+        locationJob?.cancel()
+        locationJob = null
         // Clear the epoch so the next ride's startTick() gets a fresh stamp. A re-entered startTick()
         // during the SAME ride (tick coroutine died) sees a non-zero epoch and leaves it intact.
         recordingStartedEpoch = 0L
         GapStateHolder.clear()
         SegmentInfoHolder.clear()
         publishGhostMarker(null)
+    }
+
+    /**
+     * Fully stops the tick and waits for it to terminate, so the recorder is quiescent before
+     * finishAndSaveRecording() builds/resets it. Unlike [stopTick] this does NOT clear
+     * recordingStartedEpoch (finish() needs it) nor the holders/marker (the Idle handler clears those
+     * after finish()). Cancels the GPS consumer too. Suspends — call only from a coroutine.
+     */
+    private suspend fun stopTickAndJoin() {
+        tickJob?.cancelAndJoin()
+        tickJob = null
+        locationJob?.cancel()
+        locationJob = null
     }
 
     /**
