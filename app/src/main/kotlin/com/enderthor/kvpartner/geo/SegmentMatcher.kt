@@ -173,6 +173,14 @@ object SegmentMatcher {
         // boundary logic is identical to the original, so the intervals it returns are unchanged.
         val coord = scratchCoord.get()!!
 
+        // Spatial grid over the TRACK's segments, built ONCE per track. It makes the per-sample
+        // nearest-perpendicular query near-O(1) (scan a 3×3 cell neighbourhood) instead of
+        // O(trackPoints) (full linear scan in trackPath.nearestPerpDistM). The grid is proven by
+        // PointGridDiffTest to agree with the brute-force full scan on the coverage decision
+        // `(< tol)` for every sample and on the distance value itself whenever `< tol`, so the
+        // covered-run/interval folding below is unchanged.
+        val grid = PointGrid(trackPath, tol)
+
         val runs = ArrayList<Pair<Double, Double>>()
         var runStart = -1.0
         var prevDist = 0.0
@@ -182,7 +190,7 @@ object SegmentMatcher {
         while (true) {
             val dist = if (d < total) d else total
             route.pointAtDistanceInto(dist, coord)
-            val cov = trackPath.nearestPerpDistM(coord[0], coord[1]) < tol
+            val cov = grid.nearestPerpDistM(coord[0], coord[1]) < tol
             if (cov) {
                 if (runStart < 0.0) runStart = dist
             } else if (runStart >= 0.0) {
