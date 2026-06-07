@@ -303,20 +303,23 @@ private fun ImportSection(
         }
     }
 
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         Button(
             onClick = { startImport(onlyNew = false) },
             enabled = !running,
-            modifier = Modifier.heightIn(min = 48.dp),
+            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
         ) {
-            Text(stringResource(R.string.import_all))
+            Text(stringResource(R.string.import_all), maxLines = 1)
         }
         OutlinedButton(
             onClick = { startImport(onlyNew = true) },
             enabled = !running,
-            modifier = Modifier.heightIn(min = 48.dp),
+            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
         ) {
-            Text(stringResource(R.string.import_new_only))
+            Text(stringResource(R.string.import_new_only), maxLines = 1)
         }
     }
 
