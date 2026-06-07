@@ -7,6 +7,7 @@ import com.enderthor.kvpartner.datatype.GapNumericDataType
 import com.enderthor.kvpartner.datatype.SegmentGapDataType
 import com.enderthor.kvpartner.engine.CoastingEstimator
 import com.enderthor.kvpartner.engine.GapCalculator
+import com.enderthor.kvpartner.engine.GapState
 import com.enderthor.kvpartner.engine.GapStateHolder
 import com.enderthor.kvpartner.engine.GhostCurve
 import com.enderthor.kvpartner.engine.LiveSegment
@@ -463,6 +464,24 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                         }
                     }
 
+                    // ① Virtual Partner machinery, hoisted to run EVERY tick regardless of mode so
+                    // it is always ready as the fallback when no segment is active. coast tracks the
+                    // whole-ride DISTANCE odometer (dead-reckoning during brief GPS gaps); the cached
+                    // VP curve is rebuilt lazily when the target changes (below, in vpGapOrNull).
+                    coast.update(distM, speedMs)
+                    // Computes the ① VP gap (whole-ride distance vs elapsed at the fixed target pace),
+                    // or null when no valid VP target is configured (→ nothing to compare → `---`).
+                    fun vpGapOrNull(): GapState? {
+                        val target = activeConfig.value.validTargetOrNull() ?: return null
+                        if (cachedTargetMs != target || cachedCurve == null) {
+                            cachedCurve = VirtualPartnerSource(target).curve()
+                            cachedTargetMs = target
+                        }
+                        return GapCalculator.compute(
+                            coast.effectiveDistanceM, elapsedS, cachedCurve!!, coast.trustworthy,
+                        )
+                    }
+
                     // --- mode select: ② route mode vs ① Virtual Partner ---------------------
                     // Read the route-mode snapshot ONCE per tick so path + segments stay consistent
                     // even if the matcher publishes a new RouteMode mid-tick.
@@ -491,11 +510,15 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                         val routeDist = cr.effectiveDistanceM
                         val seg = rm.segments.firstOrNull { routeDist in it.routeStartM..it.routeEndM }
                         if (seg == null) {
-                            // Between segments / off the matched stretch: no active segment.
+                            // Between segments / off the matched stretch: no active segment. Instead
+                            // of blanking to `---`, fall back to the ① Virtual Partner gap (if a
+                            // target is set) so the field ALWAYS shows something, Garmin-style. Clear
+                            // the segment info (tag reads "VP") and hide the map ghost (VP has none).
                             activeSegmentStartM = null
-                            GapStateHolder.clear()
                             SegmentInfoHolder.clear()
                             publishGhostMarker(null)
+                            val vp = vpGapOrNull()
+                            if (vp != null) GapStateHolder.update(vp) else GapStateHolder.clear()
                             return@runCatching
                         }
                         val progressM = routeDist - seg.routeStartM
@@ -525,26 +548,16 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                         }
                         publishGhostMarker(marker)
                     } else {
-                        // ① Virtual Partner mode — unchanged from sub-project ①.
+                        // ① Virtual Partner mode — no route (or empty segments). Uses the same unified
+                        // vpGapOrNull() as the off-segment fallback so the VP computation lives in one
+                        // place. coast was already updated above; the helper coasts the DISTANCE stream
+                        // at the last known speed during a brief GPS gap (keeping the gap accurate),
+                        // treats a genuine stop as legitimate (frozen distance, still trustworthy), and
+                        // only blanks after a sustained loss or when speed is unavailable.
                         SegmentInfoHolder.clear()
                         publishGhostMarker(null)
-                        val target = activeConfig.value.validTargetOrNull()
-                        if (target == null) {
-                            GapStateHolder.clear()
-                            return@runCatching
-                        }
-                        if (cachedTargetMs != target || cachedCurve == null) {
-                            cachedCurve = VirtualPartnerSource(target).curve()
-                            cachedTargetMs = target
-                        }
-                        // Dead-reckoning: the estimator coasts the DISTANCE stream at the last known
-                        // speed during a brief GPS gap (keeping the gap accurate), treats a genuine
-                        // stop as legitimate (frozen distance, still trustworthy), and only blanks
-                        // after a sustained loss or when speed is unavailable to prove a stop.
-                        coast.update(distM, speedMs)
-                        GapStateHolder.update(
-                            GapCalculator.compute(coast.effectiveDistanceM, elapsedS, cachedCurve!!, coast.trustworthy),
-                        )
+                        val vp = vpGapOrNull()
+                        if (vp != null) GapStateHolder.update(vp) else GapStateHolder.clear()
                     }
                     }.onFailure { e ->
                         if (e is kotlinx.coroutines.CancellationException) throw e
