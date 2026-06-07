@@ -300,7 +300,10 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     private fun clearRouteMode() {
         routeMode = null
         SegmentInfoHolder.clear()
-        publishGhostMarker(null)
+        // Confine the map publish to Main: clearRouteMode() can be called from a Default coroutine
+        // (onNavigationState), and publishGhostMarker mutates lastGhostMarker which the Main tick also
+        // touches. Posting to Main serialises all publishGhostMarker calls on one thread.
+        scope.launch(Dispatchers.Main) { publishGhostMarker(null) }
     }
 
     /**
