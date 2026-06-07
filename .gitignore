@@ -9,3 +9,6 @@ build/
 app/build/
 app/release/
 .DS_Store
+
+# Real FIT ride used only as a local test fixture (③ FitDecoder); not committed (privacy).
+app/src/test/resources/sample.fit
