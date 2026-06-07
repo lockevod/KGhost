@@ -1,6 +1,9 @@
 package com.enderthor.kvpartner.geo
 
+import com.enderthor.kvpartner.import_.HistoryImporter
+import com.enderthor.kvpartner.import_.sourceKeyOf
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -56,6 +59,52 @@ class TrackRecorderTest {
         rec.onSample(40.0, -3.0, 0.0, 0.0)   // 1 kept (and also the only fed sample)
         assertNull(rec.build(id = "T1", startedAtEpoch = 1L))
     }
+
+    @Test fun `cross-source dedup key parity - recorder and importer agree for the same ride`() {
+        // The dedup design requires the SAME ride to yield the SAME sourceKey whether it is live-
+        // recorded by ② (TrackRecorder.build) or scanned/imported by ③ (HistoryImporter.
+        // defaultDecimate). Both must key off the DECIMATED tail. This test locks that ②/③ symmetry.
+        //
+        // One synthetic ride: 52 dense samples every ~5 m up to ~252 m, so a TrackDecimator(20.0)
+        // keeps 0, 20, 40, ... 240 (decimated tail = 240 m, bucket 24) while the true endpoint is
+        // ~252 m (bucket 25). If ② keys off the TRUE endpoint it lands in a different 10 m bucket
+        // than ③ → dedup fails → duplicate track. The keys MUST match.
+        val startedAt = 1_700_000_000_000L
+        val raw = (0..50).map { i -> Triple(i * 5.0, i.toDouble(), i) } // (distanceM, timeS, idx)
+            .map { (d, t, _) -> Sample(lat = 40.0, lng = -3.0, distanceM = d, timeS = t) }
+            .plus(Sample(lat = 40.0, lng = -3.0, distanceM = 252.0, timeS = 51.0)) // true endpoint
+
+        // ② path: feed every raw sample through a TrackRecorder, then build().
+        val rec = TrackRecorder(TrackDecimator(minSpacingM = 20.0))
+        raw.forEach { rec.onSample(it.lat, it.lng, it.distanceM, it.timeS) }
+        val recorded = rec.build(id = "ride", startedAtEpoch = startedAt)!!
+
+        // ③ path: build a RecordedTrack from the SAME raw samples (as DTOs), then defaultDecimate().
+        val scanned = RecordedTrack(
+            id = "scan",
+            startedAtEpoch = startedAt,
+            points = raw.map { TrackPointDto(it.lat, it.lng, it.distanceM, it.timeS) },
+            sourceKey = sourceKeyOf(startedAt, 252.0), // raw-keyed, as FitDecoder/GpxParser produce
+            source = Source.FITFILES_SCAN,
+        )
+        val importedDecimated = HistoryImporter.defaultDecimate(scanned)
+
+        // Guard: keying off the TRUE endpoint (252 m, bucket 25) MUST differ from the decimated tail
+        // (240 m, bucket 24); otherwise this test would pass even on the broken code and prove nothing.
+        assertNotEquals(
+            sourceKeyOf(startedAt, 252.0),
+            sourceKeyOf(startedAt, 240.0),
+        )
+
+        // The invariant: ②'s and ③'s sourceKeys are EQUAL (both key off the decimated tail, 240 m).
+        assertEquals(importedDecimated.sourceKey, recorded.sourceKey)
+
+        // And the endpoint is still preserved in ②'s points (track accuracy is not sacrificed).
+        assertEquals(252.0, recorded.points.last().distanceM, 0.0)
+    }
+
+    /** Local sample holder for the parity test. */
+    private data class Sample(val lat: Double, val lng: Double, val distanceM: Double, val timeS: Double)
 
     @Test fun `reset clears buffer and decimator state`() {
         val rec = TrackRecorder(TrackDecimator(minSpacingM = 20.0))

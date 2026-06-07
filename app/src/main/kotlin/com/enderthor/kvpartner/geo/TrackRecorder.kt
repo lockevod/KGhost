@@ -31,23 +31,28 @@ class TrackRecorder(private val decimator: TrackDecimator = TrackDecimator()) {
      * (a single point cannot form a comparable segment).
      */
     fun build(id: String, startedAtEpoch: Long): RecordedTrack? {
-        // Always include the true ride endpoint: if the last fed sample was decimated away (it is
-        // not already the last kept point), append it before snapshotting. This restores the up-to
-        // ~minSpacingM of track that would otherwise be lost and keeps the sourceKey stable across
-        // re-ingests of the same ride (live recording vs. later FitFiles scan).
+        // Capture the DECIMATED tail (last KEPT point) BEFORE appending the endpoint: this is what
+        // drives the dedup sourceKey. ③ (HistoryImporter.defaultDecimate) keys off its own decimated
+        // tail (kept.lastOrNull()?.distanceM), so ② must do the same for the SAME ride to land in the
+        // SAME 10 m bucket and dedup correctly. Keying off the true endpoint instead would put ② and
+        // ③ up to ~minSpacingM apart → different bucket → dedup FAILS → duplicate track.
+        val decimatedTotalM = buffer.lastOrNull()?.distanceM ?: 0.0
+
+        // Always include the true ride endpoint in the returned POINTS: if the last fed sample was
+        // decimated away (it is not already the last kept point), append it before snapshotting. This
+        // restores the up-to ~minSpacingM of track that would otherwise be lost (track accuracy). The
+        // endpoint is intentionally NOT used for the sourceKey — that keys off the decimated tail
+        // above so it stays symmetric with ③ across re-ingests of the same ride.
         val fed = lastFed
         if (fed != null && buffer.lastOrNull() != fed) {
             buffer.add(fed)
         }
         if (buffer.size < 2) return null
-        // total = the LAST kept point's cumulative ride distance. Drives the dedup sourceKey so a
-        // later FitFiles scan re-ingesting the SAME ride collapses onto this track (same key).
-        val totalDistanceM = buffer.lastOrNull()?.distanceM ?: 0.0
         return RecordedTrack(
             id = id,
             startedAtEpoch = startedAtEpoch,
             points = buffer.map { it.toDto() },
-            sourceKey = sourceKeyOf(startedAtEpoch, totalDistanceM),
+            sourceKey = sourceKeyOf(startedAtEpoch, decimatedTotalM),
             source = Source.RECORDED,
         )
     }
