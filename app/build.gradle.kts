@@ -41,6 +41,7 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.timber)
+    implementation(libs.garmin.fit)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

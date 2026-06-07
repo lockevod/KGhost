@@ -32,6 +32,7 @@ androidx-compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling", versi
 androidx-compose-material = { module = "androidx.compose.material3:material3", version.ref = "androidxComposeMaterial" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerializationJson" }
 timber = { module = "com.jakewharton.timber:timber", version = "5.0.1" }
+garmin-fit = { module = "com.garmin:fit", version = "21.205.0" }
 junit = { module = "junit:junit", version.ref = "junit" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutinesTest" }
 mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockitoCore" }

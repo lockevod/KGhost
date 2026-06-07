@@ -1,0 +1,92 @@
+Flexible and Interoperable Data Transfer (FIT) Protocol
+
+Copyright (c) 2025 Garmin International, Inc.
+
+BY DOWNLOADING, COPYING, INSTALLING, OR OTHERWISE USING THE FIT PROTOCOL OR ANY
+PORTION THEREOF (THE "FIT PROTOCOL"), YOU AGREE TO BE BOUND BY THE TERMS OF THIS
+LICENSE AGREEMENT (THE "AGREEMENT"). IF YOU DO NOT AGREE TO THE TERMS OF THIS
+AGREEMENT, DO NOT DOWNLOAD, COPY, INSTALL, OR OTHERWISE USE THE FIT PROTOCOL.
+
+1. Definitions.
+
+"Adopter" means an individual or entity that has agreed to the terms of this
+Agreement.
+
+"FIT Protocol" means the Flexible and Interoperable Data Transfer protocol,
+including the file format, message definitions, and accompanying software
+development kit (SDK), object code, source code, documentation, and sample code
+made available by Garmin.
+
+"Garmin" means Garmin International, Inc. and its affiliates.
+
+"FIT Products" means products developed by an Adopter that implement the FIT
+Protocol.
+
+2. License Grant.
+
+Subject to the terms and conditions of this Agreement, Garmin hereby grants to
+Adopter a non-exclusive, royalty-free, worldwide, non-transferable, revocable
+license to use, copy, modify, and distribute the FIT Protocol solely for the
+purpose of developing, manufacturing, marketing, selling, and supporting FIT
+Products.
+
+3. Restrictions.
+
+Adopter shall not:
+  (a) remove or alter any copyright, trademark, or other proprietary notices
+      contained in the FIT Protocol;
+  (b) use the FIT Protocol to create any product or service that is competitive
+      with the FIT Protocol itself;
+  (c) use any Garmin name, trademark, or logo without Garmin's prior written
+      consent, except as necessary to identify the FIT Protocol as the source of
+      the technology implemented in a FIT Product.
+
+4. Redistribution.
+
+Adopter may redistribute the FIT Protocol in source or binary form, with or
+without modification, provided that:
+  (a) redistributions of source code retain the above copyright notice, this
+      list of conditions, and the following disclaimer; and
+  (b) redistributions in binary form reproduce the above copyright notice, this
+      list of conditions, and the following disclaimer in the documentation
+      and/or other materials provided with the distribution.
+
+5. Trademarks.
+
+The FIT and Garmin trademarks, service marks, and logos are the property of
+Garmin. Nothing in this Agreement grants Adopter any right to use such marks
+except as expressly permitted herein.
+
+6. Ownership.
+
+Garmin retains all right, title, and interest in and to the FIT Protocol,
+including all intellectual property rights therein. This Agreement does not
+transfer any ownership rights to Adopter.
+
+7. Disclaimer of Warranty.
+
+THE FIT PROTOCOL IS PROVIDED "AS IS" AND GARMIN DISCLAIMS ALL WARRANTIES,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT.
+ADOPTER ASSUMES ALL RISK ASSOCIATED WITH THE USE OF THE FIT PROTOCOL.
+
+8. Limitation of Liability.
+
+IN NO EVENT SHALL GARMIN BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING BUT NOT LIMITED TO
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+IN ANY WAY OUT OF THE USE OF THE FIT PROTOCOL, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+9. Termination.
+
+This Agreement is effective until terminated. Garmin may terminate this
+Agreement at any time if Adopter breaches any term hereof. Upon termination,
+Adopter shall cease all use of the FIT Protocol and destroy all copies thereof.
+
+10. Governing Law.
+
+This Agreement shall be governed by and construed in accordance with the laws of
+the State of Kansas, USA, without regard to its conflict of laws principles.

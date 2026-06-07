@@ -23,3 +23,8 @@
     kotlinx.serialization.KSerializer serializer(...);
 }
 -keep,includedescriptorclasses class com.enderthor.kvpartner.**$$serializer { *; }
+
+# ─── Garmin FIT SDK ──────────────────────────────────────────────────────────
+# FIT decode relies on message-metadata reflection, so keep all SDK classes.
+-keep class com.garmin.fit.** { *; }
+-dontwarn com.garmin.fit.**
