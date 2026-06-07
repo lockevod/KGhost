@@ -14,6 +14,16 @@ object StalenessLogic {
     const val MIN_MOVING_MS = 0.5
 
     /**
+     * How long (ms) the last position/distance may stay frozen before the signal is treated as
+     * stale (→ the field blanks to `---`). Sized to tolerate a BRIEF GPS dropout (a short tunnel,
+     * an underpass, a momentary loss) without flicker: during the grace window the last gap keeps
+     * showing (it drifts slightly as the ghost advances) and snaps back to correct on GPS recovery.
+     * A genuinely prolonged loss still blanks honestly. Tunable; raise to tolerate longer dropouts
+     * at the cost of showing a stale gap longer.
+     */
+    const val DEFAULT_STALE_THRESHOLD_MS = 8_000L
+
+    /**
      * Returns whether the current distance reading can be trusted for gap computation.
      *
      * @param distanceFresh whether `DISTANCE` produced a new value within the staleness threshold.

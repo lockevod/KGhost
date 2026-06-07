@@ -22,7 +22,8 @@ import com.enderthor.kvpartner.geo.PolylinePath
  * @param toleranceM        Maximum perpendicular distance (m) for the rider to be considered
  *                          on-route.  Default 25 m.
  * @param staleThresholdMs  How long (ms) without a position change before [isFresh] becomes
- *                          false.  Default 3000 ms.
+ *                          false.  Defaults to [StalenessLogic.DEFAULT_STALE_THRESHOLD_MS]
+ *                          (tolerant of brief GPS dropouts — short tunnels, underpasses).
  * @param clock             Injectable time source for tests.
  *
  * Out-and-back / self-overlapping routes: on a route A→B→A a point on the shared road projects
@@ -37,7 +38,7 @@ import com.enderthor.kvpartner.geo.PolylinePath
 class RouteProjectedProgress(
     private val route: PolylinePath,
     private val toleranceM: Double = 25.0,
-    private val staleThresholdMs: Long = 3000,
+    private val staleThresholdMs: Long = StalenessLogic.DEFAULT_STALE_THRESHOLD_MS,
     private val clock: () -> Long = System::currentTimeMillis,
 ) : ProgressProvider {
 

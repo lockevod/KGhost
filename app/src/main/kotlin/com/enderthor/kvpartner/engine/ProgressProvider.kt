@@ -22,7 +22,7 @@ interface ProgressProvider {
  * @param clock             Injectable time source so tests do not need Android or real time.
  */
 class DistanceProgress(
-    private val staleThresholdMs: Long = 3000,
+    private val staleThresholdMs: Long = StalenessLogic.DEFAULT_STALE_THRESHOLD_MS,
     private val clock: () -> Long = System::currentTimeMillis,
 ) : ProgressProvider {
 
