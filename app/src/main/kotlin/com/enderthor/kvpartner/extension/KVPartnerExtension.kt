@@ -45,7 +45,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -415,15 +414,16 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                 .sample(REFRESH_MS) // rate-limit BEFORE conflate so we tick at most once per REFRESH_MS
                 .conflate()
                 .onEach { (d, e, sp) ->
+                    runCatching {
                     // DISTANCE is in metres. Drop non-finite values (NaN/±Inf) so they never reach
                     // the gap engine.
                     val distM = (d as? StreamState.Streaming)?.dataPoint?.singleValue
-                        ?.takeIf { it.isFinite() } ?: return@onEach
+                        ?.takeIf { it.isFinite() } ?: return@runCatching
                     // ELAPSED_TIME is delivered in milliseconds by karoo-ext, so convert to seconds.
                     // GapCalculator expects elapsed seconds. If field testing shows the SDK already
                     // delivers seconds, drop the divide-by-1000 in [elapsedMsToSeconds].
-                    val elapsedRaw = (e as? StreamState.Streaming)?.dataPoint?.singleValue ?: return@onEach
-                    val elapsedS = elapsedMsToSeconds(elapsedRaw).takeIf { it.isFinite() } ?: return@onEach
+                    val elapsedRaw = (e as? StreamState.Streaming)?.dataPoint?.singleValue ?: return@runCatching
+                    val elapsedS = elapsedMsToSeconds(elapsedRaw).takeIf { it.isFinite() } ?: return@runCatching
                     // SPEED in m/s — raw magnitude, NOT value-change freshness. A legitimately
                     // constant speed (a rider settled at a steady 0.0 after stopping >3 s at a light)
                     // never "changes", so value-change freshness would wrongly age it out and blank a
@@ -470,7 +470,7 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                             GapStateHolder.clear()
                             SegmentInfoHolder.clear()
                             publishGhostMarker(null)
-                            return@onEach
+                            return@runCatching
                         }
                         val progressM = routeDist - seg.routeStartM
                         // Per-segment entry clock. Back-date to the ghost's time at the rider's entry
@@ -500,7 +500,7 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                         val target = activeConfig.value.validTargetOrNull()
                         if (target == null) {
                             GapStateHolder.clear()
-                            return@onEach
+                            return@runCatching
                         }
                         progress.onDistance(distM)
                         if (cachedTargetMs != target || cachedCurve == null) {
@@ -515,8 +515,8 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                             GapCalculator.compute(progress.progressM, elapsedS, cachedCurve!!, trustworthy),
                         )
                     }
+                    }.onFailure { Timber.e(it, "tick iteration failed") }
                 }
-                .catch { Timber.e(it, "tick failed") }
                 .collect {}
         }
     }
