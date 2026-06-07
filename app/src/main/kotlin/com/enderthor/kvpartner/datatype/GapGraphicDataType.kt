@@ -13,6 +13,7 @@ import com.enderthor.kvpartner.engine.GapDisplayLogic
 import com.enderthor.kvpartner.engine.GapState
 import com.enderthor.kvpartner.engine.GapStateHolder
 import com.enderthor.kvpartner.engine.RenderPrefs
+import com.enderthor.kvpartner.engine.SegmentInfoHolder
 import io.hammerhead.karooext.extension.DataTypeImpl
 import io.hammerhead.karooext.internal.ViewEmitter
 import io.hammerhead.karooext.models.UpdateGraphicConfig
@@ -25,6 +26,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -132,7 +134,10 @@ class GapGraphicDataType(
         run {
             val (sw, sh) = bitmapSize(config)
             val seedState = if (config.preview) DEMO_STATE else GapStateHolder.state.value
-            val seedBmp = renderer.draw(sw, sh, seedState, RenderPrefs.gapDisplay.value)
+            // Mode tag: route segment (②) when SegmentInfoHolder.info is non-null, else fixed-pace
+            // virtual partner (①). Preview always shows the virtual-partner sample.
+            val seedIsRoute = if (config.preview) false else SegmentInfoHolder.info.value != null
+            val seedBmp = renderer.draw(sw, sh, seedState, RenderPrefs.gapDisplay.value, seedIsRoute)
             val seedRv = RemoteViews(context.packageName, R.layout.field_gap)
             seedRv.setImageViewBitmap(R.id.field_gap_image, seedBmp)
             emitter.updateView(seedRv)
@@ -143,14 +148,21 @@ class GapGraphicDataType(
             // seed has already completed synchronously before this launch, so there is no concurrent
             // access to the renderer.
             try {
-                combine(GapStateHolder.state, RenderPrefs.gapDisplay) { state, gapDisplay -> state to gapDisplay }
+                combine(
+                    GapStateHolder.state,
+                    RenderPrefs.gapDisplay,
+                    // Map to Boolean so we don't re-render on every segment-detail change — only on
+                    // the route/virtual-partner mode transition.
+                    SegmentInfoHolder.info.map { it != null },
+                ) { state, gapDisplay, isRoute -> Triple(state, gapDisplay, isRoute) }
                     .distinctUntilChanged()
-                    .collect { (liveState, gapDisplay) ->
+                    .collect { (liveState, gapDisplay, liveIsRoute) ->
                         // In preview (profile editor gallery) render a synthetic demo state so the
                         // field shows a meaningful sample instead of the inactive `---` placeholder.
                         val state = if (config.preview) DEMO_STATE else liveState
+                        val isRoute = if (config.preview) false else liveIsRoute
                         val (w, h) = bitmapSize(config)
-                        val bmp = renderer.draw(w, h, state, gapDisplay)
+                        val bmp = renderer.draw(w, h, state, gapDisplay, isRoute)
                         val rv = RemoteViews(context.packageName, R.layout.field_gap)
                         rv.setImageViewBitmap(R.id.field_gap_image, bmp)
                         emitter.updateView(rv)
@@ -199,7 +211,7 @@ class GapGraphicDataType(
         }
         private val ghostPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
-            color = 0xFFAAAAAA.toInt() // grey ghost dot
+            // Colour set per draw (day/night-aware) — see ghostPaint.color in draw().
         }
         private val youPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
@@ -211,6 +223,10 @@ class GapGraphicDataType(
         private val hintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             textAlign = Paint.Align.CENTER
         }
+        // Dedicated paint for the top-band tags (mode tag left, scale label right). Kept separate
+        // from hintPaint so we never clobber hintPaint's CENTER alignment (used for the small gap
+        // value). textAlign/colour/size are set per draw. Pre-allocated — no per-frame allocation.
+        private val tagPaint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val textBounds = Rect()
 
         private var reuseBitmap: Bitmap? = null
@@ -223,7 +239,7 @@ class GapGraphicDataType(
             reuseCanvas = null
         }
 
-        fun draw(w: Int, h: Int, state: GapState, gapDisplay: GapDisplay): Bitmap {
+        fun draw(w: Int, h: Int, state: GapState, gapDisplay: GapDisplay, isRoute: Boolean): Bitmap {
             // Reuse the bitmap+Canvas across frames; only recreate when the target size changes
             // (e.g. config.viewSize changed). Same-coroutine: this recreate cannot race a draw from
             // another scope. RemoteViews copies the bitmap into the Binder parcel at updateView
@@ -267,6 +283,17 @@ class GapGraphicDataType(
             val right = w - margin
             val span = right - left
 
+            // Top-band tags (only on the active/non-stale path, i.e. when the dots/gap are shown).
+            // Mode tag top-left: "SEG" for a route segment (②), "VP" for the fixed-pace virtual
+            // partner (①). Scale label top-right: the ±WINDOW_M window the dot spread represents.
+            tagPaint.color = neutral
+            tagPaint.textSize = h * 0.13f
+            val tagY = h * 0.13f
+            tagPaint.textAlign = Paint.Align.LEFT
+            canvas.drawText(if (isRoute) "SEG" else "VP", left, tagY, tagPaint)
+            tagPaint.textAlign = Paint.Align.RIGHT
+            canvas.drawText("±${WINDOW_M.toInt()} m", right, tagY, tagPaint)
+
             // Track bar.
             trackPaint.strokeWidth = (h * 0.04f).coerceAtLeast(2f)
             canvas.drawLine(left, trackCy, right, trackCy, trackPaint)
@@ -283,7 +310,10 @@ class GapGraphicDataType(
             val stateColor = context.gapStatusColor(status, neutral, dark)
 
             val dotR = (h * 0.07f).coerceIn(3f, 14f)
-            // Ghost dot (grey) first so an overlap draws your dot on top.
+            // Ghost dot (grey) first so an overlap draws your dot on top. Day/night-aware: a darker
+            // grey on the white day background (light grey would be low-contrast), lighter grey on
+            // the black night background. Kept clearly distinct from the green/red YOUR dot.
+            ghostPaint.color = if (dark) 0xFFAAAAAA.toInt() else 0xFF666666.toInt()
             canvas.drawCircle(ghostX, trackCy, dotR, ghostPaint)
             youPaint.color = stateColor
             canvas.drawCircle(youX, trackCy, dotR, youPaint)
