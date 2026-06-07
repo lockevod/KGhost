@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ExtensionInfo displayName="@string/extension_name" icon="@drawable/ic_kvpartner" id="kvpartner" scansDevices="false" fitFile="false">
+<ExtensionInfo displayName="@string/extension_name" icon="@drawable/ic_kvpartner" id="kvpartner" scansDevices="false" mapLayer="true" fitFile="false">
     <DataType description="@string/gap_graphic_description" displayName="@string/gap_graphic_name" graphical="true" icon="@drawable/ic_kvpartner" typeId="kvpartner-gap" />
     <DataType description="@string/gap_numeric_description" displayName="@string/gap_numeric_name" graphical="true" icon="@drawable/ic_kvpartner" typeId="kvpartner-gap-num" />
     <DataType description="@string/segment_field_desc" displayName="@string/segment_field_name" graphical="true" icon="@drawable/ic_kvpartner" typeId="kvpartner-segment" />
