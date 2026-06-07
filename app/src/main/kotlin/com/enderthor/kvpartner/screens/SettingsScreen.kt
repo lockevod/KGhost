@@ -59,7 +59,7 @@ fun SettingsScreen(
                     selected = config.gapDisplay == option,
                     onClick = {
                         scope.launch {
-                            saveFailed = !configManager.saveConfig(config.copy(gapDisplay = option))
+                            saveFailed = !configManager.updateConfig { it.copy(gapDisplay = option) }
                         }
                     },
                     label = { Text(option.name) },

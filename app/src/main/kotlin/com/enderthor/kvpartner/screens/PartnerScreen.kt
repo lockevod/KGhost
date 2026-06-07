@@ -113,7 +113,7 @@ fun PartnerScreen(
                 // pace inputs that would otherwise produce a non-finite or absurd m/s.
                 if (targetMs.isFinite() && targetMs > 0.0 && targetMs <= 30.0) {
                     scope.launch {
-                        val ok = configManager.saveConfig(config.copy(targetSpeedMs = targetMs))
+                        val ok = configManager.updateConfig { it.copy(targetSpeedMs = targetMs) }
                         status = if (ok) null else "saveFailed"
                     }
                 } else {
@@ -137,7 +137,7 @@ fun PartnerScreen(
         Button(
             onClick = {
                 scope.launch {
-                    val ok = configManager.saveConfig(config.copy(targetSpeedMs = 0.0))
+                    val ok = configManager.updateConfig { it.copy(targetSpeedMs = 0.0) }
                     if (ok) {
                         targetText = ""
                         status = null

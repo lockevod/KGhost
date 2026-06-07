@@ -78,6 +78,30 @@ class ConfigurationManager(private val context: Context) {
         }
     }
 
+    /**
+     * Atomically updates the persisted config: reads the current value, applies [transform], and writes
+     * it back INSIDE a single DataStore edit() so concurrent partial updates (e.g. a background import
+     * advancing lastScanEpoch while the user toggles a switch) merge instead of clobbering each other.
+     *
+     * DataStore's [edit] serialises writes, so the transform always runs against the latest persisted
+     * value — no lost update. The current value is decoded with [decodeConfig] and migrated with
+     * [migrateToLatest] (mirroring [loadConfigFlow]) before [transform] is applied.
+     *
+     * @return true on success, false if it threw (already logged).
+     */
+    suspend fun updateConfig(transform: (KVPartnerConfig) -> KVPartnerConfig): Boolean {
+        return try {
+            context.dataStore.edit { prefs ->
+                val current = prefs[configKey]?.let { decodeConfig(it) }?.migrateToLatest() ?: KVPartnerConfig()
+                prefs[configKey] = jsonForStorage.encodeToString(transform(current))
+            }
+            true
+        } catch (e: Throwable) {
+            Timber.e(e, "Failed to update KVPartnerConfig")
+            false
+        }
+    }
+
     // ─── Private helpers ──────────────────────────────────────────────────────
 
     private fun decodeConfig(raw: String): KVPartnerConfig {

@@ -91,7 +91,7 @@ fun RaceScreen(
             checked = config.raceEnabled,
             onCheckedChange = { enabled ->
                 scope.launch {
-                    saveFailed = !configManager.saveConfig(config.copy(raceEnabled = enabled))
+                    saveFailed = !configManager.updateConfig { it.copy(raceEnabled = enabled) }
                 }
             },
         )
@@ -113,7 +113,7 @@ fun RaceScreen(
                 selected = config.ghostPick == GhostPick.BEST,
                 onClick = {
                     scope.launch {
-                        saveFailed = !configManager.saveConfig(config.copy(ghostPick = GhostPick.BEST))
+                        saveFailed = !configManager.updateConfig { it.copy(ghostPick = GhostPick.BEST) }
                     }
                 },
                 label = { Text(stringResource(R.string.race_ghost_best)) },
@@ -123,7 +123,7 @@ fun RaceScreen(
                 selected = config.ghostPick == GhostPick.LAST,
                 onClick = {
                     scope.launch {
-                        saveFailed = !configManager.saveConfig(config.copy(ghostPick = GhostPick.LAST))
+                        saveFailed = !configManager.updateConfig { it.copy(ghostPick = GhostPick.LAST) }
                     }
                 },
                 label = { Text(stringResource(R.string.race_ghost_last)) },
@@ -140,7 +140,7 @@ fun RaceScreen(
             checked = config.autoRecord,
             onCheckedChange = { record ->
                 scope.launch {
-                    saveFailed = !configManager.saveConfig(config.copy(autoRecord = record))
+                    saveFailed = !configManager.updateConfig { it.copy(autoRecord = record) }
                 }
             },
         )
@@ -163,7 +163,7 @@ fun RaceScreen(
             checked = config.segmentEntryAlert,
             onCheckedChange = { alert ->
                 scope.launch {
-                    saveFailed = !configManager.saveConfig(config.copy(segmentEntryAlert = alert))
+                    saveFailed = !configManager.updateConfig { it.copy(segmentEntryAlert = alert) }
                 }
             },
         )
@@ -177,7 +177,7 @@ fun RaceScreen(
             checked = config.showGhostOnMap,
             onCheckedChange = { show ->
                 scope.launch {
-                    saveFailed = !configManager.saveConfig(config.copy(showGhostOnMap = show))
+                    saveFailed = !configManager.updateConfig { it.copy(showGhostOnMap = show) }
                 }
             },
         )
@@ -293,7 +293,7 @@ private fun ImportSection(
             decimate = HistoryImporter::defaultDecimate,
             lastScanProvider = { currentConfig.lastScanEpoch },
             lastScanSetter = { epoch ->
-                scope.launch { configManager.saveConfig(currentConfig.copy(lastScanEpoch = epoch)) }
+                scope.launch { configManager.updateConfig { it.copy(lastScanEpoch = epoch) } }
             },
         )
         importJob = scope.launch {
