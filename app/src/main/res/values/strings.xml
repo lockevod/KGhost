@@ -46,6 +46,8 @@
     <string name="race_recorded_tracks">Recorded tracks: %1$d</string>
     <string name="race_segment_alert_label">Segment entry alert</string>
     <string name="race_segment_alert_description">Show an alert when entering a stretch with a recorded ghost.</string>
+    <string name="race_show_ghost_on_map">Show ghost on map</string>
+    <string name="race_show_ghost_on_map_desc">Draw the ghost\'s live position on the map during a segment race</string>
 
     <!-- Settings UI: Race tab — history import -->
     <string name="import_title">Import history</string>

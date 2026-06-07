@@ -170,6 +170,20 @@ fun RaceScreen(
 
         HorizontalDivider()
 
+        // ── Show-ghost-on-map switch ──────────────────────────────────────────
+        SwitchRow(
+            label = stringResource(R.string.race_show_ghost_on_map),
+            description = stringResource(R.string.race_show_ghost_on_map_desc),
+            checked = config.showGhostOnMap,
+            onCheckedChange = { show ->
+                scope.launch {
+                    saveFailed = !configManager.saveConfig(config.copy(showGhostOnMap = show))
+                }
+            },
+        )
+
+        HorizontalDivider()
+
         // ── History import ────────────────────────────────────────────────────
         ImportSection(config = config, configManager = configManager, scope = scope)
 

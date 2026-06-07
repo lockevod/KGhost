@@ -30,6 +30,8 @@ data class KVPartnerConfig(
     val ghostPick: GhostPick = GhostPick.BEST,
     /** Whether to emit an in-ride alert when the rider enters a recorded segment. */
     val segmentEntryAlert: Boolean = false,
+    /** Whether to draw the ghost's live position on the map during a segment race. */
+    val showGhostOnMap: Boolean = true,
     /**
      * Epoch millis of the last successful history-import scan. Used by "Import new only" to skip
      * files not modified since. 0L means no scan has run yet (import everything).
