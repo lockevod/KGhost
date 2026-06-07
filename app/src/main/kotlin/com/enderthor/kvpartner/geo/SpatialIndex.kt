@@ -182,9 +182,39 @@ class SpatialIndex(val precision: Int = 6) {
         return cells
     }
 
+    /**
+     * Returns the geohash cells a PATH actually passes through: the union, over each consecutive
+     * point pair (segment), of [cellsFor] applied to that segment's tight bounding box.
+     *
+     * For decimated tracks (~20 m segments) each segment's bbox ≈ the segment itself, so this is a
+     * TIGHT set of the cells the path crosses — unlike `cellsFor(BBox.around(points))`, which returns
+     * the whole rectangular hull and over-counts cells the path never rode (e.g. an L-shaped commute
+     * whose bbox blankets cells between its two legs). Indexing tracks by these path cells makes both
+     * candidate pruning and overlap ranking reflect REAL route overlap.
+     *
+     * Degenerate inputs: an empty list yields no cells (the track is never a candidate, mirroring the
+     * old null-bbox case); a single point yields exactly its one cell.
+     */
+    fun cellsForPath(points: List<LatLng>): Set<String> {
+        if (points.isEmpty()) return emptySet()
+        if (points.size == 1) return setOf(geohash(points[0].lat, points[0].lng, precision))
+        val cells = HashSet<String>()
+        for (i in 0 until points.size - 1) {
+            val a = points[i]
+            val b = points[i + 1]
+            BBox.around(listOf(a, b))?.let { cells.addAll(cellsFor(it)) }
+        }
+        return cells
+    }
+
     /** Records [trackId] against every cell touched by [bbox]. */
     fun add(trackId: String, bbox: BBox) {
-        for (cell in cellsFor(bbox)) {
+        add(trackId, cellsFor(bbox))
+    }
+
+    /** Records [trackId] against the given precomputed [cells] (e.g. from [cellsForPath]). */
+    fun add(trackId: String, cells: Set<String>) {
+        for (cell in cells) {
             cellToTracks.getOrPut(cell) { mutableSetOf() }.add(trackId)
         }
     }

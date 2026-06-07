@@ -200,6 +200,118 @@ class TrackStoreTest {
         assertEquals(listOf("A"), loaded.map { it.id })
     }
 
+    @Test fun `path-cell ranking ranks a SHORT overlapping track above a LONG bystander`() {
+        // EVICTION-FIX PROOF.
+        //
+        // The route runs north along a thin corridor. SHORT rides the route's corridor for a stretch.
+        // LONG is an L-shaped commute: it rides a short common stub of the corridor, then turns away
+        // east for a long leg. LONG's BOUNDING BOX blankets many of the route's cells (because the
+        // box spans both the north corridor and the east leg), but LONG's PATH only touches a couple
+        // of the route's cells. With bbox-cell indexing LONG would (wrongly) outrank SHORT; with
+        // path-cell indexing SHORT (which actually rides more of the route) outranks LONG.
+        val baseLat = 41.000
+        val baseLng = 2.000
+
+        // Route: straight north corridor.
+        fun north(fromI: Int, toI: Int) = (fromI..toI).map { LatLng(baseLat + it * 0.0008, baseLng) }
+        val routePoints = north(0, 40)
+        val routeBBox = BBox.around(routePoints)!!
+
+        // SHORT: rides the route corridor from i=5..25 (a long stretch of real corridor overlap).
+        val shortPath = north(5, 25)
+
+        // LONG: a long, DENSE diagonal from the route's SW start up to the far NE. Its BOUNDING BOX is
+        // a big rectangle [southLat..northLat] x [baseLng..farEast] that BLANKETS the whole vertical
+        // route corridor — but its thin diagonal PATH only crosses the corridor line near the start.
+        // (Dense samples model a real ~20 m-decimated ride: each segment bbox ≈ the segment.)
+        val northLat = baseLat + 40 * 0.0008
+        val farEastLng = baseLng + 60 * 0.0008
+        val steps = 400
+        val longPath = (0..steps).map { i ->
+            val f = i.toDouble() / steps
+            LatLng(baseLat + f * (northLat - baseLat), baseLng + f * (farEastLng - baseLng))
+        }
+
+        // Sanity: LONG's bbox covers route cells it never rides (the rectangle spans north AND east).
+        val longBBox = BBox.around(longPath.map { LatLng(it.lat, it.lng) })!!
+        val routeCells = SpatialIndex(TrackStore.INDEX_PRECISION).cellsFor(routeBBox)
+        val longBBoxCells = SpatialIndex(TrackStore.INDEX_PRECISION).cellsFor(longBBox)
+        val longPathCells = SpatialIndex(TrackStore.INDEX_PRECISION).cellsForPath(longPath)
+        // LONG's bbox blankets MORE route cells than LONG's path actually touches.
+        assertTrue(
+            "LONG bbox must blanket more route cells than its path (the bystander pathology)",
+            longBBoxCells.intersect(routeCells).size > longPathCells.intersect(routeCells).size,
+        )
+
+        // Build the snapshot the NEW way: path cells.
+        var snapshot: Map<String, Set<String>> = emptyMap()
+        snapshot = TrackStore.updatedSnapshot(
+            snapshot, "SHORT", SpatialIndex(TrackStore.INDEX_PRECISION).cellsForPath(shortPath),
+        )
+        snapshot = TrackStore.updatedSnapshot(
+            snapshot, "LONG", SpatialIndex(TrackStore.INDEX_PRECISION).cellsForPath(longPath),
+        )
+
+        val ranked = TrackStore.rankCandidateIds(
+            snapshot, routeBBox, TrackStore.INDEX_PRECISION, maxTracks = 10,
+        )
+        assertEquals("SHORT (real overlap) must outrank LONG (bbox bystander)", "SHORT", ranked.first())
+        assertTrue("LONG, if present, ranks below SHORT", ranked.indexOf("SHORT") < ranked.indexOf("LONG"))
+    }
+
+    @Test fun `migration rebuilds an old bbox-style index into path cells and writes the marker`() {
+        val dir = tmp.newFolder("tracks")
+
+        // A thin diagonal track: its bbox covers a wide rectangle, its path is a thin line.
+        val sw = 41.000 to 2.000
+        val ne = 41.090 to 2.090
+        val n = 200
+        val pts = (0..n).map { i ->
+            val f = i.toDouble() / n
+            TrackPointDto(sw.first + f * (ne.first - sw.first), sw.second + f * (ne.second - sw.second), i * 20.0, i * 4.0)
+        }
+        val diag = RecordedTrack("DIAG", 1_000L, pts)
+
+        // Write the <id>.json directly (simulating a pre-migration store).
+        val store = TrackStore(dir)
+        // Use save() to write the file; this also writes a (new, path-cell) index — but we then
+        // overwrite index.json with an OLD bbox-style index and DELETE the marker to force a rebuild.
+        store.save(diag)
+
+        // Overwrite index.json with the OLD bbox-cell registration and remove the marker.
+        val bbox = BBox.around(diag.points.map { LatLng(it.lat, it.lng) })!!
+        val bboxSnapshot = SpatialIndex(TrackStore.INDEX_PRECISION).let { idx ->
+            idx.add("DIAG", bbox); idx.snapshot()
+        }
+        dir.resolve("index.json").writeText(
+            com.enderthor.kvpartner.extension.jsonForStorage.encodeToString(
+                kotlinx.serialization.serializer<Map<String, Set<String>>>(), bboxSnapshot,
+            ),
+        )
+        dir.resolve(".pathcells").delete()
+        assertFalse(dir.resolve(".pathcells").exists())
+
+        // The NW corner of the bbox is OFF the diagonal — present in the old bbox index, must vanish.
+        val nwCorner = geohash(bbox.maxLat, bbox.minLng, TrackStore.INDEX_PRECISION)
+        assertTrue("old bbox index contains the off-path NW corner", nwCorner in bboxSnapshot.keys)
+
+        // Touch the candidate-read path → triggers the one-time rebuild.
+        val queryNw = BBox(bbox.maxLat - 0.001, bbox.maxLat + 0.001, bbox.minLng - 0.001, bbox.minLng + 0.001)
+        store.loadCandidates(queryNw)
+
+        // Marker now exists; index rebuilt to path cells (NW corner cell no longer registered).
+        assertTrue("marker file must be created after rebuild", dir.resolve(".pathcells").exists())
+        val rebuilt = com.enderthor.kvpartner.extension.jsonWithUnknownKeys.decodeFromString(
+            kotlinx.serialization.serializer<Map<String, Set<String>>>(),
+            dir.resolve("index.json").readText(),
+        )
+        assertFalse("off-path NW corner cell must be gone after path-cell rebuild", nwCorner in rebuilt.keys)
+
+        // Recall preserved: a query on the diagonal still finds DIAG.
+        val onPath = BBox(41.045 - 0.001, 41.045 + 0.001, 2.045 - 0.001, 2.045 + 0.001)
+        assertEquals(listOf("DIAG"), store.loadCandidates(onPath).map { it.id })
+    }
+
     @Test fun `pure updatedSnapshot then candidateIds selects the overlapping track`() {
         val a = track("A", 40.0, -3.0)
         val b = track("B", 50.0, 7.0)

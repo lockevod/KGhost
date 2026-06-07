@@ -100,32 +100,39 @@ class TrackStore(private val dir: File) {
             for (t in tracks) {
                 if (t.sourceKey.isNotEmpty() && t.sourceKey in known) continue
                 atomicWriteText(File(dir, t.id + JSON_SUFFIX), jsonForStorage.encodeToString(t))
-                BBox.around(t.points.map { LatLng(it.lat, it.lng) })?.let { index.add(t.id, it) }
+                val cells = index.cellsForPath(t.points.map { LatLng(it.lat, it.lng) })
+                if (cells.isNotEmpty()) index.add(t.id, cells)
                 if (t.sourceKey.isNotEmpty()) known.add(t.sourceKey)
                 added++
             }
             writeSnapshot(index.snapshot())
+            markPathCells()
             writeSourceKeys(known)
             added
         }
     }
 
     /**
-     * Writes `<id>.json` for [track] and folds its bbox into `index.json`.
+     * Writes `<id>.json` for [track] and folds its PATH cells into `index.json`.
      *
-     * If the track has no points its bbox is undefined; the track file is still written (so it can
-     * be round-tripped) but it is not added to the index — it can never be a spatial candidate.
+     * The track is registered against the cells its path actually passes through
+     * ([SpatialIndex.cellsForPath]), NOT its rectangular bounding box, so pruning and overlap ranking
+     * reflect real route overlap. A track with fewer than two points yields no path cells; its file
+     * is still written (so it round-trips) but it is not indexed — it can never be a spatial
+     * candidate (same as the old null-bbox case).
      */
     fun save(track: RecordedTrack) {
         ensureDir()
 
         atomicWriteText(File(dir, track.id + JSON_SUFFIX), jsonForStorage.encodeToString(track))
 
-        val bbox = BBox.around(track.points.map { LatLng(it.lat, it.lng) }) ?: return
+        val cells = SpatialIndex(INDEX_PRECISION).cellsForPath(track.points.map { LatLng(it.lat, it.lng) })
+        if (cells.isEmpty()) return
         // Read-modify-write of the shared index must be atomic against concurrent saves/loads.
         synchronized(indexLock) {
-            val newSnapshot = updatedSnapshot(readSnapshot(), track.id, bbox, INDEX_PRECISION)
+            val newSnapshot = updatedSnapshot(readSnapshot(), track.id, cells, INDEX_PRECISION)
             writeSnapshot(newSnapshot)
+            markPathCells()
         }
     }
 
@@ -134,8 +141,8 @@ class TrackStore(private val dir: File) {
      * candidate `<id>.json` files. Tracks whose file is missing or unparseable are skipped.
      */
     fun loadCandidates(routeBBox: BBox): List<RecordedTrack> {
-        // Snapshot the index under the lock so we never read it mid-modify (torn file → empty).
-        val ids = synchronized(indexLock) { candidateIds(readSnapshot(), routeBBox, INDEX_PRECISION) }
+        // Snapshot the (path-cell, migrated) index under the lock so we never read it mid-modify.
+        val ids = synchronized(indexLock) { candidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION) }
         return loadByIds(ids)
     }
 
@@ -151,9 +158,9 @@ class TrackStore(private val dir: File) {
      * from being silently dropped by a recency cut.
      */
     fun loadTopCandidates(routeBBox: BBox, maxTracks: Int): List<RecordedTrack> {
-        // Snapshot the index under the lock so we never read it mid-modify (torn file → empty).
+        // Snapshot the (path-cell, migrated) index under the lock so we never read it mid-modify.
         val ids = synchronized(indexLock) {
-            rankCandidateIds(readSnapshot(), routeBBox, INDEX_PRECISION, maxTracks)
+            rankCandidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION, maxTracks)
         }
         return loadByIds(ids)
     }
@@ -173,6 +180,45 @@ class TrackStore(private val dir: File) {
         if (!dir.exists()) dir.mkdirs()
     }
 
+    /**
+     * Returns the spatial-index snapshot guaranteed to be PATH-CELL based, performing a one-time,
+     * lazy migration if needed. MUST be called under [indexLock] (both candidate-read callers hold
+     * it), so the rebuild runs at most once even under concurrent loads.
+     *
+     * The persisted `index.json` may have been written by an older build that registered tracks by
+     * their rectangular bounding box. The presence of [INDEX_PATHCELLS_MARKER] records that the index
+     * is already path-cell based. If the marker is absent, every `<id>.json` is re-read, its path
+     * cells computed via [SpatialIndex.cellsForPath], a fresh snapshot built and written, and the
+     * marker created — after which subsequent reads skip straight to [readSnapshot].
+     *
+     * This re-parses all tracks once, off-Main: the only callers ([loadCandidates] /
+     * [loadTopCandidates]) run on `Dispatchers.Default`/`IO` (route load / matcher), never on Main.
+     */
+    private fun readPathCellSnapshot(): Map<String, Set<String>> {
+        val marker = File(dir, INDEX_PATHCELLS_MARKER)
+        if (marker.isFile) return readSnapshot()
+
+        // Marker absent → rebuild from path cells (once, under the lock the callers already hold).
+        val index = SpatialIndex(INDEX_PRECISION)
+        var n = 0
+        for (id in allTrackIds()) {
+            val f = File(dir, id + JSON_SUFFIX)
+            if (!f.isFile) continue
+            val track = runCatching { jsonWithUnknownKeys.decodeFromString<RecordedTrack>(f.readText()) }
+                .getOrNull() ?: continue
+            val cells = index.cellsForPath(track.points.map { LatLng(it.lat, it.lng) })
+            if (cells.isNotEmpty()) index.add(track.id, cells)
+            n++
+        }
+        val rebuilt = index.snapshot()
+        writeSnapshot(rebuilt)
+        ensureDir()
+        runCatching { marker.writeText("1") }
+            .onFailure { Timber.w(it, "failed to write path-cells marker; rebuild may repeat") }
+        Timber.i("rebuilt spatial index with path cells for %d tracks", n)
+        return rebuilt
+    }
+
     private fun readSnapshot(): Map<String, Set<String>> {
         val f = File(dir, INDEX_FILE)
         // An absent index is a normal cold-start state → empty, no log.
@@ -185,6 +231,18 @@ class TrackStore(private val dir: File) {
             Timber.w(e, "index.json present but failed to parse; treating as empty (corrupt index?)")
             emptyMap()
         }
+    }
+
+    /**
+     * Ensures the [INDEX_PATHCELLS_MARKER] exists so a path-cell-written index is not needlessly
+     * rebuilt by [readPathCellSnapshot]. Idempotent; called after every index write. Best effort.
+     */
+    private fun markPathCells() {
+        val marker = File(dir, INDEX_PATHCELLS_MARKER)
+        if (marker.exists()) return
+        ensureDir()
+        runCatching { marker.writeText("1") }
+            .onFailure { Timber.w(it, "failed to write path-cells marker") }
     }
 
     private fun writeSnapshot(snapshot: Map<String, Set<String>>) {
@@ -246,6 +304,12 @@ class TrackStore(private val dir: File) {
         /** Stores the serialized `Set<String>` of source keys ingested via [add] (dedup state). */
         private const val SOURCEKEYS_FILE = "sourcekeys.json"
 
+        /**
+         * Marker file whose presence records that `index.json` is PATH-CELL based (not the legacy
+         * bbox-cell layout). Absent → [readPathCellSnapshot] performs the one-time rebuild.
+         */
+        const val INDEX_PATHCELLS_MARKER = ".pathcells"
+
         /** Suffix for the same-dir temp file used by the atomic write-then-rename. */
         private const val TMP_SUFFIX = ".tmp"
 
@@ -264,6 +328,21 @@ class TrackStore(private val dir: File) {
         ): Map<String, Set<String>> {
             val index = SpatialIndex(precision, snapshot)
             index.add(trackId, bbox)
+            return index.snapshot()
+        }
+
+        /**
+         * Pure: folds [trackId] registered against the precomputed [cells] (e.g. from
+         * [SpatialIndex.cellsForPath]) into [snapshot], returning a new snapshot — no filesystem.
+         */
+        fun updatedSnapshot(
+            snapshot: Map<String, Set<String>>,
+            trackId: String,
+            cells: Set<String>,
+            precision: Int = INDEX_PRECISION,
+        ): Map<String, Set<String>> {
+            val index = SpatialIndex(precision, snapshot)
+            index.add(trackId, cells)
             return index.snapshot()
         }
 

@@ -68,4 +68,52 @@ class SpatialIndexTest {
             "long" in cands,
         )
     }
+
+    @Test fun `cellsForPath returns the cells along a straight corridor`() {
+        val idx = SpatialIndex(precision = 6)
+        // A straight, dense path going east along a corridor (steps well under one cell width).
+        val path = (0..20).map { LatLng(41.380, 2.170 + it * 0.0008) }
+        val cells = idx.cellsForPath(path)
+
+        // Every consecutive sample's cell must be present (the path passes through it).
+        for (p in path) {
+            assertTrue("path cell ${geohash(p.lat, p.lng, 6)} must be indexed", geohash(p.lat, p.lng, 6) in cells)
+        }
+    }
+
+    @Test fun `cellsForPath of a thin diagonal line excludes a bbox cell off the path`() {
+        val idx = SpatialIndex(precision = 6)
+        // A thin diagonal line from SW to NE. Its bounding box is a large rectangle, but the line
+        // itself is thin: the bbox CORNERS (e.g. the NW corner) lie far from the line.
+        val sw = LatLng(41.000, 2.000)
+        val ne = LatLng(41.090, 2.090)
+        // Dense samples along the diagonal so each segment bbox ~ the segment (no gaps).
+        val n = 200
+        val path = (0..n).map { i ->
+            val f = i.toDouble() / n
+            LatLng(sw.lat + f * (ne.lat - sw.lat), sw.lng + f * (ne.lng - sw.lng))
+        }
+        val pathCells = idx.cellsForPath(path)
+
+        // The full bounding box of the diagonal.
+        val bbox = BBox.around(path)!!
+        val bboxCells = idx.cellsFor(bbox)
+
+        // KEY PROPERTY: path cells are a STRICT subset of the bbox cells (the line does not fill the box).
+        assertTrue("path cells must be subset of bbox cells", bboxCells.containsAll(pathCells))
+        assertTrue("a thin line must touch fewer cells than its full bbox", pathCells.size < bboxCells.size)
+
+        // The NW corner of the bbox (max lat, min lng) is far from a SW→NE diagonal: its cell must be
+        // in the bbox cell set but NOT on the path.
+        val nwCorner = geohash(bbox.maxLat, bbox.minLng, 6)
+        assertTrue("NW corner cell is inside the bbox cell set", nwCorner in bboxCells)
+        assertFalse("NW corner cell is OFF the diagonal path and must be absent", nwCorner in pathCells)
+    }
+
+    @Test fun `cellsForPath handles fewer than two points`() {
+        val idx = SpatialIndex(precision = 6)
+        assertTrue("empty path yields no cells", idx.cellsForPath(emptyList()).isEmpty())
+        val single = idx.cellsForPath(listOf(LatLng(41.38, 2.17)))
+        assertEquals("single point yields its one cell", setOf(geohash(41.38, 2.17, 6)), single)
+    }
 }
