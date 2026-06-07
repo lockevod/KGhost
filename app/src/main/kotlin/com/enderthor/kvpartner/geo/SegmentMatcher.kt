@@ -50,7 +50,21 @@ import java.util.Locale
 object SegmentMatcher {
 
     data class Params(
-        val toleranceM: Double = 25.0,
+        /**
+         * Recorded-history COVERAGE tolerance (metres): the maximum perpendicular distance from a
+         * route sample to a recorded track for that sample to count as "covered" (step 2 above).
+         *
+         * This is the cross-day GPS budget for the "race your own" use case: the SAME road ridden on
+         * a DIFFERENT day routinely offsets 15–40 m (urban canyon, multipath, a different fix), so a
+         * tight value silently drops a real match below [minSegmentM] and yields no segment. Default
+         * 35.0 absorbs that day-to-day offset while staying well below the road-spacing that would
+         * start merging parallel roads.
+         *
+         * This is DISTINCT from live route-snapping tolerance (RouteProjectedProgress), which decides
+         * whether the rider's CURRENT fix is on the loaded route; that one stays tighter because it
+         * judges a single live position, not the overlap of two recorded histories.
+         */
+        val toleranceM: Double = 35.0,
         val minSegmentM: Double = 300.0,
         val mergeGapM: Double = 80.0,
         /**
