@@ -5,7 +5,7 @@ import com.enderthor.kvpartner.data.KVPartnerConfig
 import com.enderthor.kvpartner.datatype.GapGraphicDataType
 import com.enderthor.kvpartner.datatype.GapNumericDataType
 import com.enderthor.kvpartner.datatype.SegmentGapDataType
-import com.enderthor.kvpartner.engine.DistanceProgress
+import com.enderthor.kvpartner.engine.CoastingEstimator
 import com.enderthor.kvpartner.engine.GapCalculator
 import com.enderthor.kvpartner.engine.GapStateHolder
 import com.enderthor.kvpartner.engine.GhostCurve
@@ -13,7 +13,6 @@ import com.enderthor.kvpartner.engine.LiveSegment
 import com.enderthor.kvpartner.engine.RenderPrefs
 import com.enderthor.kvpartner.engine.RouteProjectedProgress
 import com.enderthor.kvpartner.engine.SegmentInfoHolder
-import com.enderthor.kvpartner.engine.StalenessLogic
 import com.enderthor.kvpartner.engine.VirtualPartnerSource
 import com.enderthor.kvpartner.engine.toInfo
 import com.enderthor.kvpartner.geo.BBox
@@ -67,7 +66,8 @@ import java.io.File
  *  - While recording, runs a ~1 Hz tick that combines the `DISTANCE`, `ELAPSED_TIME` and `SPEED`
  *    streams. The tick has two modes:
  *      * **① Virtual Partner mode** (default, when no route is loaded or racing is disabled):
- *        feeds [DistanceProgress] + a cached [VirtualPartnerSource] curve into [GapCalculator].
+ *        feeds the DISTANCE stream through a [CoastingEstimator] (dead-reckoning during brief GPS
+ *        loss) + a cached [VirtualPartnerSource] curve into [GapCalculator].
  *      * **② Route mode** (when a navigated route is loaded and `raceEnabled`): projects the live
  *        GPS position onto the route via [RouteProjectedProgress], finds the active recorded
  *        [LiveSegment], and computes the gap against that segment's ghost. Publishes the active
@@ -383,7 +383,11 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
             }.launchIn(scope)
         }
         // ① Virtual Partner state (used when route mode is OFF).
-        val progress = DistanceProgress()
+        // Dead-reckoning estimator that owns BOTH the effective distance and trustworthiness: it
+        // extrapolates (coasts) the DISTANCE stream at the last known speed during a brief GPS gap,
+        // and only blanks after a sustained loss. Replaces the old DistanceProgress +
+        // StalenessLogic.isTrustworthy pair for ①.
+        val coast = CoastingEstimator()
         // Cache the ghost curve and rebuild it only when the target speed changes.
         // VirtualPartnerSource.curve() allocates a fresh curve on every call, so building it
         // inside the 1 Hz tick would churn a curve per second; instead we remember the target
@@ -397,6 +401,11 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         // route. Null when no route is loaded.
         var routeProjector: RouteProjectedProgress? = null
         var projectorRoute: PolylinePath? = null
+        // ② route-mode dead-reckoning estimator, applied to the projected route distance. Rebuilt
+        // alongside routeProjector when the route identity changes so it resets per route. Coasting
+        // advances the route distance during a GPS gap (the rider keeps moving along the route),
+        // which is exactly the desired behavior for segment selection and the gap.
+        var coastRoute: CoastingEstimator? = null
         // The route-distance start of the segment currently being raced, used to detect when the
         // active segment changes (to reset the per-segment entry clock). null = no active segment.
         var activeSegmentStartM: Double? = null
@@ -453,16 +462,24 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                         // Rebuild the projector when the route identity changes.
                         if (projectorRoute !== rm.path) {
                             routeProjector = RouteProjectedProgress(rm.path)
+                            coastRoute = CoastingEstimator()
                             projectorRoute = rm.path
                             activeSegmentStartM = null
                         }
                         val rp = routeProjector!!
+                        val cr = coastRoute!!
                         val lat = lastLat
                         val lng = lastLng
                         if (lat.isFinite() && lng.isFinite()) {
                             rp.onLocation(LatLng(lat, lng))
                         }
-                        val routeDist = rp.progressM
+                        // Dead-reckon the projected route distance: coasting advances routeDist during
+                        // a brief GPS gap so segment selection and the gap keep tracking the rider's
+                        // assumed position; a sustained loss flips trustworthy=false → blank. We feed
+                        // the RAW projected distance; the estimator owns trustworthiness (so rp.onRoute
+                        // is folded in below only as a hard gate when the fix IS fresh).
+                        cr.update(rp.progressM, speedMs)
+                        val routeDist = cr.effectiveDistanceM
                         val seg = rm.segments.firstOrNull { routeDist in it.routeStartM..it.routeEndM }
                         if (seg == null) {
                             // Between segments / off the matched stretch: no active segment.
@@ -482,7 +499,12 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                             segmentEntryElapsedS = elapsedS - seg.ghost.timeAt(progressM)
                         }
                         val elapsedInSeg = elapsedS - segmentEntryElapsedS
-                        val fresh = StalenessLogic.isTrustworthy(rp.isFresh && rp.onRoute, speedMs)
+                        // The estimator owns trustworthiness (handles the GPS-gap/coast case). We add
+                        // ONE hard gate: when the projector fix IS fresh (a new position arrived) but
+                        // the rider is off-route, do not trust — a genuine deviation, not a dropout.
+                        // While coasting (frozen projection) onRoute reflects the last good fix, so we
+                        // don't let a stale off-route flag override the coast decision.
+                        val fresh = cr.trustworthy && (!rp.isFresh || rp.onRoute)
                         val gap = GapCalculator.compute(progressM, elapsedInSeg, seg.ghost, fresh)
                         GapStateHolder.update(gap)
                         SegmentInfoHolder.set(seg.toInfo())
@@ -502,17 +524,17 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                             GapStateHolder.clear()
                             return@runCatching
                         }
-                        progress.onDistance(distM)
                         if (cachedTargetMs != target || cachedCurve == null) {
                             cachedCurve = VirtualPartnerSource(target).curve()
                             cachedTargetMs = target
                         }
-                        // Speed-magnitude-gated staleness: a frozen distance is trustworthy only if
-                        // the rider is essentially stopped (raw speed below the moving threshold);
-                        // frozen WHILE moving — or with no usable speed — means GPS is unreliable.
-                        val trustworthy = StalenessLogic.isTrustworthy(progress.isFresh, speedMs)
+                        // Dead-reckoning: the estimator coasts the DISTANCE stream at the last known
+                        // speed during a brief GPS gap (keeping the gap accurate), treats a genuine
+                        // stop as legitimate (frozen distance, still trustworthy), and only blanks
+                        // after a sustained loss or when speed is unavailable to prove a stop.
+                        coast.update(distM, speedMs)
                         GapStateHolder.update(
-                            GapCalculator.compute(progress.progressM, elapsedS, cachedCurve!!, trustworthy),
+                            GapCalculator.compute(coast.effectiveDistanceM, elapsedS, cachedCurve!!, coast.trustworthy),
                         )
                     }
                     }.onFailure { e ->
