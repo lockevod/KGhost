@@ -44,7 +44,7 @@ class TrackRecorder(private val decimator: TrackDecimator = TrackDecimator()) {
         // endpoint is intentionally NOT used for the sourceKey — that keys off the decimated tail
         // above so it stays symmetric with ③ across re-ingests of the same ride.
         val fed = lastFed
-        if (fed != null && buffer.lastOrNull() != fed) {
+        if (fed != null && fed.distanceM > (buffer.lastOrNull()?.distanceM ?: Double.NEGATIVE_INFINITY)) {
             buffer.add(fed)
         }
         if (buffer.size < 2) return null

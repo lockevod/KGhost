@@ -51,6 +51,21 @@ class TrackRecorderTest {
         assertEquals(listOf(0.0, 25.0), track.points.map { it.distanceM })
     }
 
+    @Test fun `build does not append a backward end-of-ride glitch endpoint`() {
+        // A final end-of-ride GPS glitch reports a SMALLER cumulative distance than the last kept
+        // point. The endpoint must NOT be appended (it would be non-monotonic/malformed); the built
+        // track simply ends at the last kept point and does not crash.
+        val rec = TrackRecorder(TrackDecimator(minSpacingM = 20.0))
+        rec.onSample(40.0, -3.0, 0.0, 0.0)    // kept (first)
+        rec.onSample(40.0, -3.0, 20.0, 1.0)   // kept (>= 20 m)
+        rec.onSample(40.0, -3.0, 40.0, 2.0)   // kept (>= 20 m)
+        rec.onSample(40.0, -3.0, 35.0, 3.0)   // backward glitch: dropped by decimator, NOT appended
+
+        val track = rec.build(id = "T1", startedAtEpoch = 7_000L)!!
+        assertEquals(40.0, track.points.last().distanceM, 0.0)
+        assertEquals(listOf(0.0, 20.0, 40.0), track.points.map { it.distanceM })
+    }
+
     @Test fun `build returns null with fewer than two kept points`() {
         // A single distinct sample cannot form a comparable segment. (Note: with the endpoint fix,
         // feeding two distinct distances always yields >= 2 points, since the true endpoint is kept
