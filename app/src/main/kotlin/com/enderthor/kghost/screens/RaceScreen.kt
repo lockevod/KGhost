@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -292,7 +293,15 @@ private fun ImportSection(
 
     if (!hasAccess) {
         // ── Permission gate ───────────────────────────────────────────────────
-        Card(modifier = Modifier.fillMaxWidth()) {
+        // Rendered as an error-container card (not a plain surface) so the rider can't miss that
+        // this access is required — without it KGhost loads no ghosts at all.
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+            ),
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -301,12 +310,11 @@ private fun ImportSection(
             ) {
                 Text(
                     text = stringResource(R.string.import_permission_title),
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.titleSmall,
                 )
                 Text(
                     text = stringResource(R.string.import_permission_description),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Button(
                     onClick = {

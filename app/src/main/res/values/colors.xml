@@ -23,4 +23,10 @@
          amber: bright on the black night background, darker on the white day background (WCAG AA). -->
     <color name="gap_estimate_night">#FFFFC107</color>
     <color name="gap_estimate_day">#FFB35A00</color>
+
+    <!-- Segment-entry in-ride alert: blue background + white text ("info" hue per the alert colour
+         convention, kept distinct from the green/red gap hues and the orange GPS-lost alert).
+         @ColorRes per the InRideAlert contract. -->
+    <color name="segment_alert_bg">#FF1565C0</color>
+    <color name="segment_alert_text">#FFFFFFFF</color>
 </resources>

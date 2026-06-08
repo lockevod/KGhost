@@ -7,6 +7,8 @@ live on a data field and as a marker on the map.
 Built with the official [`karoo-ext`](https://github.com/hammerheadnav/karoo-ext) SDK for Karoo 2
 and Karoo 3.
 
+<a href="https://www.buymeacoffee.com/enderthor" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>
+
 ## What it does
 
 - **Ghost Pace** — pick a target pace/speed and race a constant-pace ghost. The live gap (time
@@ -85,49 +87,40 @@ and "race your own" are two halves of one ghost, so they are configured together
 To import external rides you must grant **All files access** when prompted (used to read
 `/sdcard/FitFiles` and `/sdcard/KGhost`).
 
-## Build
-
-Requirements: **JDK 17** (Gradle itself must run on 17), Android SDK 34.
-
-`karoo-ext` is published on **GitHub Packages**, so you need a GitHub token with `read:packages`.
-Put credentials in `local.properties` (gitignored):
-
-```properties
-gpr.user=<your-github-username>
-gpr.key=<a-github-PAT-with-read:packages>
-```
-
-Then:
-
-```bash
-export JAVA_HOME=$(/usr/libexec/java_home -v 17)   # macOS; any JDK 17 works
-./gradlew :app:assembleDebug         # debug APK
-./gradlew :app:assembleRelease       # release APK (R8)
-./gradlew :app:testDebugUnitTest     # JVM unit tests
-```
-
-Tech: Kotlin 2.0, AGP 8.5, `karoo-ext` 1.1.9, Jetpack Compose (settings UI), DataStore,
-kotlinx.serialization, the Garmin FIT Java SDK (for FIT import), JUnit 4. `compileSdk`/`targetSdk`
-34, `minSdk` 23 (with core-library desugaring for `java.time`).
-
-## Architecture (brief)
-
-A pure, JVM-tested core (no Android) does the work and the extension is plumbing:
-
-- `engine/` — `GhostCurve` (bidirectional distance↔time interpolation), `GapCalculator` → `GapState`,
-  the Ghost-Pace and recorded-ghost sources, `RouteGhost` (stitches the continuous whole-route
-  ghost), `RouteProjectedProgress` (GPS→route distance), and `CoastingEstimator` (the GPS-loss
-  dead-reckoning / estimate-quality state machine).
-- `geo/` — route polyline projection (`PolylinePath`), recorded-track store with a geohash spatial
-  index, segment matcher, track decimation.
-- `import/` — GPX (SAX) and FIT (Garmin SDK) decoders + the history importer (with `sourceKey` dedup
-  so the same ride ingested twice collapses to one ghost).
-- `map/` — pure helpers that turn the ghost's route position into a map marker.
-- `extension/KGhostExtension.kt` — feeds the engine from `karoo-ext` streams, publishes `GapState`
-  for the data fields, emits `MapEffect` symbols for the on-map ghost, and dispatches the GPS-lost
-  in-ride alert.
 
 ## Third-party
 
 This project uses the Garmin Flexible and Interoperable Data Transfer (FIT) SDK.
 See [third_party/FIT-SDK-LICENSE.txt](third_party/FIT-SDK-LICENSE.txt) for the FIT SDK license.
+
+## Disclaimer
+
+KGhost is a **training aid** that shows an estimated gap to a virtual or recorded ghost. It is **not**
+a precision instrument: the gap is derived from GPS distance, dead-reckoning during signal loss, and
+decimated recorded tracks, so it can be inaccurate — especially during GPS dropouts, off-route
+deviations, or on stretches with little recorded history.
+
+**KGhost is provided "as is", without warranty of any kind, express or implied.** The developer
+(EnderThor) accepts no responsibility or liability for any harm, injury, loss, or damage arising from
+the use or inability to use this application. All configuration and recorded tracks are stored locally
+on your Karoo; KGhost does not collect or transmit any personal data.
+
+> [!WARNING]
+> Do not let chasing the ghost distract you from traffic, road conditions, or your own limits. Keep
+> your attention on the road, not on the data field — your safety always comes first.
+
+## Credits
+
+- Developed by EnderThor.
+- Built on the Karoo Extensions Framework ([`karoo-ext`](https://github.com/hammerheadnav/karoo-ext))
+  by Hammerhead.
+- Uses the Garmin FIT SDK to read recorded `.fit` rides (see [Third-party](#third-party)).
+- Thanks to Hammerhead for the Karoo device and extensions API, and to the Karoo community
+  (the [awesome-karoo](https://github.com/timklge/awesome-karoo) list and contributors) for ideas
+  and inspiration.
+
+## Support
+
+If KGhost is useful to you, you can support its development:
+
+<a href="https://www.buymeacoffee.com/enderthor" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>

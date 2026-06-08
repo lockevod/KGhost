@@ -39,6 +39,7 @@ import io.hammerhead.karooext.internal.Emitter
 import io.hammerhead.karooext.models.DataType
 import io.hammerhead.karooext.models.HideSymbols
 import io.hammerhead.karooext.models.InRideAlert
+import java.io.File
 import io.hammerhead.karooext.models.MapEffect
 import io.hammerhead.karooext.models.OnNavigationState
 import io.hammerhead.karooext.models.RideState
@@ -195,7 +196,14 @@ class KGhostExtension : KarooExtension("kghost", "0.1.0") {
 
     // --- ② route / history state -------------------------------------------
     // On-disk store of recorded tracks (history) + the in-memory recorder for the current ride.
-    private lateinit var trackStore: TrackStore
+    // Resolved lazily (see [trackStore]) rather than pinned once in onCreate: the rider can grant
+    // all-files access AFTER the extension started, and tracksDir() then flips from the internal
+    // fallback to /sdcard/KGhost/tracks. Caching the store forever would keep reading the (empty)
+    // internal dir for the whole service lifetime, so no imported ghosts would EVER load until the
+    // app was killed and recreated — exactly the "I granted permission but it doesn't re-read until
+    // I close the app" bug.
+    @Volatile private var trackStoreCache: TrackStore? = null
+    @Volatile private var trackStoreDir: File? = null
     private val recorder = TrackRecorder()
 
     // Latest GPS fix from the location stream. Read by both the recorder and the route projector
@@ -332,8 +340,9 @@ class KGhostExtension : KarooExtension("kghost", "0.1.0") {
         karooSystem = KarooSystemService(applicationContext)
         // tracksDir() does file IO (mkdirs + one-time migration); onCreate runs off the main
         // thread for an extension service, so it's safe here. Resolves shared external storage
-        // when all-files access is granted, else falls back to internal.
-        trackStore = TrackStore(TrackStorage.tracksDir(applicationContext))
+        // when all-files access is granted, else falls back to internal. Priming it here keeps the
+        // early-migration behaviour; trackStore() re-resolves later if the rider grants access.
+        trackStore()
         // loadConfigFlow() already applies migrateToLatest(); no need to migrate again here.
         configManager.loadConfigFlow().onEach { activeConfig.value = it }.launchIn(scope)
         // Feed the render-prefs holder so the data fields don't each open their own DataStore
@@ -593,7 +602,7 @@ class KGhostExtension : KarooExtension("kghost", "0.1.0") {
                         return@launch
                     }
                     // Pre-cap candidates by ROUTE OVERLAP (relevance), parsing only the top tracks.
-                    val tracks = trackStore.loadTopCandidates(bbox, SegmentMatcher.Params().maxTracks)
+                    val tracks = trackStore().loadTopCandidates(bbox, SegmentMatcher.Params().maxTracks)
                     // A superseding route should cancel this stale match promptly: bail before the
                     // expensive match if we've been cancelled.
                     currentCoroutineContext().ensureActive()
@@ -731,6 +740,11 @@ class KGhostExtension : KarooExtension("kghost", "0.1.0") {
         // One-shot guard for the "GPS lost" alert: set true when fired, re-armed to false when GPS
         // recovers (coast back to LIVE). Local to the tick so it resets per ride.
         var gpsAlertFired = false
+        // Start-distance of the recorded stretch the rider was on at the previous tick — a stable
+        // per-route key. Edge-triggers the "segment entry" alert exactly once on entry (and again on
+        // crossing into a DIFFERENT stretch), never every tick while on it. null = between segments /
+        // off-route last tick. Local to the tick so it resets per ride.
+        var prevSegStartM: Double? = null
 
         tickJob = scope.launch(Dispatchers.Default) {
             val distance = karooSystem.streamDataFlow(DataType.Type.DISTANCE)
@@ -818,6 +832,35 @@ class KGhostExtension : KarooExtension("kghost", "0.1.0") {
                         }
                         return coastingS >= GPS_GIVEUP_S
                     }
+                    // Edge-triggered "segment entry" alert + the per-tick SegmentInfoHolder publish,
+                    // driven off the SAME active-segment decision so the alert and the field's SEG/VP
+                    // tag never disagree. Fires the alert exactly once when the rider crosses INTO a
+                    // recorded stretch (or into a different one), gated on the rider's toggle; staying
+                    // on the stretch does not re-fire. A non-null → null transition (left the stretch,
+                    // VP fallback, or a long GPS loss) re-arms it for the next entry.
+                    fun publishSegment(seg: LiveSegment?) {
+                        if (seg == null) {
+                            prevSegStartM = null
+                            SegmentInfoHolder.clear()
+                            return
+                        }
+                        if (activeConfig.value.segmentEntryAlert && seg.routeStartM != prevSegStartM) {
+                            karooSystem.dispatch(
+                                InRideAlert(
+                                    id = "kghost-segment-${System.currentTimeMillis()}",
+                                    icon = R.drawable.ic_ghost,
+                                    title = applicationContext.getString(R.string.segment_entry_title),
+                                    detail = applicationContext.getString(R.string.segment_entry_detail),
+                                    autoDismissMs = 8_000L,
+                                    backgroundColor = R.color.segment_alert_bg,
+                                    textColor = R.color.segment_alert_text,
+                                ),
+                            )
+                            Timber.d("KVP segment entry alert: ${seg.ghostLabel} @${"%.0f".format(seg.routeStartM)}m")
+                        }
+                        prevSegStartM = seg.routeStartM
+                        SegmentInfoHolder.set(seg.toInfo())
+                    }
                     // Computes the ① VP gap (whole-ride distance vs elapsed at the fixed target pace).
                     // The VP target is ALWAYS present (defaults to 12 km/h — it can't be deactivated, it's
                     // the fallback), so this always returns a gap. The gap is shown even while
@@ -866,7 +909,7 @@ class KGhostExtension : KarooExtension("kghost", "0.1.0") {
                         // sustained (~3 min) loss: blank the field and hide the ghost rather than show a
                         // wildly-extrapolated route position.
                         if (handleGpsLoss(cr.coastingSeconds)) {
-                            SegmentInfoHolder.clear()
+                            publishSegment(null)
                             mapGhostState = null // give up: hide the ghost (the loop hides it)
                             GapStateHolder.clear()
                             return@runCatching
@@ -897,7 +940,7 @@ class KGhostExtension : KarooExtension("kghost", "0.1.0") {
                         if (rg == null) {
                             // Couldn't build the continuous whole-route ghost. Fall back to the ①
                             // whole-ride Ghost Pace gap (always available); no map ghost.
-                            SegmentInfoHolder.clear()
+                            publishSegment(null)
                             mapGhostState = null
                             GapStateHolder.update(vpGap())
                             return@runCatching
@@ -917,7 +960,7 @@ class KGhostExtension : KarooExtension("kghost", "0.1.0") {
                         GapStateHolder.update(gap)
                         // Segment field viz: show the active recorded stretch, else clear. The gap shown
                         // is still the whole-route gap (which, on a recorded stretch, races your past self).
-                        if (seg != null) SegmentInfoHolder.set(seg.toInfo()) else SegmentInfoHolder.clear()
+                        publishSegment(seg)
                         // ④ ghost-on-map: hand the ~5 Hz map loop an immutable snapshot so it can
                         // interpolate the ghost's time-based position BETWEEN these 1 Hz ticks and make
                         // the marker glide. We anchor the ghost clock here (elapsedS + wall-clock now);
@@ -942,7 +985,7 @@ class KGhostExtension : KarooExtension("kghost", "0.1.0") {
                         // stop as legitimate (frozen distance). It never blanks for a GPS loss — only a
                         // missing target blanks — EXCEPT after a sustained (~3 min) loss, where
                         // handleGpsLoss() gives up and we blank rather than show a wild extrapolation.
-                        SegmentInfoHolder.clear()
+                        publishSegment(null)
                         mapGhostState = null // VP mode: no map ghost (the loop hides it)
                         if (handleGpsLoss(coast.coastingSeconds)) {
                             GapStateHolder.clear()
@@ -1015,6 +1058,25 @@ class KGhostExtension : KarooExtension("kghost", "0.1.0") {
 
     /**
      * Called on [RideState.Idle]: persists the just-recorded ride (if it produced >= 2 decimated
+     * Returns the [TrackStore] for the CURRENT resolved tracks dir, rebuilding it whenever the dir
+     * changes (e.g. all-files access was granted since onCreate, flipping internal → external). Both
+     * call sites — the route-match candidate read and the ride-end save — run off the main thread, so
+     * the tracksDir() file IO (mkdirs + one-time migration) is safe here. Synchronized so the two
+     * threads never race on the rebuild; building two stores for the SAME dir is harmless anyway (the
+     * write lock is keyed process-wide by dir path inside TrackStore).
+     */
+    @Synchronized
+    private fun trackStore(): TrackStore {
+        val dir = TrackStorage.tracksDir(applicationContext)
+        if (trackStoreCache == null || trackStoreDir != dir) {
+            trackStoreCache = TrackStore(dir)
+            trackStoreDir = dir
+            Timber.d("trackStore (re)bound to $dir")
+        }
+        return trackStoreCache!!
+    }
+
+    /**
      * points) to the [TrackStore] on IO, then resets the recorder for the next ride. The id and
      * startedAtEpoch are the wall-clock epoch captured at Recording start.
      */
@@ -1025,7 +1087,7 @@ class KGhostExtension : KarooExtension("kghost", "0.1.0") {
             // add() dedups on sourceKey (first writer wins). false means a same-key ride is already
             // stored — e.g. a FitFiles scan ingested this ride first; nothing to do but note it.
             scope.launch(Dispatchers.IO) {
-                if (!trackStore.add(track)) {
+                if (!trackStore().add(track)) {
                     Timber.d("recorded track ${track.id} skipped: sourceKey ${track.sourceKey} already stored")
                 }
             }

@@ -8,6 +8,10 @@
     <string name="gps_lost_title">GPS perdido</string>
     <string name="gps_lost_detail">Diferencia estimada hasta recuperar la señal</string>
 
+    <!-- Aviso en marcha que aparece una vez cuando el ciclista entra en un tramo con un fantasma grabado. -->
+    <string name="segment_entry_title">Tramo grabado</string>
+    <string name="segment_entry_detail">Ahora compites contra tu fantasma grabado</string>
+
     <string name="gap_numeric_name">Diferencia Ghost Pace</string>
     <string name="gap_numeric_description">Diferencia de tiempo/distancia con el Ghost Pace.</string>
     <string name="gap_graphic_name">Pista Ghost Pace</string>
@@ -62,8 +66,8 @@
     <!-- UI de ajustes: pestaña Carrera — importar historial -->
     <string name="import_title">Importar historial</string>
     <string name="import_folder_hint">Coloca archivos GPX o FIT en /sdcard/KGhost/ para importarlos como pistas de fantasma.</string>
-    <string name="import_permission_title">Se necesita acceso al almacenamiento</string>
-    <string name="import_permission_description">KGhost necesita acceso a todos los archivos para leer tus recorridos grabados en /sdcard/FitFiles y los archivos que coloques en /sdcard/KGhost.</string>
+    <string name="import_permission_title">Acceso al almacenamiento obligatorio</string>
+    <string name="import_permission_description">Importante: sin acceso a todos los archivos KGhost no puede cargar ningún fantasma. Concédelo para que KGhost pueda leer tus recorridos grabados en /sdcard/FitFiles y los archivos que coloques en /sdcard/KGhost. Si lo concedes con la app abierta, los fantasmas se cargarán en tu próxima salida.</string>
     <string name="import_permission_grant">Conceder acceso</string>
     <string name="import_all">Todos</string>
     <string name="import_new_only">Solo nuevos</string>

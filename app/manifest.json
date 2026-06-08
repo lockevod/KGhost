@@ -1,0 +1,11 @@
+{
+  "label": "KGhost",
+  "packageName": "com.enderthor.kghost",
+  "latestApkUrl": "https://github.com/lockevod/KGhost/releases/latest/download/kghost.apk",
+  "iconUrl": "https://github.com/lockevod/KGhost/releases/latest/download/kghost.png",
+  "latestVersion": "0.4.0",
+  "latestVersionCode": 202606081,
+  "developer": "github.com/lockevod",
+  "description": "Race against a ghost on your Karoo: a fixed-pace Ghost Pace or your own past self on a route, stitched into one continuous ghost. Shows the live time/distance gap on graphical and numeric data fields and draws the ghost's position on the map. Records each ride automatically and can import GPX/FIT ghosts dropped in /sdcard/KGhost. Keeps estimating during GPS dropouts. Beta version, use with care.",
+  "releaseNotes": "Segment-entry in-ride alert. Storage access is re-read without restarting the app after granting it. Clearer storage-permission notice. Rebrand to KGhost, imperial-unit fixes and es-ES localization."
+}

@@ -4,9 +4,9 @@
     android:height="48dp"
     android:viewportWidth="48"
     android:viewportHeight="48">
-    <!-- Brand-green background -->
+    <!-- Brand background (deep indigo) -->
     <path
-        android:fillColor="#FF16C64F"
+        android:fillColor="#FF3B30A0"
         android:pathData="M24,24 m-23,0 a23,23 0 1,0 46,0 a23,23 0 1,0 -46,0 Z" />
 
     <!-- Ghost (your past self) — left/behind, white with cut-out eyes -->
@@ -20,8 +20,8 @@
         <path
             android:fillColor="#E6FFFFFF"
             android:pathData="M24,4 C15.7,4 9,10.7 9,19 v23 l5,-4 5,4 5,-4 5,4 5,-4 5,4 V19 C39,10.7 32.3,4 24,4 Z" />
-        <path android:fillColor="#FF16C64F" android:pathData="M19,18 m-2.5,0 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0 Z" />
-        <path android:fillColor="#FF16C64F" android:pathData="M29,18 m-2.5,0 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0 Z" />
+        <path android:fillColor="#FF3B30A0" android:pathData="M19,18 m-2.5,0 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0 Z" />
+        <path android:fillColor="#FF3B30A0" android:pathData="M29,18 m-2.5,0 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0 Z" />
     </group>
 
     <!-- Cyclist (you) — right/front, solid white -->
