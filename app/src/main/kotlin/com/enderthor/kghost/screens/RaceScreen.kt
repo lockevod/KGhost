@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.enderthor.kghost.FileLogTree
 import com.enderthor.kghost.R
 import com.enderthor.kghost.data.GhostIcon
 import com.enderthor.kghost.data.KGhostConfig
@@ -241,6 +242,30 @@ fun RaceSection(
             scope = scope,
             onTracksChanged = onTracksChanged,
         )
+
+        HorizontalDivider()
+
+        // ── Diagnostics: file logging ─────────────────────────────────────────
+        SwitchRow(
+            label = stringResource(R.string.race_filelog_label),
+            description = stringResource(R.string.race_filelog_description),
+            checked = config.fileLogging,
+            onCheckedChange = { on ->
+                // Apply immediately in THIS process so logging starts/stops the moment the rider flips it,
+                // not only once the extension service next runs its config flow.
+                FileLogTree.enabled = on
+                scope.launch {
+                    saveFailed = !configManager.updateConfig { it.copy(fileLogging = on) }
+                }
+            },
+        )
+        if (config.fileLogging) {
+            Text(
+                text = stringResource(R.string.race_filelog_path, FileLogTree.pathHint()),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
 
         // ── Save-failure notice ───────────────────────────────────────────────
         if (saveFailed) {

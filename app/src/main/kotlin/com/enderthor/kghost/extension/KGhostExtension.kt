@@ -1,6 +1,7 @@
 package com.enderthor.kghost.extension
 
 import com.enderthor.kghost.BuildConfig
+import com.enderthor.kghost.FileLogTree
 import com.enderthor.kghost.R
 import com.enderthor.kghost.data.KGhostConfig
 import com.enderthor.kghost.datatype.GapGraphicDataType
@@ -30,6 +31,7 @@ import com.enderthor.kghost.map.GhostMapPresenter
 import com.enderthor.kghost.map.GhostMarker
 import com.enderthor.kghost.map.ghostIconRes
 import com.enderthor.kghost.map.ghostIconRotates
+import com.enderthor.kghost.data.GhostSize
 import com.enderthor.kghost.map.ghostSizeForZoom
 import com.enderthor.kghost.map.MapEmit
 import com.enderthor.kghost.map.decideMapEmit
@@ -330,6 +332,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private var matchJob: Job? = null
     @Volatile
     private var lastMatchedPolyline: String? = null
+    // Last compact nav summary logged, to dedup the noisy NavigatingRoute re-emits (see onNavigationState).
+    private var lastNavLog: String? = null
+    // Last config summary logged, to dedup the per-emission config flow (log only on a real change).
+    private var lastCfgLog: String? = null
+    // Previous fileLogging value, so the "file logging ON" banner fires on the config off→on transition
+    // independent of who set FileLogTree.enabled (the settings UI sets it immediately too).
+    private var prevFileLogging = false
 
     // Debounce for non-route nav-state teardown. The host emits transient Idle/NavigatingToDestination
     // blips between NavigatingRoute re-emits; this delayed job clears route mode only if no route comes
@@ -412,7 +421,24 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // early-migration behaviour; trackStore() re-resolves later if the rider grants access.
         trackStore()
         // loadConfigFlow() already applies migrateToLatest(); no need to migrate again here.
-        configManager.loadConfigFlow().onEach { activeConfig.value = it }.launchIn(scope)
+        configManager.loadConfigFlow().onEach {
+            activeConfig.value = it
+            // Drive the file-logger toggle off the rider's config (a backstop to the settings UI, which
+            // already sets it immediately — this re-asserts it on a service restart). On the off→on
+            // transition write a banner so ride/session boundaries are findable in the rolling log.
+            if (it.fileLogging && !prevFileLogging) {
+                Timber.i("===== KGhost ${BuildConfig.VERSION_NAME} file logging ON =====")
+            }
+            prevFileLogging = it.fileLogging
+            FileLogTree.enabled = it.fileLogging
+            // Log the active settings as context for any bug report, deduped so it only fires on a real
+            // change ("I changed X and it didn't apply"). startTick() also logs a baseline per ride.
+            val cfgSig = configSummary(it)
+            if (cfgSig != lastCfgLog) {
+                lastCfgLog = cfgSig
+                Timber.i("KVP config: $cfgSig")
+            }
+        }.launchIn(scope)
         // Feed the render-prefs holder so the data fields don't each open their own DataStore
         // subscription just to read gapDisplay (single writer here; fields are readers).
         activeConfig
@@ -502,8 +528,18 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
 
         // ② route load → match recorded history into live segments; clear on non-route states.
         navJob = karooSystem.streamNavigationState().onEach { onNavigationState(it) }.launchIn(scope)
-        // Map zoom → auto-scale the ghost icon. Cheap (changes only when the rider zooms).
-        zoomJob = karooSystem.streamMapZoom().onEach { currentMapZoom = it }.launchIn(scope)
+        // Map zoom → auto-scale the ghost icon. Cheap (changes only when the rider zooms). Log only when
+        // the zoom crosses into a different ghost-SIZE bucket (the thing that actually changes the icon),
+        // so "is the zoom affecting the ghost?" is answerable without flooding on every zoom tick.
+        var lastZoomSize: GhostSize? = null
+        zoomJob = karooSystem.streamMapZoom().onEach { z ->
+            currentMapZoom = z
+            val size = ghostSizeForZoom(z)
+            if (size != lastZoomSize) {
+                lastZoomSize = size
+                Timber.d("KVP zoom=${"%.1f".format(z)} → ghost size=$size")
+            }
+        }.launchIn(scope)
         // Rider's distance unit → the gap fields render metres or feet accordingly.
         profileJob = karooSystem.streamUserProfile()
             .onEach {
@@ -588,7 +624,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Log only the interesting Shows (heartbeat re-assert / icon swap), NOT every ~1 Hz
                     // routine move — a per-tick String.format("%.5f", …) would box+format every second
                     // for hours, and the arg is built even in release (before the no-op log call).
-                    if (force || iconChanged) Timber.d("KVP ghost SHOW force=$force iconChanged=$iconChanged")
+                    // Include zoom + size here so an icon-swap caused by a zoom change is self-explanatory
+                    // (answers "is the zoom affecting the ghost?").
+                    if (force || iconChanged) {
+                        Timber.d(
+                            "KVP ghost SHOW force=$force iconChanged=$iconChanged " +
+                                "zoom=${"%.1f".format(currentMapZoom)} size=${ghostSizeForZoom(currentMapZoom)} " +
+                                "lat=${"%.5f".format(m.lat)} lng=${"%.5f".format(m.lng)}",
+                        )
+                    }
                 }
                 MapEmit.Hide -> {
                     em.onNext(HideSymbols(listOf(GHOST_SYMBOL_ID)))
@@ -644,7 +688,19 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
      */
     private fun onNavigationState(event: OnNavigationState) {
         val state = event.state
-        Timber.d("nav=$state")
+        // Compact + deduped: the host re-emits NavigatingRoute MANY times (computing climbs/progress);
+        // logging the full object (polyline + climbs arrays) on every re-emit floods the log. Summarise,
+        // and log only when the summary changes.
+        val navSummary = when (state) {
+            is OnNavigationState.NavigationState.NavigatingRoute ->
+                "NavigatingRoute name=${state.name} routeLen=${"%.0f".format(state.routeDistance)} " +
+                    "rejoin=${state.rejoinDistance != null || state.rejoinPolyline != null}"
+            else -> state::class.simpleName ?: "?"
+        }
+        if (navSummary != lastNavLog) {
+            lastNavLog = navSummary
+            Timber.d("nav=$navSummary")
+        }
         if (state is OnNavigationState.NavigationState.NavigatingRoute && activeConfig.value.raceEnabled) {
             // Track REJOIN state live (the host re-emits NavigatingRoute as it computes a rejoin, so this
             // updates even though the heavy match below dedups on the polyline). A non-null rejoin means
@@ -784,6 +840,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         publishGhostMarker(null)
     }
 
+    /** Compact one-line summary of the active settings, for the log (config-change + ride-start baseline). */
+    private fun configSummary(c: KGhostConfig): String =
+        "raceEnabled=${c.raceEnabled} target=${"%.1f".format(c.targetMs())}m/s pick=${c.ghostPick} " +
+            "showMap=${c.showGhostOnMap} icon=${c.ghostIcon} entryAlert=${c.segmentEntryAlert} " +
+            "exitAlert=${c.segmentExitAlert} autoRecord=${c.autoRecord}"
+
     // `.sample()` is a @FlowPreview API; opting in here (same convention as KSafe's LocationManager).
     @OptIn(kotlinx.coroutines.FlowPreview::class)
     private fun startTick() {
@@ -791,7 +853,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             Timber.d("KVP startTick SKIP (tick already active)")
             return
         }
-        Timber.d("KVP startTick START (route=${routeMode != null})")
+        // Ride-start config baseline: guarantees every ride's log records the active settings even if the
+        // last config-change line rotated out of the file (answers "what settings was this ride on?").
+        Timber.i("KVP startTick START (route=${routeMode != null}) config: ${configSummary(activeConfig.value)}")
         isRecording = true
         // Only stamp the epoch on a genuinely fresh start. If the tick coroutine previously died
         // mid-ride (e.g. an exception) a later Recording emission re-enters startTick; without this
@@ -806,6 +870,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // (not streamLocation()) because only the DataType carries LOC_ACCURACY, which we use to keep a
         // cached/default pre-lock fix OUT of the recorded track. lastLat/lastLng are written ONLY for a
         // trusted (accurate) fix. @Volatile (written here, read on the tick).
+        // Throttle for the loc log: log the fix whenever the TRUST state flips (the acquisition story —
+        // cached pre-lock fix → real lock — fully captured) but only ~every 5 s in steady state (an
+        // unchanging trusted=true / acc=5m every second is just noise). Reset per ride with the job.
+        var lastLocLogMs = 0L
+        var lastLocTrusted: Boolean? = null
         if (locationJob?.isActive != true) {
             locationJob = karooSystem.streamDataFlow(DataType.Type.LOCATION).onEach { state ->
                 val dp = (state as? StreamState.Streaming)?.dataPoint ?: return@onEach
@@ -818,13 +887,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     lastLat = lat
                     lastLng = lng
                 }
-                // Log EVERY fix (accepted or not) with its accuracy so the trust threshold can be
-                // validated/tuned from real rides — in particular to capture the accuracy of the Karoo's
-                // pre-lock cached position vs a true lock.
-                Timber.d(
-                    "KVP loc: lat=${"%.5f".format(lat)} lng=${"%.5f".format(lng)} " +
-                        "acc=${acc?.let { "%.0f".format(it) } ?: "null"}m trusted=$trusted",
-                )
+                val nowMs = System.currentTimeMillis()
+                if (trusted != lastLocTrusted || nowMs - lastLocLogMs >= 5_000L) {
+                    lastLocTrusted = trusted
+                    lastLocLogMs = nowMs
+                    Timber.d(
+                        "KVP loc: lat=${"%.5f".format(lat)} lng=${"%.5f".format(lng)} " +
+                            "acc=${acc?.let { "%.0f".format(it) } ?: "null"}m trusted=$trusted",
+                    )
+                }
             }.launchIn(scope)
         }
         // Route-progress consumer — the Karoo's OWN map-matched distance-to-destination + ON_ROUTE
@@ -1070,6 +1141,23 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             fresh = coast.quality != CoastQuality.LONG_LOSS,
                         )
                     }
+                    // Periodic diagnostic for ① VP (Ghost-Pace) mode — the branch that used to log nothing,
+                    // so "the ghost wasn't there" was undiagnosable. [reason] says WHY we're in VP (no route
+                    // vs a route with no buildable ghost curve). Same throttle as the route snapshot
+                    // (~2.5 s). [gap] is null when the field is blanked (sustained GPS loss).
+                    fun logVp(reason: String, gap: GapState?) {
+                        val nowMs = System.currentTimeMillis()
+                        if (nowMs - lastDiagLogMs >= diagLogMs) {
+                            lastDiagLogMs = nowMs
+                            Timber.d(
+                                "KVP tick VP ($reason): dist=${"%.0f".format(coast.effectiveDistanceM)} " +
+                                    "elapsed=${"%.0f".format(elapsedS)} coast=${coast.quality} " +
+                                    "coastS=${"%.0f".format(coast.coastingSeconds)} " +
+                                    "gap=${gap?.let { "T=${"%.0f".format(it.gapTimeS)}s D=${"%.0f".format(it.gapDistanceM)}m ${if (it.ahead) "AHEAD" else "BEHIND"}" } ?: "---"} " +
+                                    "speed=${speedMs?.let { "%.1f".format(it) } ?: "null"}",
+                            )
+                        }
+                    }
 
                     // --- mode select: ② route mode vs ① Ghost Pace ---------------------
                     // Read the route-mode snapshot ONCE per tick so path + segments stay consistent
@@ -1105,7 +1193,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             // whole-ride Ghost Pace gap (always available); no map ghost.
                             publishSegment(null, fireExit = false)
                             mapGhostState = null
-                            GapStateHolder.update(vpGap())
+                            val g = vpGap()
+                            GapStateHolder.update(g)
+                            logVp("route present, no ghost curve", g)
                             return@runCatching
                         }
                         // Record WHEN the rider first started moving on this route (speed over the moving
@@ -1198,7 +1288,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 holdGap()
                                 return@runCatching
                             }
+                            // The race anchor — THE event to verify the fair-start model. Logged once.
                             ghostStartElapsedS = moveStart - rg.timeAt(d0)
+                            Timber.i(
+                                "KVP race anchored: firstMove=${"%.0f".format(moveStart)}s D0=${"%.0f".format(d0)}m " +
+                                    "ghostStart=${"%.0f".format(ghostStartElapsedS!!)}s @ routeDist=${"%.0f".format(routeDist)}m elapsed=${"%.0f".format(elapsedS)}s",
+                            )
                         }
                         // ghostElapsed = (elapsedS − firstMove) + rg.timeAt(D0): ghost at D0 at race start,
                         // then advances on real elapsed time (frozen only on pause — ELAPSED_TIME stops).
@@ -1209,23 +1304,31 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // Which recorded stretch the rider is currently on — drives only the data fields'
                         // SEG/GP tag (via SegmentInfoHolder). The ghost is whole-route, not per-segment.
                         val seg = rm.segments.firstOrNull { routeDist in it.routeStartM..it.routeEndM }
+                        // One gap against the whole-route ghost: progress = rider's route distance,
+                        // clock = ghostElapsed, curve = the continuous route ghost (route-distance axis).
+                        val gap = GapCalculator.compute(routeDist, ghostElapsed, rg, fresh)
+                        GapStateHolder.update(gap)
                         run {
                             val nowMs = System.currentTimeMillis()
+                            // The rich state-snapshot line — INCLUDING the computed gap (the thing you study).
+                            // Periodic (throttled to diagLogMs ~2.5 s); the precise MOMENTS — anchor, GPS
+                            // lost/recover, segment in/out, mode/config change — are logged on-edge elsewhere,
+                            // so this snapshot stays lean without losing the events that matter.
                             if (nowMs - lastDiagLogMs >= diagLogMs) {
                                 lastDiagLogMs = nowMs
                                 Timber.d(
                                     "KVP tick route: routeDist=${"%.0f".format(routeDist)} D0=${"%.0f".format(d0)} " +
                                         "remaining=${"%.0f".format(remainingM)} rideDist=${"%.0f".format(distM)} " +
+                                        "ghostDist=${"%.0f".format(gap.ghostProgressM)} gapT=${"%.0f".format(gap.gapTimeS)}s " +
+                                        "gapD=${"%.0f".format(gap.gapDistanceM)}m ${if (gap.ahead) "AHEAD" else "BEHIND"} " +
                                         "seg=${seg?.let { "[${"%.0f".format(it.routeStartM)}..${"%.0f".format(it.routeEndM)}]" } ?: "none"} " +
-                                        "ghostElapsed=${"%.0f".format(ghostElapsed)} fresh=$fresh onRoute=$lastOnRoute " +
-                                        "speed=${speedMs?.let { "%.1f".format(it) } ?: "null"} mapEmitter=${mapEmitter != null}",
+                                        "elapsed=${"%.0f".format(elapsedS)} ghostElapsed=${"%.0f".format(ghostElapsed)} " +
+                                        "fresh=$fresh onRoute=$lastOnRoute rejoin=$lastRejoinActive " +
+                                        "speed=${speedMs?.let { "%.1f".format(it) } ?: "null"} " +
+                                        "showMap=${activeConfig.value.showGhostOnMap} mapEmitter=${mapEmitter != null}",
                                 )
                             }
                         }
-                        // One gap against the whole-route ghost: progress = rider's route distance,
-                        // clock = ghostElapsed, curve = the continuous route ghost (route-distance axis).
-                        val gap = GapCalculator.compute(routeDist, ghostElapsed, rg, fresh)
-                        GapStateHolder.update(gap)
                         // Segment field viz: show the active recorded stretch, else clear. The gap shown
                         // is still the whole-route gap (which, on a recorded stretch, races your past self).
                         publishSegment(seg, rm.segments)
@@ -1255,10 +1358,16 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // handleGpsLoss() gives up and we blank rather than show a wild extrapolation.
                         publishSegment(null, fireExit = false)
                         mapGhostState = null // VP mode: no map ghost (the loop hides it)
+                        // Distinguish "no route navigated" from "route loaded but no recorded stretches
+                        // overlap it" (rm != null, segments empty) — both race VP, but the cause differs.
+                        val vpReason = if (rm != null) "route loaded, no recorded stretches" else "no route"
                         if (handleGpsLoss(coast.coastingSeconds)) {
                             GapStateHolder.clear()
+                            logVp("$vpReason — sustained GPS loss, blanked", null)
                         } else {
-                            GapStateHolder.update(vpGap())
+                            val g = vpGap()
+                            GapStateHolder.update(g)
+                            logVp(vpReason, g)
                         }
                     }
                     }.onFailure { e ->
@@ -1362,12 +1471,18 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun finishAndSaveRecording() {
         val started = recordingStartedEpoch
         val track = recorder.build(id = started.toString(), startedAtEpoch = started)
-        if (track != null) {
+        if (track == null) {
+            // Too few decimated points (a very short / stationary ride) → nothing recorded, so this ride
+            // won't become a future ghost. Logged so "my ride didn't become a ghost" is diagnosable.
+            Timber.i("KVP recording: not saved (too few points to build a track)")
+        } else {
             // add() dedups on sourceKey (first writer wins). false means a same-key ride is already
             // stored — e.g. a FitFiles scan ingested this ride first; nothing to do but note it.
             scope.launch(Dispatchers.IO) {
-                if (!trackStore().add(track)) {
-                    Timber.d("recorded track ${track.id} skipped: sourceKey ${track.sourceKey} already stored")
+                if (trackStore().add(track)) {
+                    Timber.i("KVP recording: saved track ${track.id} (${track.points.size} pts) → ${trackStoreDir}")
+                } else {
+                    Timber.i("KVP recording: track ${track.id} skipped (sourceKey ${track.sourceKey} already stored)")
                 }
             }
         }

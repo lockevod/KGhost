@@ -61,6 +61,9 @@
     <string name="race_segment_alert_description">Muestra un aviso al entrar en un tramo con un fantasma grabado.</string>
     <string name="race_segment_exit_label">Aviso al salir de un tramo</string>
     <string name="race_segment_exit_description">Muestra un aviso al salir de un tramo con un fantasma grabado. Si el siguiente tramo está cerca, se omite la salida para que los tramos próximos no avisen dos veces.</string>
+    <string name="race_filelog_label">Guardar un registro de diagnóstico</string>
+    <string name="race_filelog_description">Guarda los diagnósticos de KGhost en un fichero para poder estudiar una salida después sin ordenador. Déjalo apagado para el uso normal.</string>
+    <string name="race_filelog_path">Fichero de log: %1$s</string>
     <string name="race_show_ghost_on_map">Mostrar fantasma en el mapa</string>
     <string name="race_show_ghost_on_map_desc">Dibuja la posición en directo del fantasma en el mapa durante una carrera por tramos</string>
     <string name="race_ghost_icon_label">Icono del fantasma</string>

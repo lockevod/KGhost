@@ -49,6 +49,8 @@ data class KGhostConfig(
     val showGhostOnMap: Boolean = true,
     /** Which icon to draw for the ghost on the map. (Its SIZE follows the map zoom automatically.) */
     val ghostIcon: GhostIcon = GhostIcon.GHOST,
+    /** Whether to write the diagnostic logs to a file so a ride can be studied later (default off). */
+    val fileLogging: Boolean = false,
     /**
      * Epoch millis of the last successful history-import scan. Used by "Import new only" to skip
      * files not modified since. 0L means no scan has run yet (import everything).
