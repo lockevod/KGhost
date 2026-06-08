@@ -12,6 +12,10 @@
     <string name="segment_entry_title">Tramo grabado</string>
     <string name="segment_entry_detail">Ahora compites contra tu fantasma grabado</string>
 
+    <!-- Aviso en marcha que aparece una vez cuando el ciclista sale de un tramo con un fantasma grabado. -->
+    <string name="segment_exit_title">Fin del tramo</string>
+    <string name="segment_exit_detail">Vuelves al ritmo fantasma</string>
+
     <string name="gap_numeric_name">Diferencia Ghost Pace</string>
     <string name="gap_numeric_description">Diferencia de tiempo/distancia con el Ghost Pace.</string>
     <string name="gap_graphic_name">Pista Ghost Pace</string>
@@ -55,6 +59,8 @@
     <string name="race_recorded_tracks">Pistas grabadas: %1$d</string>
     <string name="race_segment_alert_label">Aviso al entrar en un tramo</string>
     <string name="race_segment_alert_description">Muestra un aviso al entrar en un tramo con un fantasma grabado.</string>
+    <string name="race_segment_exit_label">Aviso al salir de un tramo</string>
+    <string name="race_segment_exit_description">Muestra un aviso al salir de un tramo con un fantasma grabado. Si el siguiente tramo está cerca, se omite la salida para que los tramos próximos no avisen dos veces.</string>
     <string name="race_show_ghost_on_map">Mostrar fantasma en el mapa</string>
     <string name="race_show_ghost_on_map_desc">Dibuja la posición en directo del fantasma en el mapa durante una carrera por tramos</string>
     <string name="race_ghost_icon_label">Icono del fantasma</string>

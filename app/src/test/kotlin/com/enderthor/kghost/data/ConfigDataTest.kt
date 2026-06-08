@@ -3,7 +3,6 @@ package com.enderthor.kghost.data
 import com.enderthor.kghost.engine.GhostPick
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 

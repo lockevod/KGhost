@@ -11,6 +11,10 @@
     <string name="segment_entry_title">Recorded stretch</string>
     <string name="segment_entry_detail">Now racing your recorded ghost</string>
 
+    <!-- In-ride alert shown once when the rider leaves a stretch with a recorded ghost. -->
+    <string name="segment_exit_title">Stretch ended</string>
+    <string name="segment_exit_detail">Back to Ghost Pace</string>
+
     <string name="gap_numeric_name">Ghost Pace Gap</string>
     <string name="gap_numeric_description">Time/distance gap to the Ghost Pace.</string>
     <string name="gap_graphic_name">Ghost Pace Track</string>
@@ -54,6 +58,8 @@
     <string name="race_recorded_tracks">Recorded tracks: %1$d</string>
     <string name="race_segment_alert_label">Segment entry alert</string>
     <string name="race_segment_alert_description">Show an alert when entering a stretch with a recorded ghost.</string>
+    <string name="race_segment_exit_label">Segment exit alert</string>
+    <string name="race_segment_exit_description">Show an alert when leaving a stretch with a recorded ghost. When the next stretch is close, the exit is skipped so nearby stretches don\'t double-alert.</string>
     <string name="race_show_ghost_on_map">Show ghost on map</string>
     <string name="race_show_ghost_on_map_desc">Draw the ghost\'s live position on the map during a segment race</string>
     <string name="race_ghost_icon_label">Ghost icon</string>

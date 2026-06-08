@@ -169,6 +169,20 @@ fun RaceSection(
 
         HorizontalDivider()
 
+        // ── Segment-exit alert switch ─────────────────────────────────────────
+        SwitchRow(
+            label = stringResource(R.string.race_segment_exit_label),
+            description = stringResource(R.string.race_segment_exit_description),
+            checked = config.segmentExitAlert,
+            onCheckedChange = { alert ->
+                scope.launch {
+                    saveFailed = !configManager.updateConfig { it.copy(segmentExitAlert = alert) }
+                }
+            },
+        )
+
+        HorizontalDivider()
+
         // ── Show-ghost-on-map switch ──────────────────────────────────────────
         SwitchRow(
             label = stringResource(R.string.race_show_ghost_on_map),

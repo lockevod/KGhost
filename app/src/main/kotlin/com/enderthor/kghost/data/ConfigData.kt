@@ -43,6 +43,8 @@ data class KGhostConfig(
     val ghostPick: GhostPick = GhostPick.BEST,
     /** Whether to emit an in-ride alert when the rider enters a recorded segment. */
     val segmentEntryAlert: Boolean = false,
+    /** Whether to emit an in-ride alert when the rider leaves a recorded segment. */
+    val segmentExitAlert: Boolean = false,
     /** Whether to draw the ghost's live position on the map during a segment race. */
     val showGhostOnMap: Boolean = true,
     /** Which icon to draw for the ghost on the map. (Its SIZE follows the map zoom automatically.) */
