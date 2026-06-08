@@ -4,31 +4,39 @@ A [Hammerhead Karoo](https://www.hammerhead.io/) extension that races you agains
 a Ghost Pace riding at a fixed pace, or your own past self on a route — and shows the gap
 live on a data field and as a marker on the map.
 
-Built with the official [`karoo-ext`](https://github.com/hammerheadnav/karoo-ext) SDK for Karoo 2
-and Karoo 3.
-
-<a href="https://www.buymeacoffee.com/enderthor" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>
-
 ## What it does
 
 - **Ghost Pace** — pick a target pace/speed and race a constant-pace ghost. The live gap (time
   and distance, ahead/behind) is rendered in graphical and numeric data fields.
-- **Race your own** — KGhost auto-records each ride as a decimated GPS track. When you load a
-  route, it builds **one continuous ghost of the whole route** — your past self on the stretches
-  you've ridden before, stitched with the Ghost Pace pace everywhere else — and races you
-  against it, automatically, with no setup. The two halves are not separate features: they are the
-  same ghost.
+- **Race your own** — KGhost auto-records each ride as a GPS track. When you load a route, it builds
+  **one continuous ghost of the whole route** — your past self on the stretches you've ridden before,
+  stitched with the Ghost Pace pace everywhere else — and races you against it, automatically, with no
+  setup. The two halves are not separate features: they are the same ghost.
 - **External ghosts (import)** — race against rides you did *not* record with KGhost: it scans the
   Karoo's own `/sdcard/FitFiles/*.fit` history and imports GPX/FIT files you drop into
-  `/sdcard/KGhost/`, turning them into ghosts the route matcher can use.
-- **Ghost on the map** — during a route race, the ghost's live (time-based) position is drawn as a
-  marker on the Karoo map, sliding along the route at the ghost's pace so you can see it pull ahead
-  or fall behind on the road. The marker icon (ghost / cyclist / arrow / dot) is selectable; its size
-  is automatic — it follows the map zoom level so it stays proportionate. The marker is interpolated
-  at ~5 Hz so it glides along the route rather than hopping once per second.
-- **Resilient to GPS loss** — a dropout never blanks the gap. It keeps dead-reckoning at your last
-  speed (like a GPS unit), marks the value as an estimate after ~30 s, alerts you after a minute, and
-  only gives up after ~3 minutes of no signal. See [Behaviour during a GPS dropout](#behaviour-during-a-gps-dropout).
+  `/sdcard/KGhost/`, turning them into ghosts to race.
+- **Ghost on the map** — during a route race, the ghost is drawn as a marker on the Karoo map,
+  sliding along the route at the ghost's pace so you can see it pull ahead or fall behind on the road.
+  The marker icon (ghost / cyclist / arrow / dot) is selectable; its size is automatic (it follows the
+  map zoom), and it glides smoothly rather than hopping once per second.
+- **Fair start** — the race starts when **you** start riding, not when you press record. Waiting at
+  the start for a GPS lock is never counted against you, whether or not you use auto-pause. The gap
+  field shows `---` until you actually roll.
+- **Uses the Karoo's own position on the route** — KGhost reads where you are along the loaded route
+  from the Karoo itself, so it works correctly on loops and out-and-backs, and recovers cleanly if you
+  go off-route and the Karoo recalculates.
+
+## Getting started
+
+1. **Install** KGhost (see [Install](#install-sideload) below) and open the app on the Karoo once.
+2. **Add a data field** — on a ride profile, add **Gap (graphic)** and/or **Gap (numeric)** from the
+   Extensions section of the Karoo's data-field picker.
+3. **(Optional) Bring in past rides** — in the KGhost app, grant **All files access** when asked, then
+   drop GPX/FIT files into `/sdcard/KGhost/` and tap *Import* (it also scans your Karoo's own ride
+   history). Without this you can still race the fixed-pace Ghost Pace.
+4. **Set your Ghost Pace** — pick a target speed/pace in the app; this is what you race when you have
+   no recorded history for a stretch.
+5. **Ride.** Load a route to race your past self on it, or just start riding to race the Ghost Pace.
 
 ## Data fields
 
@@ -39,28 +47,31 @@ Add these from the Karoo's data-field picker (Extensions):
 | Gap (graphic) | `kghost-gap` | Two-dot track: you vs the ghost, with the gap (time/distance) below, tagged SEG (racing your past self on a recorded stretch) or GP (fixed-pace Ghost Pace) |
 | Gap (numeric) | `kghost-gap-num` | Numeric gap (time / distance, per your preference) |
 
-Ahead is green, behind is red, on-pace is neutral. A value that is a dead-reckoned **estimate**
-during a GPS dropout is shown in amber. `---` appears only when there is nothing to show — no target
-set, not recording, or after a sustained GPS loss (see below). Fields are designed for sunlight
-readability and respect the Karoo's day/night theme.
+Ahead is green, behind is red, on-pace is neutral. While your position is briefly uncertain (a GPS
+gap) the value is shown in **amber** as an estimate. `---` appears only when there is nothing to show —
+no target set, not recording, you haven't started riding yet, you're off-route, or after a sustained
+GPS loss (see below). Fields are designed for sunlight readability and respect the Karoo's day/night
+theme.
 
-### Behaviour during a GPS dropout
+### Stops and GPS dropouts
 
-The Karoo's distance/position freezes when GPS is lost. A navigator should keep estimating, not go
-blank, so KGhost dead-reckons:
+A normal **stop** (a red light) is not a problem: the ghost keeps to its pace, so if you stop and it
+doesn't, you fall behind — exactly like a real race. (If you use the Karoo's auto-pause, the ride
+clock and the ghost both pause with you.)
 
-| Time without GPS (while moving) | Data field | Map ghost |
+A **GPS dropout** never blanks the gap straight away — KGhost keeps showing an estimate and only gives
+up after a sustained loss:
+
+| Time without a position (while moving) | Gap field | Map ghost |
 |---|---|---|
-| 0–30 s | gap continues, estimated at your last speed (shown normally) | visible, keeps gliding |
-| 30 s – 3 min | gap continues, value in **amber** (estimate) | visible |
-| > 1 min | …plus a one-shot **"GPS lost"** in-ride alert (re-armed on recovery) | visible |
-| > 3 min | gives up → `---` | hidden |
+| brief gap | gap continues as an estimate | keeps gliding |
+| ~30 s+ | gap shown in **amber** (estimate) | visible |
+| ~1 min+ | …plus a one-shot **"GPS lost"** alert (clears when the signal returns) | visible |
+| ~3 min+ | gives up → `---` | hidden |
 
-When GPS returns, your position snaps back to the real fix and the gap corrects. A normal **stop**
-(e.g. a red light) is *not* a GPS loss: the gap keeps showing your real position (the ghost keeps
-moving, so you fall behind correctly), and the Karoo's auto-pause freezes the ride clock so nothing
-drifts. The map ghost's position is purely time-based, so it is always known and stays visible
-throughout a dropout — it is not hidden just because *your* position is briefly uncertain.
+When the signal returns, your position corrects and the gap catches up. The map ghost runs on time
+alone, so it stays visible and gliding throughout a dropout — it isn't hidden just because *your*
+position is briefly unknown.
 
 ## Settings
 
@@ -70,11 +81,16 @@ and "race your own" are two halves of one ghost, so they are configured together
 - **Ghost Pace** — the target pace/speed (entered as km/h or min/km). This is also the pace the
   whole-route ghost uses on stretches you have no recorded history for.
 - **Race your own** — master enable, which past ride to race (**best** / **last**), **auto-record**
-  toggle, and a segment-entry alert.
+  toggle, and optional alerts when you **enter** and **leave** a stretch that has a recorded ghost
+  (nearby stretches won't double-alert).
 - **Ghost on map** — show/hide and the marker **icon** (ghost / cyclist / arrow / dot). The icon size
   is automatic (it scales with the map zoom), so there is no size setting.
 - **Import history** — scan the Karoo's `/sdcard/FitFiles` and import GPX/FIT from `/sdcard/KGhost/`
   (needs all-files access); "import all" or "new only".
+
+> **How it works under the hood:** the position/ghost/alert model (route position, the "fair start"
+> ghost clock, GPS-loss handling, reroutes) is documented for developers in
+> [`docs/route-ghost-model.md`](docs/route-ghost-model.md). You don't need it to use the app.
 
 ## Install (sideload)
 
@@ -96,9 +112,9 @@ See [third_party/FIT-SDK-LICENSE.txt](third_party/FIT-SDK-LICENSE.txt) for the F
 ## Disclaimer
 
 KGhost is a **training aid** that shows an estimated gap to a virtual or recorded ghost. It is **not**
-a precision instrument: the gap is derived from GPS distance, dead-reckoning during signal loss, and
-decimated recorded tracks, so it can be inaccurate — especially during GPS dropouts, off-route
-deviations, or on stretches with little recorded history.
+a precision instrument: the gap is derived from GPS position, estimation during signal loss, and your
+recorded tracks, so it can be inaccurate — especially during GPS dropouts, off-route deviations, or on
+stretches with little recorded history.
 
 **KGhost is provided "as is", without warranty of any kind, express or implied.** The developer
 (EnderThor) accepts no responsibility or liability for any harm, injury, loss, or damage arising from
