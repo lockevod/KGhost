@@ -1,7 +1,6 @@
 package com.enderthor.kghost.extension
 
 import io.hammerhead.karooext.KarooSystemService
-import io.hammerhead.karooext.models.OnLocationChanged
 import io.hammerhead.karooext.models.OnMapZoomLevel
 import io.hammerhead.karooext.models.OnNavigationState
 import io.hammerhead.karooext.models.OnStreamState
@@ -64,19 +63,6 @@ fun KarooSystemService.streamRide(): Flow<RideState> = callbackFlow {
 fun KarooSystemService.streamNavigationState(): Flow<OnNavigationState> = callbackFlow {
     val listenerId = addConsumer<OnNavigationState>(onEvent = { trySend(it) })
     awaitClose { removeConsumer(listenerId) }
-}
-
-/**
- * Wraps [KarooSystemService.addConsumer] for GPS location events into a [Flow].
- * Emits every [OnLocationChanged] update from the Karoo GPS stream.
- *
- * Consumers access coordinates via [OnLocationChanged.lat] and [OnLocationChanged.lng].
- * Used in ② to feed [com.enderthor.kghost.engine.RouteProjectedProgress] and
- * [com.enderthor.kghost.geo.TrackRecorder] with live GPS samples.
- */
-fun KarooSystemService.streamLocation(): Flow<OnLocationChanged> = callbackFlow {
-    val id = addConsumer<OnLocationChanged>(onEvent = { trySend(it) })
-    awaitClose { removeConsumer(id) }
 }
 
 /**

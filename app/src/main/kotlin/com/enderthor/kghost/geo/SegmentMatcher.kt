@@ -59,9 +59,9 @@ object SegmentMatcher {
          * 35.0 absorbs that day-to-day offset while staying well below the road-spacing that would
          * start merging parallel roads.
          *
-         * This is DISTINCT from live route-snapping tolerance (RouteProjectedProgress), which decides
-         * whether the rider's CURRENT fix is on the loaded route; that one stays tighter because it
-         * judges a single live position, not the overlap of two recorded histories.
+         * This is the tolerance for matching two RECORDED histories onto each other — distinct from
+         * deciding whether the rider's live position is on the route (that now comes from the Karoo's
+         * own ON_ROUTE map-matching, not a local projection).
          */
         val toleranceM: Double = 35.0,
         val minSegmentM: Double = 300.0,

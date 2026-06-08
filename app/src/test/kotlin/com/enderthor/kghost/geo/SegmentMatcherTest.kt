@@ -9,7 +9,7 @@ class SegmentMatcherTest {
     // Route: 2 km straight east along the equator (0,0)→(0,~0.018).
     private val route = PolylinePath(listOf(LatLng(0.0, 0.0), LatLng(0.0, 0.018)))
     private fun pt(lng: Double, distanceM: Double, t: Double) =
-        com.enderthor.kghost.geo.TrackPoint(0.0, lng, distanceM, t)
+        TrackPoint(0.0, lng, distanceM, t)
 
     private val params = SegmentMatcher.Params(toleranceM = 25.0, minSegmentM = 300.0, mergeGapM = 80.0)
 
@@ -20,7 +20,7 @@ class SegmentMatcherTest {
 
     @Test fun `finds the overlapping middle stretch as one segment`() {
         // Track rides exactly along the route's middle ~1 km (lng 0.004..0.013), at 5 m/s.
-        val track = com.enderthor.kghost.geo.RecordedTrack(
+        val track = RecordedTrack(
             id = "t1", startedAtEpoch = 1_000L,
             points = (0..18).map { i ->
                 val lng = 0.004 + i * 0.0005
@@ -37,7 +37,7 @@ class SegmentMatcherTest {
     }
 
     @Test fun `discards overlaps shorter than minSegmentM`() {
-        val track = com.enderthor.kghost.geo.RecordedTrack(
+        val track = RecordedTrack(
             "short", 1_000L,
             (0..3).map { i -> pt(0.006 + i * 0.0003, i * 33.0, i * 6.0).toDto() }, // ~100 m overlap
         )
@@ -45,7 +45,7 @@ class SegmentMatcherTest {
     }
 
     @Test fun `BEST picks the faster of two tracks over the same stretch`() {
-        fun track(id: String, secPerStep: Double) = com.enderthor.kghost.geo.RecordedTrack(
+        fun track(id: String, secPerStep: Double) = RecordedTrack(
             id, 1_000L, (0..18).map { i -> pt(0.004 + i * 0.0005, i * 55.0, i * secPerStep).toDto() })
         val slow = track("slow", 12.0); val fast = track("fast", 8.0)
         val segs = SegmentMatcher.match(route, listOf(slow, fast), GhostPick.BEST, params)
@@ -68,7 +68,7 @@ class SegmentMatcherTest {
 
         // Track A: covers roughly route [0, ~600 m] — lng 0.000..0.0054 (10 steps × 55 m = 550 m track).
         // Made deliberately SLOWER so BEST will prefer track B.
-        val trackA = com.enderthor.kghost.geo.RecordedTrack(
+        val trackA = RecordedTrack(
             id = "A", startedAtEpoch = 1_000L,
             points = (0..10).map { i ->
                 pt(lng = i * 0.0005, distanceM = i * 55.0, t = i * 15.0).toDto()
@@ -77,7 +77,7 @@ class SegmentMatcherTest {
 
         // Track B: covers roughly route [~400 m, ~1000 m] — lng 0.0036..0.0090
         // (shifted by ~7 steps = ~385 m; 11 steps × 55 m = 605 m track). Made FASTER.
-        val trackB = com.enderthor.kghost.geo.RecordedTrack(
+        val trackB = RecordedTrack(
             id = "B", startedAtEpoch = 2_000L,
             points = (0..10).map { i ->
                 pt(lng = 0.0036 + i * 0.0005, distanceM = i * 55.0, t = i * 10.0).toDto()
@@ -138,14 +138,14 @@ class SegmentMatcherTest {
             val lng = 0.004 + i * 0.0005
             if (i == 9) {
                 // Off-route spike: west of the run start (lng 0.0005) and ~167 m north of the route.
-                com.enderthor.kghost.geo.TrackPoint(
+                TrackPoint(
                     lat = 0.0015, lng = 0.0005, distanceM = i * 55.0, timeS = i * 11.0,
                 )
             } else {
                 pt(lng, distanceM = i * 55.0, t = i * 11.0)
             }
         }
-        val track = com.enderthor.kghost.geo.RecordedTrack(
+        val track = RecordedTrack(
             id = "blip", startedAtEpoch = 1_000L,
             points = pts.map { it.toDto() },
         )
@@ -189,7 +189,7 @@ class SegmentMatcherTest {
             val lng = 0.004 + j * 0.0005
             pt(lng, distanceM = lastLap1.distanceM + j * 55.0, t = lastLap1.timeS + j * 11.0)
         }
-        val track = com.enderthor.kghost.geo.RecordedTrack(
+        val track = RecordedTrack(
             id = "laps", startedAtEpoch = 1_000L,
             points = (lap1 + lap2).map { it.toDto() },
         )
@@ -231,7 +231,7 @@ class SegmentMatcherTest {
                 pt(lng, distanceM = i * 55.0, t = i * 11.0)
             }
         }
-        val track = com.enderthor.kghost.geo.RecordedTrack(
+        val track = RecordedTrack(
             id = "timeglitch", startedAtEpoch = 1_000L,
             points = pts.map { it.toDto() },
         )
@@ -257,7 +257,7 @@ class SegmentMatcherTest {
         // All five tracks ride the SAME middle stretch (lng 0.004..0.013) so they group together.
         // secPerStep encodes the ghost speed; epoch encodes recency.
         fun track(id: String, epoch: Long, secPerStep: Double) =
-            com.enderthor.kghost.geo.RecordedTrack(
+            RecordedTrack(
                 id, epoch,
                 (0..18).map { i -> pt(0.004 + i * 0.0005, i * 55.0, i * secPerStep).toDto() },
             )
@@ -303,7 +303,7 @@ class SegmentMatcherTest {
             val lng = 0.013 - j * 0.0005 // walk back west over the same span
             pt(lng, distanceM = lastOut.distanceM + j * 55.0, t = lastOut.timeS + j * 11.0)
         }
-        val track = com.enderthor.kghost.geo.RecordedTrack(
+        val track = RecordedTrack(
             id = "oab", startedAtEpoch = 1_000L,
             points = (outPts + returnPts).map { it.toDto() },
         )
