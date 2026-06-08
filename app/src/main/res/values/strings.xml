@@ -1,38 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">KVPartner</string>
-    <string name="extension_name">KVPartner</string>
+    <string name="app_name">KGhost</string>
+    <string name="extension_name">KGhost</string>
 
     <!-- In-ride alert shown once when GPS has been lost long enough that the gap is now estimated. -->
     <string name="gps_lost_title">GPS lost</string>
     <string name="gps_lost_detail">Gap estimated until the signal returns</string>
 
-    <string name="gap_numeric_name">Virtual Partner Gap</string>
-    <string name="gap_numeric_description">Time/distance gap to the virtual partner.</string>
-    <string name="gap_graphic_name">Virtual Partner Track</string>
-    <string name="gap_graphic_description">Track view showing your position relative to the virtual partner.</string>
+    <string name="gap_numeric_name">Ghost Pace Gap</string>
+    <string name="gap_numeric_description">Time/distance gap to the Ghost Pace.</string>
+    <string name="gap_graphic_name">Ghost Pace Track</string>
+    <string name="gap_graphic_description">Track view showing your position relative to the Ghost Pace.</string>
 
     <!-- Settings UI: tabs -->
-    <string name="tab_main">Virtual Partner</string>
+    <string name="tab_main">Ghost Pace</string>
     <string name="tab_partner">Partner</string>
 
     <!-- Combined screen intro -->
     <string name="combined_intro_title">How the ghost works</string>
-    <string name="combined_intro_body">KVPartner races you against a single ghost along your route. On stretches you have ridden before, the ghost is your past self (Race Your Own); everywhere else it keeps moving at the Virtual Partner pace below. The two combine into one continuous ghost over the whole ride.</string>
+    <string name="combined_intro_body">KGhost races you against a single ghost along your route. On stretches you have ridden before, the ghost is your past self (Race Your Own); everywhere else it keeps moving at the Ghost Pace below. The two combine into one continuous ghost over the whole ride.</string>
 
-    <!-- Virtual Partner section -->
+    <!-- Ghost Pace section -->
     <string name="partner_description">Fixed pace used when no route is loaded, and to fill the parts of a route where you have no recorded history.</string>
 
     <!-- Settings UI: Partner tab -->
-    <string name="partner_title">Virtual Partner target</string>
-    <string name="partner_target_none">No target set</string>
+    <string name="partner_title">Ghost Pace target</string>
     <string name="partner_current_target">Current: %1$s</string>
     <string name="partner_mode_speed">Speed</string>
     <string name="partner_mode_pace">Pace</string>
     <string name="partner_input_speed">Speed (km/h)</string>
     <string name="partner_input_pace">Pace (min/km)</string>
-    <string name="partner_save">Save target</string>
-    <string name="partner_clear">Clear target</string>
+    <string name="partner_input_speed_imp">Speed (mph)</string>
+    <string name="partner_input_pace_imp">Pace (min/mi)</string>
     <string name="partner_invalid">Enter a target greater than 0.</string>
     <string name="settings_save_failed">Could not save. Please try again.</string>
 
@@ -58,16 +57,12 @@
     <string name="race_ghost_icon_cyclist">Cyclist</string>
     <string name="race_ghost_icon_arrow">Arrow</string>
     <string name="race_ghost_icon_dot">Dot</string>
-    <string name="race_ghost_size_label">Ghost size</string>
-    <string name="race_ghost_size_small">S</string>
-    <string name="race_ghost_size_medium">M</string>
-    <string name="race_ghost_size_large">L</string>
 
     <!-- Settings UI: Race tab — history import -->
     <string name="import_title">Import history</string>
-    <string name="import_folder_hint">Drop GPX or FIT files in /sdcard/KVPartner/ to import them as ghost tracks.</string>
+    <string name="import_folder_hint">Drop GPX or FIT files in /sdcard/KGhost/ to import them as ghost tracks.</string>
     <string name="import_permission_title">Storage access needed</string>
-    <string name="import_permission_description">KVPartner needs all-files access to read your recorded rides from /sdcard/FitFiles and the files you drop in /sdcard/KVPartner.</string>
+    <string name="import_permission_description">KGhost needs all-files access to read your recorded rides from /sdcard/FitFiles and the files you drop in /sdcard/KGhost.</string>
     <string name="import_permission_grant">Grant access</string>
     <string name="import_all">All</string>
     <string name="import_new_only">New only</string>

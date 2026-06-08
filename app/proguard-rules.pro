@@ -1,4 +1,4 @@
--keep class com.enderthor.kvpartner.datatype.** { *; }
+-keep class com.enderthor.kghost.datatype.** { *; }
 -keepclassmembers enum * { public static **[] values(); public static ** valueOf(java.lang.String); }
 
 # ─── kotlinx.serialization ───────────────────────────────────────────────────
@@ -7,12 +7,12 @@
 -keepattributes *Annotation*, InnerClasses
 
 # Keep the data model and its generated serializers.
--keep class com.enderthor.kvpartner.data.** { *; }
+-keep class com.enderthor.kghost.data.** { *; }
 
 # Keep the geo @Serializable models (RecordedTrack/TrackPointDto + spatial index)
 # so R8 minification doesn't break TrackStore.save / loadCandidates.
--keep class com.enderthor.kvpartner.geo.** { *; }
--keepclasseswithmembers class com.enderthor.kvpartner.geo.**$$serializer { *; }
+-keep class com.enderthor.kghost.geo.** { *; }
+-keepclasseswithmembers class com.enderthor.kghost.geo.**$$serializer { *; }
 
 # Standard kotlinx.serialization keeps.
 -keepclassmembers @kotlinx.serialization.Serializable class ** {
@@ -22,7 +22,7 @@
 -keepclasseswithmembers class ** {
     kotlinx.serialization.KSerializer serializer(...);
 }
--keep,includedescriptorclasses class com.enderthor.kvpartner.**$$serializer { *; }
+-keep,includedescriptorclasses class com.enderthor.kghost.**$$serializer { *; }
 
 # ─── Garmin FIT SDK ──────────────────────────────────────────────────────────
 # FIT decode relies on message-metadata reflection, so keep all SDK classes.

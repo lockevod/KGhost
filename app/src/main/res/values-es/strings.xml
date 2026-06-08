@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- "KGhost" y "Ghost Pace" son nombres propios del producto: no se traducen. -->
+    <string name="app_name">KGhost</string>
+    <string name="extension_name">KGhost</string>
+
+    <!-- Aviso en marcha que aparece una vez cuando se ha perdido el GPS el tiempo suficiente como para que la diferencia pase a ser estimada. -->
+    <string name="gps_lost_title">GPS perdido</string>
+    <string name="gps_lost_detail">Diferencia estimada hasta recuperar la señal</string>
+
+    <string name="gap_numeric_name">Diferencia Ghost Pace</string>
+    <string name="gap_numeric_description">Diferencia de tiempo/distancia con el Ghost Pace.</string>
+    <string name="gap_graphic_name">Pista Ghost Pace</string>
+    <string name="gap_graphic_description">Vista de pista que muestra tu posición respecto al Ghost Pace.</string>
+
+    <!-- UI de ajustes: pestañas -->
+    <string name="tab_main">Ghost Pace</string>
+    <string name="tab_partner">Compañero</string>
+
+    <!-- Introducción de la pantalla combinada -->
+    <string name="combined_intro_title">Cómo funciona el fantasma</string>
+    <string name="combined_intro_body">KGhost te hace competir contra un único fantasma a lo largo de tu ruta. En los tramos que ya has recorrido antes, el fantasma es tu yo del pasado (Carrera contra ti mismo); en el resto se mueve al ritmo del Ghost Pace de abajo. Ambos se combinan en un único fantasma continuo durante todo el recorrido.</string>
+
+    <!-- Sección Ghost Pace -->
+    <string name="partner_description">Ritmo fijo que se usa cuando no hay ninguna ruta cargada y para rellenar las partes de una ruta donde no tienes historial grabado.</string>
+
+    <!-- UI de ajustes: pestaña Ghost Pace -->
+    <string name="partner_title">Objetivo de Ghost Pace</string>
+    <string name="partner_current_target">Actual: %1$s</string>
+    <string name="partner_mode_speed">Velocidad</string>
+    <string name="partner_mode_pace">Ritmo</string>
+    <string name="partner_input_speed">Velocidad (km/h)</string>
+    <string name="partner_input_pace">Ritmo (min/km)</string>
+    <string name="partner_input_speed_imp">Velocidad (mph)</string>
+    <string name="partner_input_pace_imp">Ritmo (min/mi)</string>
+    <string name="partner_invalid">Introduce un objetivo mayor que 0.</string>
+    <string name="settings_save_failed">No se pudo guardar. Inténtalo de nuevo.</string>
+
+    <!-- UI de ajustes: pestaña Carrera -->
+    <string name="tab_race">Carrera</string>
+    <string name="race_title">Carrera contra ti mismo</string>
+    <string name="race_description">Compite contra tu yo del pasado en los tramos de la ruta que ya has recorrido antes.</string>
+    <string name="race_enabled_label">Carrera contra ti mismo</string>
+    <string name="race_enabled_description">Activa la carrera contra tu historial grabado cuando se cargue una ruta coincidente.</string>
+    <string name="race_ghost_pick_label">Fantasma con el que competir</string>
+    <string name="race_ghost_pick_description">Qué recorrido anterior usar cuando varias pistas cubren el mismo tramo.</string>
+    <string name="race_ghost_best">Mejor (récord)</string>
+    <string name="race_ghost_last">Último</string>
+    <string name="race_auto_record_label">Grabar historial de recorridos</string>
+    <string name="race_auto_record_description">Guarda automáticamente cada recorrido como una pista GPS para futuras comparaciones con el fantasma.</string>
+    <string name="race_recorded_tracks">Pistas grabadas: %1$d</string>
+    <string name="race_segment_alert_label">Aviso al entrar en un tramo</string>
+    <string name="race_segment_alert_description">Muestra un aviso al entrar en un tramo con un fantasma grabado.</string>
+    <string name="race_show_ghost_on_map">Mostrar fantasma en el mapa</string>
+    <string name="race_show_ghost_on_map_desc">Dibuja la posición en directo del fantasma en el mapa durante una carrera por tramos</string>
+    <string name="race_ghost_icon_label">Icono del fantasma</string>
+    <string name="race_ghost_icon_ghost">Fantasma</string>
+    <string name="race_ghost_icon_cyclist">Ciclista</string>
+    <string name="race_ghost_icon_arrow">Flecha</string>
+    <string name="race_ghost_icon_dot">Punto</string>
+
+    <!-- UI de ajustes: pestaña Carrera — importar historial -->
+    <string name="import_title">Importar historial</string>
+    <string name="import_folder_hint">Coloca archivos GPX o FIT en /sdcard/KGhost/ para importarlos como pistas de fantasma.</string>
+    <string name="import_permission_title">Se necesita acceso al almacenamiento</string>
+    <string name="import_permission_description">KGhost necesita acceso a todos los archivos para leer tus recorridos grabados en /sdcard/FitFiles y los archivos que coloques en /sdcard/KGhost.</string>
+    <string name="import_permission_grant">Conceder acceso</string>
+    <string name="import_all">Todos</string>
+    <string name="import_new_only">Solo nuevos</string>
+    <string name="import_cancel">Cancelar</string>
+    <string name="import_scanning">Buscando archivos…</string>
+    <string name="import_parsing">Analizando %1$d / %2$d…</string>
+    <string name="import_summary">%1$d importados · %2$d duplicados · %3$d fallidos</string>
+    <string name="import_canceled">Importación cancelada.</string>
+</resources>

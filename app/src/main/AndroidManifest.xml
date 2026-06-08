@@ -4,13 +4,13 @@
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <application
-        android:name=".KVPartnerApplication"
+        android:name=".KGhostApplication"
         android:allowBackup="true"
-        android:icon="@drawable/ic_kvpartner"
+        android:icon="@drawable/ic_kghost"
         android:label="@string/app_name"
-        android:roundIcon="@drawable/ic_kvpartner"
+        android:roundIcon="@drawable/ic_kghost"
         android:supportsRtl="true"
-        android:theme="@style/Theme.KVPartner">
+        android:theme="@style/Theme.KGhost">
         <activity android:name=".activity.MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -18,7 +18,7 @@
             </intent-filter>
         </activity>
         <service
-            android:name=".extension.KVPartnerExtension"
+            android:name=".extension.KGhostExtension"
             android:exported="true"
             tools:ignore="ExportedService">
             <intent-filter>

@@ -6,14 +6,14 @@ plugins {
 }
 
 android {
-    namespace = "com.enderthor.kvpartner"
+    namespace = "com.enderthor.kghost"
     compileSdk = 34
     defaultConfig {
-        applicationId = "com.enderthor.kvpartner"
+        applicationId = "com.enderthor.kghost"
         minSdk = 23
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 202606081
+        versionName = "0.4.0"
     }
     buildTypes {
         release {
