@@ -33,9 +33,8 @@ Add these from the Karoo's data-field picker (Extensions):
 
 | Field | Type id | What it shows |
 |---|---|---|
-| Gap (graphic) | `kvpartner-gap` | Two-dot track: you vs the ghost, with the gap (time/distance) below |
+| Gap (graphic) | `kvpartner-gap` | Two-dot track: you vs the ghost, with the gap (time/distance) below, tagged SEG (racing your past self on a recorded stretch) or VP (fixed-pace partner) |
 | Gap (numeric) | `kvpartner-gap-num` | Numeric gap (time / distance, per your preference) |
-| Segment | `kvpartner-segment` | Active "race your own" stretch: elevation profile or track + the gap |
 
 Ahead is green, behind is red, on-pace is neutral. A value that is a dead-reckoned **estimate**
 during a GPS dropout is shown in amber. `---` appears only when there is nothing to show — no target

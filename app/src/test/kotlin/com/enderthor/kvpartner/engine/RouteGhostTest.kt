@@ -17,8 +17,6 @@ class RouteGhostTest {
             routeEndM = endM,
             ghost = ghost,
             ghostLabel = "t",
-            hasElevation = false,
-            elevationProfile = null,
         )
 
     @Test fun `single segment with VP-filled lead-in and tail`() {

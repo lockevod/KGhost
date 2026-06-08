@@ -34,8 +34,7 @@ import java.util.Locale
  *     the one whose track `startedAtEpoch` is largest. One [LiveSegment] per group, whose
  *     `[routeStartM, routeEndM]` is the **winner's own interval** — so `ghost.totalDistanceM ≈
  *     routeEndM − routeStartM` and the ghost covers the full segment width without a frozen tail.
- *  6. `hasElevation = false`, `elevationProfile = null` for now (Task 9/10 fills these from the
- *     route elevation polyline). The result is sorted ascending by `routeStartM`.
+ *     The result is sorted ascending by `routeStartM`.
  *
  * Pure Kotlin (no Android).
  *
@@ -181,8 +180,6 @@ object SegmentMatcher {
                 routeEndM = chosen.routeEndM,
                 ghost = chosen.ghost,
                 ghostLabel = chosen.ghostLabel,
-                hasElevation = false,
-                elevationProfile = null,
             )
         }
 

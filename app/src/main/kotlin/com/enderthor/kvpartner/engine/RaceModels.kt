@@ -9,18 +9,18 @@ data class LiveSegment(
     val routeEndM: Double,
     val ghost: GhostCurve,
     val ghostLabel: String,
-    val hasElevation: Boolean,
-    val elevationProfile: List<Pair<Double, Double>>?,
 )
 
-/** Render-only subset of [LiveSegment] published to the data field. */
+/**
+ * Render-only identity of the currently-active recorded stretch. Published to [SegmentInfoHolder] so
+ * the gap data fields can tell "racing your past self on a recorded stretch" (SEG) from the fixed-pace
+ * Virtual Partner (VP). Carries no gap/elevation data — the gap itself comes from [GapStateHolder].
+ */
 data class SegmentInfo(
     val routeStartM: Double,
     val routeEndM: Double,
     val label: String,
-    val hasElevation: Boolean,
-    val elevationProfile: List<Pair<Double, Double>>?,
 )
 
 /** Maps a [LiveSegment] to its render-only [SegmentInfo] (drops the ghost curve). */
-fun LiveSegment.toInfo() = SegmentInfo(routeStartM, routeEndM, ghostLabel, hasElevation, elevationProfile)
+fun LiveSegment.toInfo() = SegmentInfo(routeStartM, routeEndM, ghostLabel)

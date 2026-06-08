@@ -5,16 +5,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Canonical in-memory holder for the segment metadata that the segment data field reads
- * alongside [GapStateHolder].
+ * Canonical in-memory holder for which recorded stretch (if any) is currently active.
  *
- * The ~1 Hz tick in [com.enderthor.kvpartner.extension.KVPartnerExtension] is the single
- * writer; `SegmentGapDataType` is the reader. Keeping [SegmentInfo] here (rather than
- * re-reading DataStore or passing it through Karoo's callback API) avoids async, racy
- * reads on the render path — the same pattern used by [GapStateHolder] for [GapState] and
- * [RenderPrefs] for gap-display preferences.
+ * The ~1 Hz tick in [com.enderthor.kvpartner.extension.KVPartnerExtension] is the single writer; the
+ * gap data fields are the readers — they only use whether this is non-null to show their "SEG" (racing
+ * a recorded stretch) vs "VP" (fixed-pace virtual partner) tag. Keeping it here (rather than re-reading
+ * DataStore or passing it through Karoo's callback API) avoids async, racy reads on the render path —
+ * the same pattern used by [GapStateHolder] for [GapState] and [RenderPrefs] for gap-display prefs.
  *
- * Starts null: the field renders `---` until the first segment becomes active.
+ * Starts null: VP mode until the rider enters a recorded stretch.
  */
 object SegmentInfoHolder {
     private val _info = MutableStateFlow<SegmentInfo?>(null)
@@ -25,16 +24,13 @@ object SegmentInfoHolder {
     /**
      * Publishes segment metadata when the rider enters a live segment. Called by the extension on the
      * ~1 Hz tick — which re-builds the SAME active segment's [SegmentInfo] (a fresh instance via
-     * `toInfo()`) every tick. StateFlow's default `equals` dedup would then compare the entire
-     * `elevationProfile` list O(n) every second; instead skip the assignment when the segment IDENTITY
-     * (start/end/label/hasElevation) is unchanged. The profile is deterministic per segment, so an
-     * unchanged identity means an unchanged profile — no behavioural difference, no per-tick O(n).
+     * `toInfo()`) every tick. Skip the assignment when the segment identity (start/end/label) is
+     * unchanged so a steady segment doesn't churn the readers (the gap fields' SEG/VP tag) every tick.
      */
     fun set(i: SegmentInfo?) {
         val cur = _info.value
         if (i != null && cur != null &&
-            cur.routeStartM == i.routeStartM && cur.routeEndM == i.routeEndM &&
-            cur.label == i.label && cur.hasElevation == i.hasElevation
+            cur.routeStartM == i.routeStartM && cur.routeEndM == i.routeEndM && cur.label == i.label
         ) {
             return
         }

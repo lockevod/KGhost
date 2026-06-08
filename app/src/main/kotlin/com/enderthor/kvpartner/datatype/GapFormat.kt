@@ -6,14 +6,13 @@ import com.enderthor.kvpartner.data.GapDisplay
 import com.enderthor.kvpartner.engine.GapDisplayLogic
 import com.enderthor.kvpartner.engine.GapState
 import com.enderthor.kvpartner.engine.GapStatus
-import com.enderthor.kvpartner.engine.SegmentInfo
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
- * Shared gap formatting + colour/sign helpers used by ALL gap data fields
- * ([GapNumericDataType], [GapGraphicDataType] and [SegmentGapDataType]). Kept in one place so the
+ * Shared gap formatting + colour/sign helpers used by both gap data fields
+ * ([GapNumericDataType] and [GapGraphicDataType]). Kept in one place so the
  * sign/neutral rules, the `M:SS`/`H:MM:SS` rollover, the distance rounding and the
  * [GapStatus]-driven colour selection have exactly one implementation (DRY).
  *
@@ -118,19 +117,15 @@ internal data class GapRenderKey(
     val gapDisplay: GapDisplay,
     val dark: Boolean,
     val isRoute: Boolean = false,
-    val segKey: Long = 0L,
-    val youM: Int = 0,
-    val ghostM: Int = 0,
-    val hasElev: Boolean = false,
 )
 
 private fun Double.toQuantOrSentinel(): Int = if (isFinite()) roundToInt() else Int.MIN_VALUE
 
 /**
- * Render key for the numeric/graphic gap fields. [dark] (the day/night mode) MUST be part of the key:
- * the colours and the day/night background are chosen by it, so a mode flip while the gap value is
- * static has to force a redraw — otherwise the cached frame keeps the wrong scheme (worst case an
- * inactive `---` going white-on-white) until the next value change.
+ * Render key for the gap data fields. [dark] (the day/night mode) MUST be part of the key: the colours
+ * and the day/night background are chosen by it, so a mode flip while the gap value is static has to
+ * force a redraw — otherwise the cached frame keeps the wrong scheme (worst case an inactive `---`
+ * going white-on-white) until the next value change.
  */
 internal fun gapRenderKey(state: GapState, gapDisplay: GapDisplay, isRoute: Boolean, dark: Boolean): GapRenderKey {
     if (!state.active) {
@@ -145,28 +140,5 @@ internal fun gapRenderKey(state: GapState, gapDisplay: GapDisplay, isRoute: Bool
         gapDisplay = gapDisplay,
         dark = dark,
         isRoute = isRoute,
-    )
-}
-
-/** Render key for the segment gap field — adds the active-segment identity + marker positions. */
-internal fun segmentRenderKey(state: GapState, info: SegmentInfo?, gapDisplay: GapDisplay, dark: Boolean): GapRenderKey {
-    if (info == null || !state.active) {
-        return GapRenderKey(false, false, GapStatus.NEUTRAL, 0, 0, gapDisplay, dark)
-    }
-    // Identity of the active segment (start + end + label) so a different stretch forces a redraw.
-    val segKey = (info.routeStartM.roundToInt().toLong() shl 32) xor
-        (info.routeEndM.roundToInt().toLong() shl 1) xor info.label.hashCode().toLong()
-    return GapRenderKey(
-        active = true,
-        estimated = state.estimated,
-        status = GapDisplayLogic.gapStatus(state.gapTimeS),
-        timeSec = if (state.gapTimeS.isFinite()) state.gapTimeS.toInt() else Int.MIN_VALUE,
-        distM = state.gapDistanceM.toQuantOrSentinel(),
-        gapDisplay = gapDisplay,
-        dark = dark,
-        segKey = segKey,
-        youM = (state.progressM - info.routeStartM).toQuantOrSentinel(),
-        ghostM = (state.ghostProgressM - info.routeStartM).toQuantOrSentinel(),
-        hasElev = info.hasElevation && !info.elevationProfile.isNullOrEmpty(),
     )
 }

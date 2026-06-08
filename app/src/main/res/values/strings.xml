@@ -11,8 +11,6 @@
     <string name="gap_numeric_description">Time/distance gap to the virtual partner.</string>
     <string name="gap_graphic_name">Virtual Partner Track</string>
     <string name="gap_graphic_description">Track view showing your position relative to the virtual partner.</string>
-    <string name="segment_field_name">Segment Gap</string>
-    <string name="segment_field_desc">Adaptive segment view: elevation profile or track, showing your gap versus your past best over the matched stretch.</string>
 
     <!-- Settings UI: tabs -->
     <string name="tab_main">Virtual Partner</string>

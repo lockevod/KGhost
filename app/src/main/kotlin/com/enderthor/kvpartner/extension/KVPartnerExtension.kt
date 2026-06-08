@@ -4,7 +4,6 @@ import com.enderthor.kvpartner.R
 import com.enderthor.kvpartner.data.KVPartnerConfig
 import com.enderthor.kvpartner.datatype.GapGraphicDataType
 import com.enderthor.kvpartner.datatype.GapNumericDataType
-import com.enderthor.kvpartner.datatype.SegmentGapDataType
 import com.enderthor.kvpartner.engine.CoastQuality
 import com.enderthor.kvpartner.engine.CoastingEstimator
 import com.enderthor.kvpartner.engine.GapCalculator
@@ -80,9 +79,10 @@ import timber.log.Timber
  *        feeds the DISTANCE stream through a [CoastingEstimator] (dead-reckoning during brief GPS
  *        loss) + a cached [VirtualPartnerSource] curve into [GapCalculator].
  *      * **② Route mode** (when a navigated route is loaded and `raceEnabled`): projects the live
- *        GPS position onto the route via [RouteProjectedProgress], finds the active recorded
- *        [LiveSegment], and computes the gap against that segment's ghost. Publishes the active
- *        segment metadata to [SegmentInfoHolder].
+ *        GPS position onto the route via [RouteProjectedProgress] and computes the gap against the
+ *        continuous whole-route ghost (recorded stretches stitched with VP-pace fills). Publishes
+ *        which recorded [LiveSegment] is currently active to [SegmentInfoHolder] — used only to show
+ *        the data fields' SEG (racing your past self) vs VP (fixed-pace) tag.
  *  - Subscribes to the navigation state. On `NavigatingRoute` (route mode ②), it decodes the route
  *    polyline, loads candidate recorded tracks, and runs [SegmentMatcher] to build the live
  *    segments. On `Idle`/`NavigatingToDestination`, route mode is cleared and the tick falls back
@@ -103,13 +103,6 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
 
         /** Tick cadence. The ride app advances its record timer at ~1 Hz. */
         private const val REFRESH_MS = 1000L
-
-        /**
-         * A route segment is rendered as an elevation profile (render A) only when its elevation
-         * gain over the segment is at least this many metres; below this it falls back to the
-         * two-dot track render (render B). Keeps flat segments from showing a noisy flat silhouette.
-         */
-        private const val ELEV_GAIN_THRESHOLD_M = 30.0
 
         /** Stable id for the ghost map symbol — re-emitting the same id MOVES the marker. */
         private const val GHOST_SYMBOL_ID = "kvpartner-ghost"
@@ -265,12 +258,11 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
     private val mapLock = Any()
 
     // The on-screen data fields rendering the GapState. typeIds must match extension_info.xml
-    // exactly ("kvpartner-gap", "kvpartner-gap-num" and "kvpartner-segment").
+    // exactly ("kvpartner-gap" and "kvpartner-gap-num").
     override val types by lazy {
         listOf(
             GapGraphicDataType(applicationContext),
             GapNumericDataType(applicationContext),
-            SegmentGapDataType(applicationContext),
         )
     }
 
@@ -456,7 +448,6 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
             }
             pendingNavState = null
             val routePolyline = state.routePolyline
-            val elevPolyline = state.routeElevationPolyline
             // Dedup ON POLYLINE ALONE: the host re-emits the SAME NavigatingRoute many times as it
             // computes climbs/progress. If this is a re-emit of the route we already claimed, ignore
             // it — re-running the full match would saturate the Default pool and starve the
@@ -497,14 +488,13 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                         activeConfig.value.ghostPick,
                         SegmentMatcher.Params(),
                     )
-                    val withElevation = applyElevation(matched, elevPolyline)
                     // Build the ONE continuous whole-route ghost (recorded stretches + VP-pace fills).
                     // Fill pace = the VP target, falling back to the segments' own average so the ghost
                     // still flows even with no target configured.
                     val fillSpeedM = activeConfig.value.validTargetOrNull()
-                        ?: RouteGhost.averageSegmentSpeedM(withElevation)
+                        ?: RouteGhost.averageSegmentSpeedM(matched)
                     val routeGhost = if (fillSpeedM != null && fillSpeedM > 0.0) {
-                        RouteGhost.build(path.totalM, withElevation, fillSpeedM)
+                        RouteGhost.build(path.totalM, matched, fillSpeedM)
                     } else {
                         null
                     }
@@ -512,9 +502,9 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                     // NEW path paired with OLD segments. Guarded: only publish if a newer route has not
                     // superseded us (lastMatchedPolyline still ours).
                     if (lastMatchedPolyline == mine) {
-                        routeMode = RouteMode(path, withElevation, routeGhost)
+                        routeMode = RouteMode(path, matched, routeGhost)
                         Timber.d(
-                            "route mode ON: ${withElevation.size} segment(s), routeGhost=${routeGhost != null} " +
+                            "route mode ON: ${matched.size} segment(s), routeGhost=${routeGhost != null} " +
                                 "on '${state.name}'",
                         )
                     }
@@ -561,52 +551,6 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
         // publishGhostMarker is internally synchronized on mapLock, so it is safe to call directly
         // from any caller thread (this can run on a Default coroutine via onNavigationState).
         publishGhostMarker(null)
-    }
-
-    /**
-     * Fills [LiveSegment.hasElevation]/[LiveSegment.elevationProfile] for each segment from the
-     * route's elevation polyline. The elevation polyline is a Google-encoded polyline at
-     * **precision 1** whose decoded points carry (distanceAlongRouteM, altitudeM) in their
-     * (lat, lng) fields. For each segment we keep the samples whose distance-along-route lands in
-     * `[routeStartM, routeEndM]`, rebase their distance to be segment-relative, and set
-     * `hasElevation` when the gain over that window is at least [ELEV_GAIN_THRESHOLD_M]. On any
-     * decode failure or an absent polyline the segments keep `hasElevation = false`.
-     */
-    private fun applyElevation(
-        segments: List<LiveSegment>,
-        elevationPolyline: String?,
-    ): List<LiveSegment> {
-        if (segments.isEmpty()) return segments
-        // (distanceAlongRouteM, altitudeM) pairs, ascending by distance.
-        val elev: List<Pair<Double, Double>> = if (elevationPolyline.isNullOrEmpty()) {
-            emptyList()
-        } else {
-            runCatching {
-                Polyline.decode(elevationPolyline, precision = 1)
-                    .map { it.lat to it.lng } // lat = distanceAlongRoute, lng = altitude
-                    .filter { it.first.isFinite() && it.second.isFinite() }
-                    .sortedBy { it.first }
-            }.getOrElse {
-                Timber.w(it, "elevation polyline decode failed; segments stay hasElevation=false")
-                emptyList()
-            }
-        }
-        if (elev.isEmpty()) return segments
-
-        return segments.map { seg ->
-            val inSeg = elev
-                .filter { it.first in seg.routeStartM..seg.routeEndM }
-                .map { (distAlong, alt) -> (distAlong - seg.routeStartM) to alt } // segment-relative distance
-            if (inSeg.size < 2) {
-                seg.copy(hasElevation = false, elevationProfile = null)
-            } else {
-                val gain = inSeg.maxOf { it.second } - inSeg.minOf { it.second }
-                seg.copy(
-                    hasElevation = gain >= ELEV_GAIN_THRESHOLD_M,
-                    elevationProfile = inSeg,
-                )
-            }
-        }
     }
 
     // `.sample()` is a @FlowPreview API; opting in here (same convention as KSafe's LocationManager).
@@ -819,9 +763,9 @@ class KVPartnerExtension : KarooExtension("kvpartner", "0.1.0") {
                         // projection) onRoute reflects the last good fix, so a stale off-route flag does
                         // not override the coast. !live → the gap renders as an estimate, it never blanks.
                         val fresh = cr.quality != CoastQuality.LONG_LOSS && (!rp.isFresh || rp.onRoute)
-                        // Which recorded stretch the rider is currently on — for the segment field's
-                        // elevation/track visualization only. The ghost itself is whole-route, not
-                        // per-segment, so this does NOT gate the ghost or the gap.
+                        // Which recorded stretch the rider is currently on — drives only the data
+                        // fields' SEG/VP tag (via SegmentInfoHolder). The ghost itself is whole-route,
+                        // not per-segment, so this does NOT gate the ghost or the gap.
                         val seg = rm.segments.firstOrNull { routeDist in it.routeStartM..it.routeEndM }
                         run {
                             val nowMs = System.currentTimeMillis()
