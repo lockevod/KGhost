@@ -2,7 +2,7 @@ package com.enderthor.kvpartner.geo
 
 import kotlin.math.atan2
 import kotlin.math.cos
-import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -12,15 +12,25 @@ object Polyline {
 
     /** Decodes a Google encoded polyline (precision 5) into coordinates. */
     fun decode(encoded: String, precision: Int = 5): List<LatLng> {
-        val factor = Math.pow(10.0, precision.toDouble())
+        val factor = 10.0.pow(precision.toDouble())
         val out = ArrayList<LatLng>()
         var index = 0; var lat = 0; var lng = 0
+        // The `index < encoded.length` guards on each inner do/while (and the break after the lat
+        // group) make this tolerant of a TRUNCATED/corrupt polyline: a well-formed varint always ends
+        // on a char with b < 0x20, so on valid input these guards never trip early and behaviour is
+        // unchanged — but a route polyline cut short by the host no longer walks past the string end
+        // and throws StringIndexOutOfBoundsException (which would abort the whole route load).
         while (index < encoded.length) {
             var result = 0; var shift = 0; var b: Int
-            do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20)
+            do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20 && index < encoded.length)
             lat += if (result and 1 != 0) (result shr 1).inv() else result shr 1
+            if (index >= encoded.length) break // truncated mid-point: no lng group → drop the partial pair
             result = 0; shift = 0
-            do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20)
+            do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20 && index < encoded.length)
+            // If the lng varint exited still on a continuation byte (b >= 0x20), the loop stopped only
+            // because the string ended mid-group → the longitude is incomplete. Drop the partial pair
+            // instead of appending a point with a corrupted lng (symmetric with the lat break above).
+            if (b >= 0x20) break
             lng += if (result and 1 != 0) (result shr 1).inv() else result shr 1
             out.add(LatLng(lat / factor, lng / factor))
         }

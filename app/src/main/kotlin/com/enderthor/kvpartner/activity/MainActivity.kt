@@ -3,10 +3,13 @@ package com.enderthor.kvpartner.activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -42,11 +45,19 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            Surface(
-                modifier = Modifier.fillMaxSize(),
-                color = MaterialTheme.colorScheme.background,
+            // The app has no MaterialTheme wrapper otherwise, so every MaterialTheme.colorScheme.*
+            // reference in the settings screens would resolve to M3's built-in light scheme regardless
+            // of the Karoo's day/night mode (white-on-white at night). Drive the scheme from the system
+            // night mode so the settings UI matches the device theme like the data fields already do.
+            MaterialTheme(
+                colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme(),
             ) {
-                TabLayout()
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background,
+                ) {
+                    TabLayout()
+                }
             }
         }
     }
@@ -68,10 +79,13 @@ fun TabLayout() {
         .collectAsStateWithLifecycle(initialValue = KVPartnerConfig())
 
     // Read-only snapshot of the stored track count. allTrackIds() does a synchronous listFiles(),
-    // so it must NOT run on Main (ANR rule); compute it once on Dispatchers.IO. Stays null until
-    // loaded, which keeps the Race-tab count line hidden until the value is available.
+    // so it must NOT run on Main (ANR rule); compute it on Dispatchers.IO. Stays null until loaded,
+    // which keeps the Race-tab count line hidden until the value is available. Recomputed whenever
+    // [refreshKey] bumps — the import flow calls onTracksChanged() on completion so the "recorded
+    // tracks: N" line reflects a just-finished import instead of staying stale until recreation.
     var trackCount by remember { mutableStateOf<Int?>(null) }
-    LaunchedEffect(Unit) {
+    var refreshKey by remember { mutableIntStateOf(0) }
+    LaunchedEffect(refreshKey) {
         trackCount = withContext(Dispatchers.IO) {
             try { TrackStore(TrackStorage.tracksDir(context)).allTrackIds().size } catch (_: Exception) { null }
         }
@@ -102,6 +116,11 @@ fun TabLayout() {
                 )
             }
         }
-        SettingsScreen(config = config, configManager = configManager, recordedCount = trackCount)
+        SettingsScreen(
+            config = config,
+            configManager = configManager,
+            recordedCount = trackCount,
+            onTracksChanged = { refreshKey++ },
+        )
     }
 }

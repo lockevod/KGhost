@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        App/launcher theme for the (Compose) settings Activity.
+
+        Extends the DayNight variant so the WINDOW background follows the device's day/night mode via
+        resource qualification (dark at night, light by day). The previous plain Theme.AppCompat was a
+        fixed DARK theme, so it flashed a dark window before Compose drew and showed dark letterbox
+        bands around the now day/night-aware MaterialTheme content. NoActionBar because the screen is
+        pure Compose and draws its own chrome — there is no AppCompat action bar to show.
+
+        windowBackground is pinned to ?android:attr/colorBackground (itself DayNight-qualified) so the
+        pre-Compose frame matches the Compose Surface colour and there is no flash either way.
+    -->
+    <style name="Theme.KVPartner" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowBackground">?android:attr/colorBackground</item>
+    </style>
+</resources>

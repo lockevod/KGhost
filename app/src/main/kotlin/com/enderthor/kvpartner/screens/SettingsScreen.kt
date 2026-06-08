@@ -35,6 +35,7 @@ fun SettingsScreen(
     config: KVPartnerConfig,
     configManager: ConfigurationManager,
     recordedCount: Int? = null,
+    onTracksChanged: () -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -62,6 +63,11 @@ fun SettingsScreen(
         HorizontalDivider()
 
         // Race Your Own (recorded ghosts, history, ghost-on-map icon/size).
-        RaceSection(config = config, configManager = configManager, recordedCount = recordedCount)
+        RaceSection(
+            config = config,
+            configManager = configManager,
+            recordedCount = recordedCount,
+            onTracksChanged = onTracksChanged,
+        )
     }
 }

@@ -92,7 +92,19 @@ class ConfigurationManager(private val context: Context) {
     suspend fun updateConfig(transform: (KVPartnerConfig) -> KVPartnerConfig): Boolean {
         return try {
             context.dataStore.edit { prefs ->
-                val current = prefs[configKey]?.let { decodeConfig(it) }?.migrateToLatest() ?: KVPartnerConfig()
+                val raw = prefs[configKey]
+                // Decode WITHOUT the silent default-fallback that [decodeConfig] uses on the read path.
+                // On the WRITE path a present-but-undecodable blob must NOT be replaced with defaults:
+                // doing so would persist defaults over the rider's settings on the very next toggle,
+                // permanently wiping them. Let a genuine decode failure throw → the edit aborts, the bad
+                // blob is preserved, and the caller surfaces a save-failed status. Note this only fires
+                // on a structurally broken blob: a stale/removed ENUM value still decodes fine because
+                // [jsonWithUnknownKeys] has coerceInputValues=true (the common forward-compat case).
+                val current = if (raw == null) {
+                    KVPartnerConfig()
+                } else {
+                    jsonWithUnknownKeys.decodeFromString<KVPartnerConfig>(raw)
+                }.migrateToLatest()
                 prefs[configKey] = jsonForStorage.encodeToString(transform(current))
             }
             true

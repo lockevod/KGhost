@@ -2,8 +2,11 @@ package com.enderthor.kvpartner.datatype
 
 import android.content.Context
 import com.enderthor.kvpartner.R
+import com.enderthor.kvpartner.data.GapDisplay
 import com.enderthor.kvpartner.engine.GapDisplayLogic
+import com.enderthor.kvpartner.engine.GapState
 import com.enderthor.kvpartner.engine.GapStatus
+import com.enderthor.kvpartner.engine.SegmentInfo
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -85,4 +88,85 @@ internal fun Context.gapStatusColor(status: GapStatus, neutral: Int, dark: Boole
     GapStatus.NEUTRAL -> neutral
     GapStatus.AHEAD -> getColor(if (dark) R.color.gap_ahead_night else R.color.gap_ahead_day)
     GapStatus.BEHIND -> getColor(if (dark) R.color.gap_behind_night else R.color.gap_behind_day)
+}
+
+/**
+ * Day/night-aware amber used to render the gap value while it is a dead-reckoned ESTIMATE during a
+ * prolonged GPS loss ([com.enderthor.kvpartner.engine.GapState.estimated]). Signals "extrapolated,
+ * not measured" without blanking. Bright amber on the black night background, darker amber on the
+ * white day background (sunlight contrast). Overrides the green/red status hue while estimating.
+ */
+internal fun Context.gapEstimateColor(dark: Boolean): Int =
+    getColor(if (dark) R.color.gap_estimate_night else R.color.gap_estimate_day)
+
+/**
+ * Cheap equality key for a field's RENDERED output: two [GapState]s that map to the same key produce
+ * a pixel-identical field, so the (expensive) Canvas redraw + the `updateView` IPC can both be skipped
+ * for a change emission that doesn't reach the screen. The continuous gap doubles are quantized to
+ * exactly what is displayed — whole seconds ([fmtTime]) and whole metres ([fmtDistance]) — plus the
+ * flags that drive colour/placeholder. Non-finite values collapse to a sentinel so they don't churn.
+ *
+ * [segKey]/[youM]/[ghostM]/[hasElev] are only used by the segment field (its markers move on the
+ * elevation silhouette); numeric/graphic leave them at their defaults.
+ */
+internal data class GapRenderKey(
+    val active: Boolean,
+    val estimated: Boolean,
+    val status: GapStatus,
+    val timeSec: Int,
+    val distM: Int,
+    val gapDisplay: GapDisplay,
+    val dark: Boolean,
+    val isRoute: Boolean = false,
+    val segKey: Long = 0L,
+    val youM: Int = 0,
+    val ghostM: Int = 0,
+    val hasElev: Boolean = false,
+)
+
+private fun Double.toQuantOrSentinel(): Int = if (isFinite()) roundToInt() else Int.MIN_VALUE
+
+/**
+ * Render key for the numeric/graphic gap fields. [dark] (the day/night mode) MUST be part of the key:
+ * the colours and the day/night background are chosen by it, so a mode flip while the gap value is
+ * static has to force a redraw — otherwise the cached frame keeps the wrong scheme (worst case an
+ * inactive `---` going white-on-white) until the next value change.
+ */
+internal fun gapRenderKey(state: GapState, gapDisplay: GapDisplay, isRoute: Boolean, dark: Boolean): GapRenderKey {
+    if (!state.active) {
+        return GapRenderKey(false, false, GapStatus.NEUTRAL, 0, 0, gapDisplay, dark, isRoute)
+    }
+    return GapRenderKey(
+        active = true,
+        estimated = state.estimated,
+        status = GapDisplayLogic.gapStatus(state.gapTimeS),
+        timeSec = if (state.gapTimeS.isFinite()) state.gapTimeS.toInt() else Int.MIN_VALUE,
+        distM = state.gapDistanceM.toQuantOrSentinel(),
+        gapDisplay = gapDisplay,
+        dark = dark,
+        isRoute = isRoute,
+    )
+}
+
+/** Render key for the segment gap field — adds the active-segment identity + marker positions. */
+internal fun segmentRenderKey(state: GapState, info: SegmentInfo?, gapDisplay: GapDisplay, dark: Boolean): GapRenderKey {
+    if (info == null || !state.active) {
+        return GapRenderKey(false, false, GapStatus.NEUTRAL, 0, 0, gapDisplay, dark)
+    }
+    // Identity of the active segment (start + end + label) so a different stretch forces a redraw.
+    val segKey = (info.routeStartM.roundToInt().toLong() shl 32) xor
+        (info.routeEndM.roundToInt().toLong() shl 1) xor info.label.hashCode().toLong()
+    return GapRenderKey(
+        active = true,
+        estimated = state.estimated,
+        status = GapDisplayLogic.gapStatus(state.gapTimeS),
+        timeSec = if (state.gapTimeS.isFinite()) state.gapTimeS.toInt() else Int.MIN_VALUE,
+        distM = state.gapDistanceM.toQuantOrSentinel(),
+        gapDisplay = gapDisplay,
+        dark = dark,
+        segKey = segKey,
+        youM = (state.progressM - info.routeStartM).toQuantOrSentinel(),
+        ghostM = (state.ghostProgressM - info.routeStartM).toQuantOrSentinel(),
+        hasElev = info.hasElevation && !info.elevationProfile.isNullOrEmpty(),
+    )
 }

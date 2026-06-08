@@ -113,7 +113,16 @@ object GpxParser {
         override fun endDocument() {
             // Need at least two points (parity with FitDecoder's >= 2 rule — a single-point track
             // is not a usable ride), and every point must have a parsed time to race against.
-            if (raw.size < 2 || raw.any { it.timeEpochMs == null }) {
+            if (raw.size < 2) {
+                Timber.w("GPX dropped: %d point(s), need >= 2", raw.size)
+                result = null
+                return
+            }
+            val missingTimes = raw.count { it.timeEpochMs == null }
+            if (missingTimes > 0) {
+                // Common for route exports (Strava/Komoot) that carry no <time>. Log so a silently
+                // "failed" import in HistoryImporter has a discoverable reason rather than vanishing.
+                Timber.w("GPX dropped: %d/%d point(s) lack a parsable <time> (needed to race)", missingTimes, raw.size)
                 result = null
                 return
             }

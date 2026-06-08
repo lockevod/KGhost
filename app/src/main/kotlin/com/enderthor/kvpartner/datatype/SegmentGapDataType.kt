@@ -26,8 +26,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -48,9 +50,11 @@ import timber.log.Timber
  *  - **Track render (B)** — otherwise: the same two-dot abstract track as ① (you coloured by
  *    status, ghost grey) plus the big gap time, a small distance, and the segment label.
  *
- * When there is no live segment ([SegmentInfoHolder.info] is null) or the gap is not
- * [GapState.active] / is [GapState.stale], the field draws a neutral `---` (day/night colour, NOT a
- * disabled grey) — waiting for / cannot trust data, not turned off.
+ * The field draws a neutral `---` (day/night colour, NOT a disabled grey) when there is no live
+ * segment ([SegmentInfoHolder.info] is null) or the gap is not [GapState.active]. A GPS loss does NOT
+ * blank: the value keeps dead-reckoning and, once it is a prolonged-loss estimate
+ * ([GapState.estimated]), the marker + gap time render in the amber estimate colour. Only a truly
+ * sustained loss (the extension gives up and clears) returns to `---`.
  *
  * Passive readout, so there is no tap PendingIntent.
  *
@@ -88,6 +92,16 @@ class SegmentGapDataType(
         const val MAX_H = 320
 
         /**
+         * Idle-only heartbeat cadence (ms). karoo-ext's ViewEmitter throttles updateView (~900 ms,
+         * keeping the EARLIER call), so the synchronous seed frame can be dropped; the change-driven
+         * loop then emits only on a real state CHANGE, leaving a static segment state stuck on the
+         * field NAME. Re-emitting the CURRENT state every HEARTBEAT_MS guarantees a post-throttle
+         * frame even when nothing changes. Mirrors [GapGraphicDataType]/[GapNumericDataType] (this
+         * field previously lacked it, so it could stick on its header at a steady-state moment).
+         */
+        const val HEARTBEAT_MS = 3000L
+
+        /**
          * Synthetic state shown in the profile-editor gallery (config.preview = true).
          * Represents being ~0:45 ahead, ~60 % through the segment with the ghost just behind.
          */
@@ -97,7 +111,7 @@ class SegmentGapDataType(
             progressM = 600.0,
             ghostProgressM = 560.0,
             ahead = true,
-            stale = false,
+            estimated = false,
             active = true,
         )
 
@@ -161,22 +175,70 @@ class SegmentGapDataType(
             // seed has already completed synchronously before this launch, so there is no concurrent
             // access to the renderer.
             try {
-                combine(
+                // Wall-clock (ms) of the last frame we actually emitted, so the heartbeat is
+                // IDLE-ONLY: it re-emits only when no change frame went out in the last HEARTBEAT_MS,
+                // avoiding the every-3 s "too soon" collisions with the ~1 Hz change emits.
+                var lastEmitMs = 0L
+                // Cheap render-key dedup: skip the bitmap redraw + updateView IPC when the displayed
+                // output (gap text, marker positions, segment identity) is unchanged. lastRv caches the
+                // last view so the heartbeat re-asserts it without redrawing. (SegmentInfoHolder already
+                // dedups on segment identity, so info no longer churns the combine every tick.)
+                var lastKey: GapRenderKey? = null
+                var lastRv: RemoteViews? = null
+                // Change-driven source (isHeartbeat = false): emits on every real state/info/pref
+                // change. The three sources are StateFlows (each dedups its own value); the key dedup
+                // below drops sub-display-resolution jitter. The heartbeat MUST NOT be deduped against
+                // the change stream (it re-asserts the SAME current value to beat the seed-drop).
+                val changes = combine(
                     GapStateHolder.state,
                     SegmentInfoHolder.info,
                     RenderPrefs.gapDisplay,
-                ) { state, info, gapDisplay -> Triple(state, info, gapDisplay) }
-                    .distinctUntilChanged()
-                    .collect { (liveState, liveInfo, gapDisplay) ->
+                ) { state, info, gapDisplay -> Triple(state, info, gapDisplay) to false }
+                // Heartbeat (isHeartbeat = true): re-emits the CURRENT state every HEARTBEAT_MS so a
+                // throttle-dropped seed/first-frame can't leave the field stuck on its name. Merged
+                // INTO this single collect (NOT a separate coroutine) so the per-coroutine renderer is
+                // never touched from another coroutine.
+                val heartbeat = flow {
+                    while (true) {
+                        delay(HEARTBEAT_MS)
+                        emit(
+                            Triple(
+                                GapStateHolder.state.value,
+                                SegmentInfoHolder.info.value,
+                                RenderPrefs.gapDisplay.value,
+                            ) to true,
+                        )
+                    }
+                }
+                merge(changes, heartbeat)
+                    .collect { (data, isHeartbeat) ->
+                        val now = System.currentTimeMillis()
+                        // Drop the periodic heartbeat if a real frame already went out recently.
+                        if (isHeartbeat && now - lastEmitMs < HEARTBEAT_MS) return@collect
+                        val (liveState, liveInfo, gapDisplay) = data
                         // In preview (profile editor gallery) render a synthetic demo so the field
                         // shows a meaningful sample instead of the inactive `---` placeholder.
                         val state = if (config.preview) DEMO_STATE else liveState
                         val info = if (config.preview) DEMO_INFO else liveInfo
+                        val key = segmentRenderKey(state, info, gapDisplay, dark = context.isKarooNightMode())
+                        if (isHeartbeat) {
+                            val cached = lastRv
+                            if (cached != null && key == lastKey) {
+                                emitter.updateView(cached) // re-assert cached frame, no redraw
+                                lastEmitMs = now
+                                return@collect
+                            }
+                        } else if (key == lastKey && lastRv != null) {
+                            return@collect // pixel-identical change → skip redraw + IPC
+                        }
                         val (w, h) = bitmapSize(config)
                         val bmp = renderer.draw(w, h, state, info, gapDisplay)
                         val rv = RemoteViews(context.packageName, R.layout.field_segment)
                         rv.setImageViewBitmap(R.id.field_segment_image, bmp)
                         emitter.updateView(rv)
+                        lastKey = key
+                        lastRv = rv
+                        lastEmitMs = now
                     }
             } catch (_: CancellationException) {
                 // normal — field removed from the page.
@@ -281,8 +343,9 @@ class SegmentGapDataType(
 
             val neutral = if (dark) Color.WHITE else Color.BLACK
 
-            // Blank on no-segment, !active, or stale → neutral `---`, NOT a disabled grey.
-            val waiting = info == null || !state.active || state.stale
+            // Blank on no active segment or !active → neutral `---`, NOT a disabled grey. A GPS loss
+            // does NOT blank: the value keeps coasting, rendered in the estimate colour below.
+            val waiting = info == null || !state.active
             if (waiting) {
                 textPaint.color = neutral
                 textPaint.textSize = h * 0.4f
@@ -292,7 +355,11 @@ class SegmentGapDataType(
             }
 
             val status = GapDisplayLogic.gapStatus(state.gapTimeS)
-            val stateColor = context.gapStatusColor(status, neutral, dark)
+            // While the value is a prolonged-GPS-loss estimate, use the amber estimate colour (for the
+            // marker + the big gap time) so the rider can tell it's extrapolated, not measured.
+            val stateColor =
+                if (state.estimated) context.gapEstimateColor(dark)
+                else context.gapStatusColor(status, neutral, dark)
             val timeText = fmtTime(state.gapTimeS, status)
 
             if (info.hasElevation && !info.elevationProfile.isNullOrEmpty()) {
@@ -385,8 +452,12 @@ class SegmentGapDataType(
             }
 
             // Marker fractions along the segment (0 = entry, 1 = exit), clamped to the plot.
-            val youFrac = (state.progressM / segLen).coerceIn(0.0, 1.0)
-            val ghostFrac = (state.ghostProgressM / segLen).coerceIn(0.0, 1.0)
+            // progressM / ghostProgressM are WHOLE-ROUTE distances (the gap is computed against the
+            // continuous route ghost), so rebase by the segment's route start before dividing by the
+            // segment length — otherwise any segment that doesn't begin at route distance 0 pins both
+            // markers to the exit.
+            val youFrac = ((state.progressM - info.routeStartM) / segLen).coerceIn(0.0, 1.0)
+            val ghostFrac = ((state.ghostProgressM - info.routeStartM) / segLen).coerceIn(0.0, 1.0)
             val youX = (plotLeft + plotW * youFrac).toFloat()
             val ghostX = (plotLeft + plotW * ghostFrac).toFloat()
 

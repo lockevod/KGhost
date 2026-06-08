@@ -22,8 +22,22 @@ object SegmentInfoHolder {
     /** Latest segment metadata, or null when no segment is active. */
     val info: StateFlow<SegmentInfo?> = _info.asStateFlow()
 
-    /** Publishes segment metadata when the rider enters a live segment. Called by the extension. */
+    /**
+     * Publishes segment metadata when the rider enters a live segment. Called by the extension on the
+     * ~1 Hz tick — which re-builds the SAME active segment's [SegmentInfo] (a fresh instance via
+     * `toInfo()`) every tick. StateFlow's default `equals` dedup would then compare the entire
+     * `elevationProfile` list O(n) every second; instead skip the assignment when the segment IDENTITY
+     * (start/end/label/hasElevation) is unchanged. The profile is deterministic per segment, so an
+     * unchanged identity means an unchanged profile — no behavioural difference, no per-tick O(n).
+     */
     fun set(i: SegmentInfo?) {
+        val cur = _info.value
+        if (i != null && cur != null &&
+            cur.routeStartM == i.routeStartM && cur.routeEndM == i.routeEndM &&
+            cur.label == i.label && cur.hasElevation == i.hasElevation
+        ) {
+            return
+        }
         _info.value = i
     }
 

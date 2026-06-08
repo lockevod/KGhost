@@ -9,6 +9,9 @@ const val CONFIG_VERSION = 4
 /** Default Virtual Partner target speed (12 km/h) used when the user hasn't set one. */
 val DEFAULT_TARGET_SPEED_MS: Double = kmhToMs(12.0)
 
+/** Physically-plausible cycling ceiling for the VP target (30 m/s ≈ 108 km/h). */
+const val MAX_TARGET_SPEED_MS: Double = 30.0
+
 /** Controls which gap metric is displayed on the data fields. */
 enum class GapDisplay { TIME, DISTANCE, BOTH }
 
@@ -53,10 +56,13 @@ data class KVPartnerConfig(
     val lastScanEpoch: Long = 0L,
 ) {
     /**
-     * Returns the target speed if valid (> 0), or null when the target was explicitly cleared (0.0).
-     * Data fields and the engine use this to decide whether the Virtual Partner is active.
+     * Returns the target speed if valid, or null when the target was explicitly cleared (0.0).
+     * Valid means finite and > 0; the result is clamped to [MAX_TARGET_SPEED_MS] so a hand-edited or
+     * legacy out-of-range blob can't drive an absurd ghost pace (the UI enforces the same ceiling on
+     * input, but this is the single source of truth the engine and fields actually read).
      */
-    fun validTargetOrNull(): Double? = targetSpeedMs.takeIf { it > 0.0 }
+    fun validTargetOrNull(): Double? =
+        targetSpeedMs.takeIf { it.isFinite() && it > 0.0 }?.coerceAtMost(MAX_TARGET_SPEED_MS)
 }
 
 /** Converts a speed in km/h to m/s. */

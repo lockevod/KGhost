@@ -1,12 +1,11 @@
 package com.enderthor.kvpartner.engine
 
 /**
- * Pure staleness/trustworthiness logic for the gap engine.
+ * Shared staleness constants for the gap engine.
  *
- * The clean distinction the UI needs is "stopped at a light" (the frozen `DISTANCE` is legitimate
- * — the gap stays valid because the ghost keeps moving) versus "GPS lost while moving" (a tunnel —
- * the frozen `DISTANCE` is wrong and would render a believable-but-false growing "behind" gap that
- * snaps on recovery). The discriminator is the SPEED magnitude.
+ * The "stopped at a light" (frozen `DISTANCE` is legitimate — the ghost keeps moving) versus "GPS
+ * lost while moving" distinction is made by SPEED magnitude in [CoastingEstimator]; the constants
+ * here are the shared thresholds it (and [RouteProjectedProgress]) use.
  */
 object StalenessLogic {
 
@@ -14,29 +13,9 @@ object StalenessLogic {
     const val MIN_MOVING_MS = 0.5
 
     /**
-     * How long (ms) the last position/distance may stay frozen before the signal is treated as
-     * stale (→ the field blanks to `---`). Sized to tolerate a BRIEF GPS dropout (a short tunnel,
-     * an underpass, a momentary loss) without flicker: during the grace window the last gap keeps
-     * showing (it drifts slightly as the ghost advances) and snaps back to correct on GPS recovery.
-     * A genuinely prolonged loss still blanks honestly. Tunable; raise to tolerate longer dropouts
-     * at the cost of showing a stale gap longer.
+     * How long (ms) the projected route position may stay frozen before [RouteProjectedProgress]
+     * reports `isFresh = false`. Sized to tolerate a BRIEF GPS dropout (a short tunnel, an underpass,
+     * a momentary loss) without flicker. Tunable.
      */
     const val DEFAULT_STALE_THRESHOLD_MS = 8_000L
-
-    /**
-     * Returns whether the current distance reading can be trusted for gap computation.
-     *
-     * @param distanceFresh whether `DISTANCE` produced a new value within the staleness threshold.
-     * @param speedMs       current speed in m/s, or null when the SPEED stream is unavailable.
-     * @param minMovingMs   speed below which the rider is considered stopped.
-     * @return true when distance is fresh, OR distance is frozen but the rider is essentially
-     *         stopped (frozen distance is legitimate). Returns false when distance is frozen WHILE
-     *         moving (GPS unreliable), including when speed is unavailable — we cannot prove the
-     *         rider is stopped, so a frozen distance is not trustworthy.
-     */
-    fun isTrustworthy(
-        distanceFresh: Boolean,
-        speedMs: Double?,
-        minMovingMs: Double = MIN_MOVING_MS,
-    ): Boolean = distanceFresh || (speedMs != null && speedMs < minMovingMs)
 }

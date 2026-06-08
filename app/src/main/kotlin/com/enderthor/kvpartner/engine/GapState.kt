@@ -13,7 +13,11 @@ package com.enderthor.kvpartner.engine
  * @param progressM     Your current position on the ghost's distance axis (metres).
  * @param ghostProgressM Ghost's current position at elapsedS (metres). Useful for rendering.
  * @param ahead         True when gapTimeS <= 0 (you are at least as fast as the ghost).
- * @param stale         True when the GPS/distance source is not fresh.
+ * @param estimated     True when this value is a dead-reckoned ESTIMATE during a prolonged GPS loss
+ *                      (the position has been frozen-while-moving past the coast window). The field
+ *                      keeps SHOWING the value (it never blanks for GPS loss) but renders it in the
+ *                      estimate colour to signal it is extrapolated, not measured. A brief dropout
+ *                      (within the coast window) and a legitimate stop both stay false.
  * @param active        False when no target is configured or the ride is not recording.
  */
 data class GapState(
@@ -22,7 +26,7 @@ data class GapState(
     val progressM: Double,
     val ghostProgressM: Double,
     val ahead: Boolean,
-    val stale: Boolean,
+    val estimated: Boolean,
     val active: Boolean,
 ) {
     companion object {
@@ -33,7 +37,7 @@ data class GapState(
             progressM = 0.0,
             ghostProgressM = 0.0,
             ahead = false,
-            stale = false,
+            estimated = false,
             active = false,
         )
     }

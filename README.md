@@ -10,16 +10,22 @@ and Karoo 3.
 ## What it does
 
 - **Virtual Partner** — pick a target pace/speed and race a constant-pace ghost. The live gap (time
-  and distance, ahead/behind) is rendered in a graphical data field.
+  and distance, ahead/behind) is rendered in graphical and numeric data fields.
 - **Race your own** — KVPartner auto-records each ride as a decimated GPS track. When you load a
-  route, it finds the stretches you have ridden before and races you, segment by segment, against
-  your past self — automatically, with no setup.
+  route, it builds **one continuous ghost of the whole route** — your past self on the stretches
+  you've ridden before, stitched with the Virtual Partner pace everywhere else — and races you
+  against it, automatically, with no setup. The two halves are not separate features: they are the
+  same ghost.
 - **External ghosts (import)** — race against rides you did *not* record with KVPartner: it scans the
   Karoo's own `/sdcard/FitFiles/*.fit` history and imports GPX/FIT files you drop into
   `/sdcard/KVPartner/`, turning them into ghosts the route matcher can use.
-- **Ghost on the map** — during an active segment race, the ghost's live (time-based) position is
-  drawn as a marker on the Karoo map, sliding along the route at the ghost's pace so you can see it
-  pull ahead or fall behind on the road.
+- **Ghost on the map** — during a route race, the ghost's live (time-based) position is drawn as a
+  marker on the Karoo map, sliding along the route at the ghost's pace so you can see it pull ahead
+  or fall behind on the road. The marker icon (ghost / cyclist / arrow / dot) and size (S/M/L) are
+  selectable.
+- **Resilient to GPS loss** — a dropout never blanks the gap. It keeps dead-reckoning at your last
+  speed (like a GPS unit), marks the value as an estimate after ~30 s, alerts you after a minute, and
+  only gives up after ~3 minutes of no signal. See [Behaviour during a GPS dropout](#behaviour-during-a-gps-dropout).
 
 ## Data fields
 
@@ -27,21 +33,46 @@ Add these from the Karoo's data-field picker (Extensions):
 
 | Field | Type id | What it shows |
 |---|---|---|
-| Gap (graphic) | `kvpartner-gap` | Graphical ahead/behind gap vs the ghost |
-| Gap (numeric) | `kvpartner-gap-num` | Numeric gap (time / distance) |
-| Segment | `kvpartner-segment` | Active "race your own" segment info + per-segment gap |
+| Gap (graphic) | `kvpartner-gap` | Two-dot track: you vs the ghost, with the gap (time/distance) below |
+| Gap (numeric) | `kvpartner-gap-num` | Numeric gap (time / distance, per your preference) |
+| Segment | `kvpartner-segment` | Active "race your own" stretch: elevation profile or track + the gap |
 
-Missing data renders as `---`. Fields are designed for sunlight readability and respect the Karoo's
-day/night theme.
+Ahead is green, behind is red, on-pace is neutral. A value that is a dead-reckoned **estimate**
+during a GPS dropout is shown in amber. `---` appears only when there is nothing to show — no target
+set, not recording, or after a sustained GPS loss (see below). Fields are designed for sunlight
+readability and respect the Karoo's day/night theme.
+
+### Behaviour during a GPS dropout
+
+The Karoo's distance/position freezes when GPS is lost. A navigator should keep estimating, not go
+blank, so KVPartner dead-reckons:
+
+| Time without GPS (while moving) | Data field | Map ghost |
+|---|---|---|
+| 0–30 s | gap continues, estimated at your last speed (shown normally) | visible, keeps gliding |
+| 30 s – 3 min | gap continues, value in **amber** (estimate) | visible |
+| > 1 min | …plus a one-shot **"GPS lost"** in-ride alert (re-armed on recovery) | visible |
+| > 3 min | gives up → `---` | hidden |
+
+When GPS returns, your position snaps back to the real fix and the gap corrects. A normal **stop**
+(e.g. a red light) is *not* a GPS loss: the gap keeps showing your real position (the ghost keeps
+moving, so you fall behind correctly), and the Karoo's auto-pause freezes the ride clock so nothing
+drifts. The map ghost's position is purely time-based, so it is always known and stays visible
+throughout a dropout — it is not hidden just because *your* position is briefly uncertain.
 
 ## Settings
 
-Open the KVPartner app on the Karoo:
+Open the KVPartner app on the Karoo. Everything lives on one scrolling screen (the Virtual Partner
+and "race your own" are two halves of one ghost, so they are configured together):
 
-- **Partner** tab — Virtual Partner target pace/speed.
-- **Race** tab — enable "race your own", choose which past ride to race (best / last), auto-record
-  toggle, **import history** (FitFiles scan + GPX/FIT from `/sdcard/KVPartner/`, needs all-files
-  access), and **Show ghost on map**.
+- **Virtual Partner** — the target pace/speed (entered as km/h or min/km). This is also the pace the
+  whole-route ghost uses on stretches you have no recorded history for.
+- **Race your own** — master enable, which past ride to race (**best** / **last**), **auto-record**
+  toggle, and a segment-entry alert.
+- **Ghost on map** — show/hide, plus the marker **icon** (ghost / cyclist / arrow / dot) and **size**
+  (S / M / L).
+- **Import history** — scan the Karoo's `/sdcard/FitFiles` and import GPX/FIT from `/sdcard/KVPartner/`
+  (needs all-files access); "import all" or "new only".
 
 ## Install (sideload)
 
@@ -84,14 +115,17 @@ kotlinx.serialization, the Garmin FIT Java SDK (for FIT import), JUnit 4. `compi
 A pure, JVM-tested core (no Android) does the work and the extension is plumbing:
 
 - `engine/` — `GhostCurve` (bidirectional distance↔time interpolation), `GapCalculator` → `GapState`,
-  virtual-partner and recorded-ghost sources, GPS-staleness logic.
+  the virtual-partner and recorded-ghost sources, `RouteGhost` (stitches the continuous whole-route
+  ghost), `RouteProjectedProgress` (GPS→route distance), and `CoastingEstimator` (the GPS-loss
+  dead-reckoning / estimate-quality state machine).
 - `geo/` — route polyline projection (`PolylinePath`), recorded-track store with a geohash spatial
   index, segment matcher, track decimation.
 - `import/` — GPX (SAX) and FIT (Garmin SDK) decoders + the history importer (with `sourceKey` dedup
   so the same ride ingested twice collapses to one ghost).
 - `map/` — pure helpers that turn the ghost's route position into a map marker.
 - `extension/KVPartnerExtension.kt` — feeds the engine from `karoo-ext` streams, publishes `GapState`
-  for the data fields, and emits `MapEffect` symbols for the on-map ghost.
+  for the data fields, emits `MapEffect` symbols for the on-map ghost, and dispatches the GPS-lost
+  in-ride alert.
 
 ## Third-party
 

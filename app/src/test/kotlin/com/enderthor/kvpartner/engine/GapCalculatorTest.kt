@@ -16,7 +16,7 @@ class GapCalculatorTest {
         assertEquals(-20.0, s.gapTimeS, 1e-6)      // your time (100) - ghost time at 600m (120) = -20
         assertEquals(100.0, s.gapDistanceM, 1e-6)  // 600 - 500
         assertEquals(500.0, s.ghostProgressM, 1e-6)
-        assertFalse(s.stale)
+        assertFalse(s.estimated)
         assertTrue(s.active)
     }
 
@@ -27,9 +27,9 @@ class GapCalculatorTest {
         assertEquals(-100.0, s.gapDistanceM, 1e-6) // 400 - 500
     }
 
-    @Test fun `fresh false marks state as stale`() {
+    @Test fun `fresh false marks state as estimated`() {
         val s = GapCalculator.compute(progressM = 400.0, elapsedS = 100.0, curve = curve, fresh = false)
-        assertTrue(s.stale)
+        assertTrue(s.estimated)
     }
 
     @Test fun `inactive helper returns inactive state`() {

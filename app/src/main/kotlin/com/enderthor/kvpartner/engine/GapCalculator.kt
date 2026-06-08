@@ -8,7 +8,7 @@ package com.enderthor.kvpartner.engine
  *   gapDistanceM = progressM − curve.distanceAt(elapsedS)
  *   ghostProgressM = curve.distanceAt(elapsedS)
  *   ahead        = gapTimeS <= 0
- *   stale        = !fresh
+ *   estimated    = !fresh   (a prolonged-GPS-loss dead-reckoned estimate; shown marked, not blanked)
  *   active       = true
  */
 object GapCalculator {
@@ -19,7 +19,8 @@ object GapCalculator {
      * @param progressM  Rider's current accumulated distance in metres.
      * @param elapsedS   Ride elapsed time in seconds.
      * @param curve      Ghost curve (bidirectional interpolation).
-     * @param fresh      Whether the distance source is considered fresh (GPS not stale).
+     * @param fresh      Whether the distance source is LIVE (a real fix, a brief in-window coast, or a
+     *                   legitimate stop). False only during a prolonged GPS loss → [GapState.estimated].
      * @return           A fully populated, active [GapState].
      */
     fun compute(progressM: Double, elapsedS: Double, curve: GhostCurve, fresh: Boolean): GapState {
@@ -36,7 +37,7 @@ object GapCalculator {
             progressM = progressM,
             ghostProgressM = ghostDistanceNow,
             ahead = gapTimeS <= 0.0,
-            stale = !fresh,
+            estimated = !fresh,
             active = true,
         )
     }

@@ -13,4 +13,14 @@
     <!-- Day (white background): dark forest green ~5.3:1, dark red ~6.2:1. -->
     <color name="gap_ahead_day">#FF0A7D2C</color>
     <color name="gap_behind_day">#FFC1121F</color>
+
+    <!-- GPS-lost in-ride alert: deep-orange background + white text (high contrast, "warning" hue,
+         kept distinct from the green/red gap-status hues). @ColorRes per the InRideAlert contract. -->
+    <color name="gps_alert_bg">#FFE65100</color>
+    <color name="gps_alert_text">#FFFFFFFF</color>
+
+    <!-- GPS-estimate mark for the gap value while dead-reckoning a prolonged loss. Day/night-aware
+         amber: bright on the black night background, darker on the white day background (WCAG AA). -->
+    <color name="gap_estimate_night">#FFFFC107</color>
+    <color name="gap_estimate_day">#FFB35A00</color>
 </resources>

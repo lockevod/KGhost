@@ -35,12 +35,12 @@ import timber.log.Timber
  * mathematical sign convention (ahead ⇒ gapTimeS negative), so this field flips the sign
  * for human-readable display: ahead shows `+M:SS` in green, behind shows `-M:SS` in red.
  *
- * When the gap is not [GapState.active] or is [GapState.stale] the field shows `---` in the
- * neutral day/night text colour (NOT a disabled grey) — the rider is waiting for / cannot trust
- * data, the field is not turned off. Staleness is speed-gated upstream (see
- * [com.enderthor.kvpartner.engine.StalenessLogic]): a legitimate stop (the ghost keeps moving)
- * stays trustworthy and visible, while a distance frozen WHILE moving (real GPS loss, e.g. a
- * tunnel) is marked stale so the field honestly blanks instead of showing a wrong, snapping gap.
+ * The field shows `---` in the neutral day/night colour (NOT a disabled grey) ONLY when the gap is
+ * not [GapState.active] (no target / not recording / no first data). A GPS loss does NOT blank: the
+ * value keeps dead-reckoning and, once it is a prolonged-loss estimate ([GapState.estimated]), is
+ * rendered in the amber estimate colour so the rider can tell it is extrapolated, not measured. A
+ * legitimate stop (the ghost keeps moving) shows the real gap normally; only a truly sustained loss
+ * (the extension eventually gives up and clears the state) returns to `---`.
  *
  * This is a passive readout, so there is no tap PendingIntent — it just observes
  * [GapStateHolder.state] (combined with the rider's [GapDisplay] preference from [RenderPrefs])
@@ -82,7 +82,7 @@ class GapNumericDataType(
             progressM = 0.0,
             ghostProgressM = 0.0,
             ahead = true,
-            stale = false,
+            estimated = false,
             active = true,
         )
     }
@@ -123,10 +123,16 @@ class GapNumericDataType(
                 // "ignoring updateView, too soon") while still guaranteeing a post-throttle frame when
                 // the state is static (anti-stuck).
                 var lastEmitMs = 0L
+                // Cheap render-key dedup: the gap doubles jitter every ~1 Hz tick but the DISPLAYED
+                // value (whole seconds / metres + colour flags) changes far less often, so we skip the
+                // RemoteViews rebuild + updateView IPC whenever the key is unchanged. lastRv caches the
+                // last emitted view so the heartbeat can re-assert it without rebuilding.
+                var lastKey: GapRenderKey? = null
+                var lastRv: RemoteViews? = null
                 // Change-driven source: emits on every real state/pref change (isHeartbeat = false).
-                // GapStateHolder.state is a StateFlow (dedups its own value), so this still only fires
-                // on a genuine change — no .distinctUntilChanged() here, because the heartbeat below
-                // MUST NOT be deduped against it (it intentionally re-emits the SAME current value).
+                // GapStateHolder.state is a StateFlow (dedups its own value); the key dedup below
+                // handles the sub-display-resolution jitter. The heartbeat MUST NOT be deduped against
+                // it (it intentionally re-asserts the SAME current value), so it's merged in separately.
                 val changes = combine(GapStateHolder.state, RenderPrefs.gapDisplay) { state, gapDisplay ->
                     Triple(state, gapDisplay, false)
                 }
@@ -148,7 +154,22 @@ class GapNumericDataType(
                         // In preview (profile editor gallery) render a synthetic demo state so the
                         // field shows a meaningful sample instead of the inactive `---` placeholder.
                         val state = if (config.preview) DEMO_STATE else liveState
-                        emitter.updateView(buildView(state, gapDisplay))
+                        val key = gapRenderKey(state, gapDisplay, isRoute = false, dark = context.isKarooNightMode())
+                        if (isHeartbeat) {
+                            // Anti-stuck re-assert: re-emit the cached frame without rebuilding it.
+                            val cached = lastRv
+                            if (cached != null && key == lastKey) {
+                                emitter.updateView(cached)
+                                lastEmitMs = now
+                                return@collect
+                            }
+                        } else if (key == lastKey && lastRv != null) {
+                            return@collect // pixel-identical change → skip the rebuild + IPC
+                        }
+                        val rv = buildView(state, gapDisplay)
+                        emitter.updateView(rv)
+                        lastKey = key
+                        lastRv = rv
                         lastEmitMs = now
                     }
             } catch (_: CancellationException) {
@@ -171,12 +192,11 @@ class GapNumericDataType(
         val neutral = if (dark) Color.WHITE else Color.BLACK
         val neutralHint = if (dark) 0xCCFFFFFF.toInt() else 0xCC000000.toInt()
 
-        // Waiting for data: neutral `---`, NOT a disabled grey. We blank on !active (no target /
-        // not recording / no first data) AND on state.stale. Staleness is now speed-gated upstream:
-        // a legitimate stop (speed < 0.5 m/s) stays trustworthy and visible, while a frozen
-        // distance WHILE moving (real GPS loss, e.g. a tunnel) is marked stale → honest `---`
-        // instead of a believable-but-wrong gap that snaps on recovery.
-        val waiting = !state.active || state.stale
+        // Waiting for data: neutral `---`, NOT a disabled grey. We ONLY blank on !active (no target /
+        // not recording / no first data). A GPS loss does NOT blank: the value keeps coasting and is
+        // rendered in the estimate colour (see below) instead — a navigator should keep showing a
+        // best estimate through a dropout, not go dark.
+        val waiting = !state.active
 
         val main: String
         val hint: String
@@ -190,9 +210,13 @@ class GapNumericDataType(
             hintColor = neutralHint
         } else {
             // Three-state classification with a small epsilon so an exactly-on-pace gap renders
-            // neutral (no sign, day/night colour) rather than a misleading green "+0:00".
+            // neutral (no sign, day/night colour) rather than a misleading green "+0:00". While the
+            // value is a prolonged-GPS-loss estimate, override the status hue with the amber estimate
+            // colour so the rider can tell it's extrapolated, not measured.
             val status = GapDisplayLogic.gapStatus(state.gapTimeS)
-            val stateColor = context.gapStatusColor(status, neutral, dark)
+            val stateColor =
+                if (state.estimated) context.gapEstimateColor(dark)
+                else context.gapStatusColor(status, neutral, dark)
             val timeText = fmtTime(state.gapTimeS, status)
             val distText = fmtDistance(state.gapDistanceM)
             when (gapDisplay) {

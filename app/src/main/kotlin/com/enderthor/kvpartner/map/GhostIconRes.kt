@@ -35,3 +35,12 @@ fun ghostIconRes(icon: GhostIcon, size: GhostSize): Int = when (icon) {
         GhostSize.LARGE -> R.drawable.ic_dot_l
     }
 }
+
+/**
+ * Whether [icon] should be rotated to the route heading when placed via `Symbol.Icon`.
+ *
+ * Only the ARROW is directional. GHOST and CYCLIST are upright glyphs that look wrong tilted to a
+ * bearing (e.g. lying on their side on a southbound leg), and DOT is rotationally symmetric, so all
+ * three are drawn at a fixed 0° heading.
+ */
+fun ghostIconRotates(icon: GhostIcon): Boolean = icon == GhostIcon.ARROW

@@ -70,6 +70,7 @@ fun RaceSection(
     config: KVPartnerConfig,
     configManager: ConfigurationManager,
     recordedCount: Int? = null,
+    onTracksChanged: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var saveFailed by remember { mutableStateOf(false) }
@@ -185,9 +186,15 @@ fun RaceSection(
             text = stringResource(R.string.race_ghost_icon_label),
             style = MaterialTheme.typography.bodyMedium,
         )
-        // FlowRow so the four chips wrap to a second line on the narrow Karoo screen instead of the
-        // last label ("Arrow"/"Dot") being clipped off the right edge.
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Fixed 2-column grid: every chip gets equal width (weight) so the four boxes line up in a
+        // tidy 2×2 block instead of each sizing to its own label width. verticalArrangement keeps the
+        // wrapped second row from gluing to the first on the narrow Karoo screen.
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            maxItemsInEachRow = 2,
+        ) {
             data class IconChoice(val icon: GhostIcon, val labelRes: Int)
             listOf(
                 IconChoice(GhostIcon.GHOST, R.string.race_ghost_icon_ghost),
@@ -203,7 +210,7 @@ fun RaceSection(
                         }
                     },
                     label = { Text(stringResource(choice.labelRes)) },
-                    modifier = Modifier.heightIn(min = 48.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                 )
             }
         }
@@ -213,7 +220,10 @@ fun RaceSection(
             text = stringResource(R.string.race_ghost_size_label),
             style = MaterialTheme.typography.bodyMedium,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             data class SizeChoice(val size: GhostSize, val labelRes: Int)
             listOf(
                 SizeChoice(GhostSize.SMALL, R.string.race_ghost_size_small),
@@ -228,7 +238,7 @@ fun RaceSection(
                         }
                     },
                     label = { Text(stringResource(choice.labelRes)) },
-                    modifier = Modifier.heightIn(min = 48.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                 )
             }
         }
@@ -236,7 +246,12 @@ fun RaceSection(
         HorizontalDivider()
 
         // ── History import ────────────────────────────────────────────────────
-        ImportSection(config = config, configManager = configManager, scope = scope)
+        ImportSection(
+            config = config,
+            configManager = configManager,
+            scope = scope,
+            onTracksChanged = onTracksChanged,
+        )
 
         // ── Save-failure notice ───────────────────────────────────────────────
         if (saveFailed) {
@@ -262,6 +277,7 @@ private fun ImportSection(
     config: KVPartnerConfig,
     configManager: ConfigurationManager,
     scope: CoroutineScope,
+    onTracksChanged: () -> Unit = {},
 ) {
     val context = LocalContext.current
 
@@ -282,7 +298,10 @@ private fun ImportSection(
     var progress by remember { mutableStateOf<ImportProgress?>(null) }
     var canceled by remember { mutableStateOf(false) }
     var importJob by remember { mutableStateOf<Job?>(null) }
-    val running = importJob?.isActive == true
+    // Observable running flag. `importJob?.isActive` is NOT Compose state, so when the import
+    // coroutine finishes on its own the buttons would not re-enable until some unrelated
+    // recomposition happened to fire. Drive it explicitly: true at launch, false on completion.
+    var running by remember { mutableStateOf(false) }
 
     // Keep the importer reading the latest persisted lastScanEpoch without rebuilding it per change.
     val currentConfig by rememberUpdatedState(config)
@@ -336,7 +355,8 @@ private fun ImportSection(
     fun startImport(onlyNew: Boolean) {
         progress = null
         canceled = false
-        importJob = scope.launch {
+        running = true
+        val job = scope.launch {
             // TrackStorage.tracksDir() does file IO (mkdirs + one-time migration), so build the
             // store on Dispatchers.IO rather than on the Main-thread button click.
             val importer = withContext(Dispatchers.IO) {
@@ -353,8 +373,18 @@ private fun ImportSection(
             }
             importer.import(onlyNew = onlyNew)
                 .flowOn(Dispatchers.IO)
-                .collect { progress = it }
+                .collect {
+                    progress = it
+                    // On completion, ask the host to refresh the recorded-track count so the
+                    // "recorded tracks: N" line reflects the just-imported tracks immediately.
+                    if (it.phase == ImportProgress.Phase.DONE) onTracksChanged()
+                }
         }
+        // Re-enable the controls when the import ends (normal completion OR cancel). invokeOnCompletion
+        // fires on whatever thread finishes the job; a Compose MutableState write is thread-safe and
+        // schedules recomposition on Main.
+        job.invokeOnCompletion { running = false }
+        importJob = job
     }
 
     Row(

@@ -45,12 +45,11 @@ import timber.log.Timber
  * Your dot is green when ahead and red when behind (reserved state hues). Below the track the
  * gap text is drawn (time big, distance small, per the rider's [GapDisplay] preference).
  *
- * When the gap is not [GapState.active] or is [GapState.stale] the field draws a neutral `---`
- * (day/night colour, NOT a disabled grey) — waiting for / cannot trust data, not turned off.
- * Staleness is speed-gated upstream (see [com.enderthor.kvpartner.engine.StalenessLogic]): a
- * legitimate stop (the ghost keeps moving) stays trustworthy and visible, while a distance frozen
- * WHILE moving (real GPS loss, e.g. a tunnel) is marked stale so the field honestly blanks instead
- * of showing a wrong, snapping gap.
+ * The field draws a neutral `---` (day/night colour, NOT a disabled grey) ONLY when the gap is not
+ * [GapState.active] (no target / not recording / no first data). A GPS loss does NOT blank: the value
+ * keeps dead-reckoning and, once it is a prolonged-loss estimate ([GapState.estimated]), the gap text
+ * is drawn in the amber estimate colour (the YOU dot keeps its ahead/behind hue). A legitimate stop
+ * shows the real gap; only a truly sustained loss (the extension gives up and clears) returns to `---`.
  *
  * Passive readout, so there is no tap PendingIntent.
  *
@@ -115,7 +114,7 @@ class GapGraphicDataType(
             progressM = 0.0,
             ghostProgressM = 0.0,
             ahead = true,
-            stale = false,
+            estimated = false,
             active = true,
         )
     }
@@ -171,10 +170,15 @@ class GapGraphicDataType(
                 // "ignoring updateView, too soon") while still guaranteeing a post-throttle frame when
                 // the state is static (anti-stuck).
                 var lastEmitMs = 0L
+                // Cheap render-key dedup: the gap doubles jitter every ~1 Hz tick but the dots/text
+                // change far less often, so skip the bitmap redraw + updateView IPC when the key is
+                // unchanged. lastRv caches the last view so the heartbeat re-asserts it without redraw.
+                var lastKey: GapRenderKey? = null
+                var lastRv: RemoteViews? = null
                 // Change-driven source (isHeartbeat = false): emits on every real state/pref/mode
-                // change. GapStateHolder.state is a StateFlow (dedups its own value), so this still
-                // only fires on a genuine change — no .distinctUntilChanged() here, because the
-                // heartbeat below MUST NOT be deduped against it (it re-emits the SAME current value).
+                // change. GapStateHolder.state is a StateFlow (dedups its own value); the key dedup
+                // below drops the sub-display-resolution jitter. The heartbeat MUST NOT be deduped
+                // against it (it re-asserts the SAME current value), so it's merged in separately.
                 val changes = combine(
                     GapStateHolder.state,
                     RenderPrefs.gapDisplay,
@@ -209,11 +213,24 @@ class GapGraphicDataType(
                         // field shows a meaningful sample instead of the inactive `---` placeholder.
                         val state = if (config.preview) DEMO_STATE else liveState
                         val isRoute = if (config.preview) false else liveIsRoute
+                        val key = gapRenderKey(state, gapDisplay, isRoute, dark = context.isKarooNightMode())
+                        if (isHeartbeat) {
+                            val cached = lastRv
+                            if (cached != null && key == lastKey) {
+                                emitter.updateView(cached) // re-assert cached frame, no redraw
+                                lastEmitMs = now
+                                return@collect
+                            }
+                        } else if (key == lastKey && lastRv != null) {
+                            return@collect // pixel-identical change → skip redraw + IPC
+                        }
                         val (w, h) = bitmapSize(config)
                         val bmp = renderer.draw(w, h, state, gapDisplay, isRoute)
                         val rv = RemoteViews(context.packageName, R.layout.field_gap)
                         rv.setImageViewBitmap(R.id.field_gap_image, bmp)
                         emitter.updateView(rv)
+                        lastKey = key
+                        lastRv = rv
                         lastEmitMs = now
                     }
             } catch (_: CancellationException) {
@@ -312,10 +329,10 @@ class GapGraphicDataType(
 
             val neutral = if (dark) Color.WHITE else Color.BLACK
 
-            // Blank on !active (no target / not recording / no first data) AND on stale. Staleness
-            // is speed-gated upstream: a legitimate stop stays trustworthy and visible, while a
-            // distance frozen WHILE moving (real GPS loss) is marked stale → honest `---`.
-            val waiting = !state.active || state.stale
+            // Blank ONLY on !active (no target / not recording / no first data). A GPS loss does NOT
+            // blank: the value keeps coasting and is drawn in the estimate colour instead (a navigator
+            // should keep showing a best estimate through a dropout, not go dark).
+            val waiting = !state.active
             if (waiting) {
                 // Neutral `---` centred — waiting for data, not disabled.
                 textPaint.color = neutral
@@ -367,10 +384,12 @@ class GapGraphicDataType(
             youPaint.color = stateColor
             canvas.drawCircle(youX, trackCy, dotR, youPaint)
 
-            // Gap text below the track.
+            // Gap text below the track. While the value is a prolonged-GPS-loss estimate, the TEXT is
+            // drawn amber (the YOU dot keeps its ahead/behind status hue) so the rider can tell the
+            // number is extrapolated, not measured.
             val timeText = fmtTime(state.gapTimeS, status)
             val distText = fmtDistance(state.gapDistanceM)
-            val textColor = stateColor
+            val textColor = if (state.estimated) context.gapEstimateColor(dark) else stateColor
             when (gapDisplay) {
                 GapDisplay.TIME -> drawBig(canvas, w, h, timeText, textColor)
                 GapDisplay.DISTANCE -> drawBig(canvas, w, h, distText, textColor)

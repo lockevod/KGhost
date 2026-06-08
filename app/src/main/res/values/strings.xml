@@ -3,6 +3,10 @@
     <string name="app_name">KVPartner</string>
     <string name="extension_name">KVPartner</string>
 
+    <!-- In-ride alert shown once when GPS has been lost long enough that the gap is now estimated. -->
+    <string name="gps_lost_title">GPS lost</string>
+    <string name="gps_lost_detail">Gap estimated until the signal returns</string>
+
     <string name="gap_numeric_name">Virtual Partner Gap</string>
     <string name="gap_numeric_description">Time/distance gap to the virtual partner.</string>
     <string name="gap_graphic_name">Virtual Partner Track</string>

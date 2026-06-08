@@ -12,7 +12,7 @@ import com.enderthor.kvpartner.geo.PolylinePath
  * ([progressM]) and the perpendicular distance from the route.  The rider is considered
  * on-route when that perpendicular distance is less than [toleranceM].
  *
- * Freshness uses the SAME two-timestamp value-change logic as [DistanceProgress]:
+ * Freshness uses value-change tracking (the "last known value" defense the Karoo SDK requires):
  * [lastChangeMs] is updated only when [progressM] actually changes; [isFresh] is true
  * only while the projected distance changed within the last [staleThresholdMs] milliseconds.
  * This mirrors the "last known value" defence — a GPS fix that is frozen at the same route
