@@ -45,5 +45,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "KVPartner Extension"
+rootProject.name = "KGhost"
 include(":app")
