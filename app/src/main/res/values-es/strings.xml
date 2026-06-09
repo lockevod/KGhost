@@ -24,6 +24,7 @@
     <!-- UI de ajustes: pestañas -->
     <string name="tab_main">Ghost Pace</string>
     <string name="tab_partner">Compañero</string>
+    <string name="tab_settings">Ajustes</string>
 
     <!-- Introducción de la pantalla combinada -->
     <string name="combined_intro_title">Cómo funciona el fantasma</string>
@@ -43,6 +44,21 @@
     <string name="partner_input_pace_imp">Ritmo (min/mi)</string>
     <string name="partner_invalid">Introduce un objetivo mayor que 0.</string>
     <string name="settings_save_failed">No se pudo guardar. Inténtalo de nuevo.</string>
+
+    <!-- Pestaña Ajustes: interruptor maestro -->
+    <string name="master_enabled_label">KGhost activado</string>
+    <string name="master_enabled_description">Interruptor maestro. Si está apagado, KGhost no hace nada en ningún perfil: sin fantasma, sin grabación, sin avisos.</string>
+
+    <!-- Pestaña Ghost Pace: ajustes por perfil -->
+    <string name="profile_section_title">Ghost Pace por perfil</string>
+    <string name="profile_section_description">Cada perfil de actividad del Karoo puede usar su propia base de Ghost Pace o seguir la global de arriba. Los perfiles aparecen aquí tras rodar o abrir los ajustes con ese perfil seleccionado.</string>
+    <string name="profile_roster_empty">Aún no se ha visto ningún perfil. Selecciona un perfil de actividad en el Karoo y vuelve a abrir esta pantalla para configurarlo.</string>
+    <string name="profile_active_badge">Activo</string>
+    <string name="profile_use_global">Usar Ghost Pace global</string>
+    <string name="profile_enabled_label">KGhost en este perfil</string>
+    <string name="profile_target_label_metric">Base de Ghost Pace (km/h)</string>
+    <string name="profile_target_label_imperial">Base de Ghost Pace (mph)</string>
+    <string name="profile_using_global_group">%1$d perfil(es) usando el Ghost Pace global</string>
 
     <!-- UI de ajustes: pestaña Carrera -->
     <string name="tab_race">Carrera</string>

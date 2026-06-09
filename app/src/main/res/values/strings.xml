@@ -23,6 +23,7 @@
     <!-- Settings UI: tabs -->
     <string name="tab_main">Ghost Pace</string>
     <string name="tab_partner">Partner</string>
+    <string name="tab_settings">Settings</string>
 
     <!-- Combined screen intro -->
     <string name="combined_intro_title">How the ghost works</string>
@@ -42,6 +43,21 @@
     <string name="partner_input_pace_imp">Pace (min/mi)</string>
     <string name="partner_invalid">Enter a target greater than 0.</string>
     <string name="settings_save_failed">Could not save. Please try again.</string>
+
+    <!-- Settings tab: master kill-switch -->
+    <string name="master_enabled_label">KGhost enabled</string>
+    <string name="master_enabled_description">Master switch. When off, KGhost does nothing on any profile — no ghost, no recording, no alerts.</string>
+
+    <!-- Ghost Pace tab: per-profile overrides -->
+    <string name="profile_section_title">Per-profile Ghost Pace</string>
+    <string name="profile_section_description">Each Karoo ride profile can use its own Ghost Pace base, or follow the global one above. Profiles appear here after you ride or open settings with them selected.</string>
+    <string name="profile_roster_empty">No profiles seen yet. Select a ride profile on the Karoo and reopen this screen to configure it.</string>
+    <string name="profile_active_badge">Active</string>
+    <string name="profile_use_global">Use global Ghost Pace</string>
+    <string name="profile_enabled_label">KGhost on this profile</string>
+    <string name="profile_target_label_metric">Ghost Pace base (km/h)</string>
+    <string name="profile_target_label_imperial">Ghost Pace base (mph)</string>
+    <string name="profile_using_global_group">%1$d profile(s) using the global Ghost Pace</string>
 
     <!-- Settings UI: Race tab -->
     <string name="tab_race">Race</string>
