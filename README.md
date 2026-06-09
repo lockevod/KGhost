@@ -25,6 +25,13 @@ live on a data field and as a marker on the map.
 - **Uses the Karoo's own position on the route** — KGhost reads where you are along the loaded route
   from the Karoo itself, so it works correctly on loops and out-and-backs, and recovers cleanly if you
   go off-route and the Karoo recalculates.
+- **Per ride profile** — each Karoo ride profile can use its own Ghost Pace base (e.g. faster on the
+  road bike, slower on the MTB) and KGhost can be turned on or off for each profile independently. A
+  single **master switch** turns the whole extension off when you don't want it.
+- **Self-tidying library** — when you ride the same route many times, KGhost automatically keeps your
+  **fastest and two most recent** rides of that route and archives the rest, so the ghost you race
+  stays meaningful and your storage doesn't pile up. Archived rides are moved (not deleted) and can be
+  restored.
 
 ## Getting started
 
@@ -75,18 +82,38 @@ position is briefly unknown.
 
 ## Settings
 
-Open the KGhost app on the Karoo. Everything lives on one scrolling screen (the Ghost Pace
-and "race your own" are two halves of one ghost, so they are configured together):
+Open the KGhost app on the Karoo. Settings are split across two tabs.
+
+### Ghost Pace tab
+
+The Ghost Pace and "race your own" are two halves of one ghost, so they are configured together here.
 
 - **Ghost Pace** — the target pace/speed (entered as km/h or min/km). This is also the pace the
-  whole-route ghost uses on stretches you have no recorded history for.
-- **Race your own** — master enable, which past ride to race (**best** / **last**), **auto-record**
-  toggle, and optional alerts when you **enter** and **leave** a stretch that has a recorded ghost
-  (nearby stretches won't double-alert).
+  whole-route ghost uses on stretches you have no recorded history for. This is the **global default**.
+- **Per profile** — below the global pace, each Karoo ride profile you have used appears as a card. A
+  profile can follow the global pace, or set **its own Ghost Pace base** and be turned **on/off**
+  individually — so your road bike and your MTB can race at different paces (or one can have KGhost off
+  entirely). A profile shows up here after you have selected it on the Karoo at least once.
+- **Race your own** — which past ride to race (**best** / **last**), the **auto-record** toggle, and
+  optional alerts when you **enter** and **leave** a stretch that has a recorded ghost (nearby
+  stretches won't double-alert).
 - **Ghost on map** — show/hide and the marker **icon** (ghost / cyclist / arrow / dot). The icon size
   is automatic (it scales with the map zoom), so there is no size setting.
 - **Import history** — scan the Karoo's `/sdcard/FitFiles` and import GPX/FIT from `/sdcard/KGhost/`
   (needs all-files access); "import all" or "new only".
+
+### Settings tab
+
+Device-level switches that are *not* per profile:
+
+- **KGhost enabled** — the master on/off. When off, KGhost does nothing on any profile (no ghost, no
+  recording, no alerts).
+- **Auto-clean library** — keeps your recorded rides tidy by archiving near-duplicate rides of a route
+  (keeping the **fastest and two most recent** of each), so the ghosts stay meaningful and storage
+  stays bounded. Archived rides are moved to `/sdcard/KGhost/tracks/archive` and can be restored. On by
+  default.
+- **Diagnostic log** — write KGhost's diagnostics to a file so a ride can be studied later without a
+  computer. Off by default; leave it off for normal use.
 
 > **How it works under the hood:** the position/ghost/alert model (route position, the "fair start"
 > ghost clock, GPS-loss handling, reroutes) is documented for developers in
