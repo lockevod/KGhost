@@ -55,7 +55,9 @@ import io.hammerhead.karooext.models.Symbol
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -1557,17 +1559,24 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // add() dedups on sourceKey (first writer wins). false means a same-key ride is already
             // stored — e.g. a FitFiles scan ingested this ride first; nothing to do but note it.
             scope.launch(Dispatchers.IO) {
-                if (trackStore().add(track)) {
-                    Timber.i("KVP recording: saved track ${track.id} (${track.points.size} pts) → ${trackStoreDir}")
-                    // Auto-clean: archive near-duplicate rides of this route so BEST/LAST stay solid.
-                    if (activeConfig.value.autoTidy) {
-                        val archived = runCatching { trackStore().tidyGroup(track) }.getOrElse { e ->
-                            Timber.w(e, "KVP tidy: tidyGroup failed for ${track.id}"); 0
+                // NonCancellable: a service teardown at ride-end must not abort the save/tidy half-way (a
+                // cancelled write between the track file and the index would leave an un-indexed track).
+                // Capture the store ONCE so add() and tidyGroup() can't target different dirs if all-files
+                // access is granted mid-coroutine.
+                withContext(NonCancellable) {
+                    val store = trackStore()
+                    if (store.add(track)) {
+                        Timber.i("KVP recording: saved track ${track.id} (${track.points.size} pts) → ${trackStoreDir}")
+                        // Auto-clean: archive near-duplicate rides of this route so BEST/LAST stay solid.
+                        if (activeConfig.value.autoTidy) {
+                            val archived = runCatching { store.tidyGroup(track) }.getOrElse { e ->
+                                Timber.w(e, "KVP tidy: tidyGroup failed for ${track.id}"); 0
+                            }
+                            if (archived > 0) Timber.i("KVP tidy: archived $archived near-duplicate(s) of ${track.id}")
                         }
-                        if (archived > 0) Timber.i("KVP tidy: archived $archived near-duplicate(s) of ${track.id}")
+                    } else {
+                        Timber.i("KVP recording: track ${track.id} skipped (sourceKey ${track.sourceKey} already stored)")
                     }
-                } else {
-                    Timber.i("KVP recording: track ${track.id} skipped (sourceKey ${track.sourceKey} already stored)")
                 }
             }
         }
