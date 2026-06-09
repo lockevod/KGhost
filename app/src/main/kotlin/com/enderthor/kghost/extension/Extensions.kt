@@ -1,9 +1,11 @@
 package com.enderthor.kghost.extension
 
 import io.hammerhead.karooext.KarooSystemService
+import io.hammerhead.karooext.models.ActiveRideProfile
 import io.hammerhead.karooext.models.OnMapZoomLevel
 import io.hammerhead.karooext.models.OnNavigationState
 import io.hammerhead.karooext.models.OnStreamState
+import io.hammerhead.karooext.models.RideProfile
 import io.hammerhead.karooext.models.RideState
 import io.hammerhead.karooext.models.StreamState
 import io.hammerhead.karooext.models.UserProfile
@@ -81,5 +83,15 @@ fun KarooSystemService.streamMapZoom(): Flow<Double> = callbackFlow {
  */
 fun KarooSystemService.streamUserProfile(): Flow<UserProfile> = callbackFlow {
     val id = addConsumer<UserProfile>(onEvent = { trySend(it) })
+    awaitClose { removeConsumer(id) }
+}
+
+/**
+ * Wraps [KarooSystemService.addConsumer] for the active ride profile into a [Flow] of [RideProfile].
+ * Used to vary settings per Karoo profile (Road vs MTB …) and to auto-learn the profile roster. The
+ * SDK only exposes the ACTIVE profile (no list-all), so callers accumulate the roster over time.
+ */
+fun KarooSystemService.streamRideProfile(): Flow<RideProfile> = callbackFlow {
+    val id = addConsumer<ActiveRideProfile>(onEvent = { trySend(it.profile) })
     awaitClose { removeConsumer(id) }
 }
