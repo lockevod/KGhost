@@ -20,30 +20,30 @@ class ConfigDataTest {
         assertEquals(config, config.migrateToLatest())
     }
 
-    @Test fun `default target is 12 kmh and version is 4`() {
+    @Test fun `default target is 12 kmh and version is current`() {
         val c = KGhostConfig()
         assertEquals(DEFAULT_TARGET_SPEED_MS, c.targetSpeedMs, 1e-9)
         assertEquals(kmhToMs(12.0), c.targetSpeedMs, 1e-9)
         assertEquals(3.333333, c.targetSpeedMs, 1e-3)
-        assertEquals(4, c.version)
+        assertEquals(CONFIG_VERSION, c.version)
     }
 
     @Test fun `v1 unset target migrates to 12 kmh default`() {
         val migrated = KGhostConfig(version = 1, targetSpeedMs = 0.0).migrateToLatest()
         assertEquals(DEFAULT_TARGET_SPEED_MS, migrated.targetSpeedMs, 1e-9)
-        assertEquals(4, migrated.version)
+        assertEquals(CONFIG_VERSION, migrated.version)
     }
 
     @Test fun `v2 unset target migrates to 12 kmh default`() {
         val migrated = KGhostConfig(version = 2, targetSpeedMs = 0.0).migrateToLatest()
         assertEquals(DEFAULT_TARGET_SPEED_MS, migrated.targetSpeedMs, 1e-9)
-        assertEquals(4, migrated.version)
+        assertEquals(CONFIG_VERSION, migrated.version)
     }
 
     @Test fun `migration preserves an explicit target value`() {
         val migrated = KGhostConfig(version = 2, targetSpeedMs = kmhToMs(25.0)).migrateToLatest()
         assertEquals(kmhToMs(25.0), migrated.targetSpeedMs, 1e-9)
-        assertEquals(4, migrated.version)
+        assertEquals(CONFIG_VERSION, migrated.version)
     }
 
     @Test fun `race defaults are sane`() {
@@ -54,15 +54,15 @@ class ConfigDataTest {
         assertFalse(c.segmentEntryAlert)     // alerts off by default (sounds off by default)
     }
 
-    @Test fun `config version bumped to 4`() { assertEquals(4, CONFIG_VERSION) }
+    @Test fun `config version bumped to 5`() { assertEquals(5, CONFIG_VERSION) }
 
     @Test fun `ghost icon default`() {
         assertEquals(GhostIcon.GHOST, KGhostConfig().ghostIcon)
     }
 
-    @Test fun `v3 config migrates to 4 keeping ghost defaults`() {
+    @Test fun `v3 config migrates to current version keeping ghost defaults`() {
         val migrated = KGhostConfig(version = 3).migrateToLatest()
-        assertEquals(4, migrated.version)
+        assertEquals(CONFIG_VERSION, migrated.version)
         assertEquals(GhostIcon.GHOST, migrated.ghostIcon)
     }
 

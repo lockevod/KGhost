@@ -4,13 +4,21 @@ import com.enderthor.kghost.engine.GhostPick
 import kotlinx.serialization.Serializable
 
 /** Current schema version. Bump this and add a branch in [migrateToLatest] when defaults change. */
-const val CONFIG_VERSION = 4
+const val CONFIG_VERSION = 5
 
 /** Default Ghost Pace target speed (12 km/h) used when the user hasn't set one. */
 val DEFAULT_TARGET_SPEED_MS: Double = kmhToMs(12.0)
 
 /** Physically-plausible cycling ceiling for the VP target (30 m/s ≈ 108 km/h). */
 const val MAX_TARGET_SPEED_MS: Double = 30.0
+
+/**
+ * Clamps a raw target speed (m/s) to a sane Ghost-Pace value: finite and > 0, capped at
+ * [MAX_TARGET_SPEED_MS]; otherwise falls back to [DEFAULT_TARGET_SPEED_MS]. Shared by the global
+ * [KGhostConfig.targetMs] and the per-profile resolver so both clamp identically.
+ */
+fun sanitizeTargetMs(raw: Double): Double =
+    raw.takeIf { it.isFinite() && it > 0.0 }?.coerceAtMost(MAX_TARGET_SPEED_MS) ?: DEFAULT_TARGET_SPEED_MS
 
 /** Controls which gap metric is displayed on the data fields. */
 enum class GapDisplay { TIME, DISTANCE, BOTH }
@@ -20,6 +28,20 @@ enum class GhostIcon { GHOST, CYCLIST, ARROW, DOT }
 
 /** On-map ghost icon size. The SDK has no size field, so each maps to a different-sized drawable. */
 enum class GhostSize { SMALL, MEDIUM, LARGE }
+
+/**
+ * Per-profile override, keyed by `RideProfile.id`, auto-learned the first time a profile is seen.
+ * [useGlobal] = true → inherit the global Ghost-Pace target and stay enabled (the default for every
+ * newly-seen profile). When false, [targetSpeedMs] and [enabled] apply to this profile only.
+ */
+@Serializable
+data class ProfileSetting(
+    val profileId: String = "",
+    val profileName: String = "",
+    val useGlobal: Boolean = true,
+    val targetSpeedMs: Double = DEFAULT_TARGET_SPEED_MS,
+    val enabled: Boolean = true,
+)
 
 /**
  * Persisted configuration for the KGhost extension.
@@ -56,6 +78,10 @@ data class KGhostConfig(
      * files not modified since. 0L means no scan has run yet (import everything).
      */
     val lastScanEpoch: Long = 0L,
+    /** Master kill-switch: when false the whole extension is inert (no gap, recording, ghost, alerts). */
+    val masterEnabled: Boolean = true,
+    /** Auto-learned per-profile overrides, keyed by RideProfile.id. Empty = every profile uses global. */
+    val profileSettings: List<ProfileSetting> = emptyList(),
 ) {
     /**
      * The Ghost Pace target speed (m/s) — ALWAYS valid and present. The VP can never be
@@ -65,9 +91,7 @@ data class KGhostConfig(
      * (12 km/h) — so a never-set, zeroed, or out-of-range blob still drives a sane 12 km/h partner.
      * This is the single source of truth the engine and the Partner field read.
      */
-    fun targetMs(): Double =
-        targetSpeedMs.takeIf { it.isFinite() && it > 0.0 }?.coerceAtMost(MAX_TARGET_SPEED_MS)
-            ?: DEFAULT_TARGET_SPEED_MS
+    fun targetMs(): Double = sanitizeTargetMs(targetSpeedMs)
 }
 
 /** Metres in a statute mile (for imperial conversions). */
@@ -116,5 +140,8 @@ fun KGhostConfig.migrateToLatest(): KGhostConfig {
     )
     // v3 → v4: ghost icon selection added (size is automatic by zoom); default GHOST applies, just stamp.
     if (c.version < 4) c = c.copy(version = 4)
+    // v4 → v5: master kill-switch + per-profile overrides added; both take Kotlin defaults
+    // (masterEnabled = true, profileSettings = empty), so existing installs behave identically.
+    if (c.version < 5) c = c.copy(version = 5)
     return c
 }
