@@ -16,6 +16,9 @@ import com.enderthor.kghost.engine.LiveSegment
 import com.enderthor.kghost.engine.RenderPrefs
 import com.enderthor.kghost.engine.RouteGhost
 import com.enderthor.kghost.engine.SegmentInfoHolder
+import com.enderthor.kghost.engine.EffectiveProfile
+import com.enderthor.kghost.engine.resolveProfile
+import com.enderthor.kghost.engine.learnProfile
 import com.enderthor.kghost.engine.StalenessLogic
 import com.enderthor.kghost.engine.GhostPaceSource
 import com.enderthor.kghost.engine.toInfo
@@ -231,6 +234,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private var zoomJob: Job? = null
     // UserProfile consumer — reads the rider's distance unit (metric/imperial) for the gap fields.
     private var profileJob: Job? = null
+    // ActiveRideProfile consumer — drives per-profile target + the master/per-profile gate. Owned by [scope].
+    private var rideProfileJob: Job? = null
+    // Active Karoo ride profile id (RideProfile.id), updated by rideProfileJob. Read on the tick to
+    // resolve the effective per-profile target + enable. Null until the first ActiveRideProfile arrives.
+    @Volatile
+    private var activeProfileId: String? = null
 
     // --- ② route / history state -------------------------------------------
     // On-disk store of recorded tracks (history) + the in-memory recorder for the current ride.
@@ -461,6 +470,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         navJob?.cancel()
         zoomJob?.cancel()
         profileJob?.cancel()
+        rideProfileJob?.cancel()
         // A reconnect re-binds the host, so the still-active tick + GPS collectors are now wired to the
         // DEAD previous binding and would silently stop receiving DISTANCE/SPEED/GPS — the gap and
         // ghost would freeze for the rest of the ride with no recovery. Cancel them here (but NOT the
@@ -546,6 +556,23 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 RenderPrefs.setImperialDistance(
                     it.preferredUnit.distance == io.hammerhead.karooext.models.UserProfile.PreferredUnit.UnitType.IMPERIAL,
                 )
+            }
+            .launchIn(scope)
+        // Active ride profile → remember its id for the tick's per-profile resolution, and auto-learn
+        // it into the roster (so a never-customised profile still appears in settings after one ride).
+        rideProfileJob = karooSystem.streamRideProfile()
+            .distinctUntilChanged()
+            .onEach { profile ->
+                activeProfileId = profile.id
+                runCatching {
+                    configManager.updateConfig { cfg ->
+                        cfg.copy(profileSettings = learnProfile(cfg.profileSettings, profile.id, profile.name))
+                    }
+                }.onFailure { e ->
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    Timber.w(e, "learnProfile persist failed for ${profile.id} — continuing")
+                }
+                Timber.i("KVP active profile: id=${profile.id} name=${profile.name}")
             }
             .launchIn(scope)
     }
@@ -776,7 +803,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Build the ONE continuous whole-route ghost (recorded stretches + VP-pace fills).
                     // Fill pace = the always-present VP target (default 12 km/h), so the ghost always
                     // flows across gaps with no recorded history.
-                    val routeGhost = RouteGhost.build(path.totalM, matched, activeConfig.value.targetMs())
+                    val routeGhost = RouteGhost.build(path.totalM, matched, resolveProfile(activeConfig.value, activeProfileId).targetSpeedMs)
                     // Single atomic publish: path + segments + ghost together so the tick never sees a
                     // NEW path paired with OLD segments. Guarded: only publish if a newer route has not
                     // superseded us (lastMatchedPolyline still ours).
@@ -991,6 +1018,17 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 .drop(1)
                 .onEach { (d, e, sp) ->
                     runCatching {
+                    // Per-profile + master gate: when inactive the extension is fully inert — clear the
+                    // gap/segment fields (→ `---`), hide the ghost, skip recording, and emit nothing.
+                    // The service stays subscribed, so flipping the master switch or the profile's enable
+                    // (config flow) or changing profile (rideProfileJob) re-activates on the next tick.
+                    val eff: EffectiveProfile = resolveProfile(activeConfig.value, activeProfileId)
+                    if (!eff.active) {
+                        GapStateHolder.clear()
+                        SegmentInfoHolder.clear()
+                        mapGhostState = null
+                        return@runCatching
+                    }
                     // DISTANCE is in metres. Drop non-finite values (NaN/±Inf) so they never reach
                     // the gap engine.
                     val distM = (d as? StreamState.Streaming)?.dataPoint?.singleValue
@@ -1133,7 +1171,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // is shown even while dead-reckoning; only a prolonged loss (LONG_LOSS) marks it as an
                     // estimate (fresh = false) — it never blanks for GPS loss.
                     fun vpGap(raceElapsedS: Double): GapState {
-                        val target = activeConfig.value.targetMs()
+                        val target = eff.targetSpeedMs
                         if (cachedTargetMs != target || cachedCurve == null) {
                             cachedCurve = GhostPaceSource(target).curve()
                             cachedTargetMs = target
