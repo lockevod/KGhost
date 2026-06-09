@@ -40,6 +40,17 @@ class TrackStore(private val dir: File) {
     private val indexLock: Any = lockFor(dir)
 
     /**
+     * Serializes tidy passes (ride-end [tidyGroup] vs startup [sweep]) so two can't run at once and
+     * double-archive. A SEPARATE monitor from [indexLock] (so the tidy read/meta-build phase doesn't
+     * block matching), but still process-wide-per-dir (keyed by canonical path) so two [TrackStore]
+     * instances over the same dir can't tidy concurrently — symmetric with [indexLock].
+     */
+    private val tidyLock: Any = tidyLockFor(dir)
+
+    /** Default cap above which [sweep] skips (a degenerate library; incremental still cleans new rides). */
+    private val sweepMaxDefault = 2000
+
+    /**
      * Reads all stored track ids by listing the `<id>.json` files (excludes `index.json` and
      * `sourcekeys.json`, which are bookkeeping files, not tracks).
      */
@@ -154,6 +165,44 @@ class TrackStore(private val dir: File) {
     }
 
     /**
+     * Incremental cleanup after a new ride is saved: evaluate ONLY the new ride's twin group. Find
+     * coarse candidates from the precision-6 index (the new track is already indexed by [add]), build
+     * [TrackMeta] for that handful, run [selectArchivable], and [archive] the losers. The just-saved
+     * ride is always the most recent → always a survivor. Serialized by [tidyLock]. Returns the count
+     * archived.
+     */
+    fun tidyGroup(newTrack: RecordedTrack): Int = synchronized(tidyLock) {
+        val coarseCells = SpatialIndex(INDEX_PRECISION)
+            .cellsForPath(newTrack.points.map { LatLng(it.lat, it.lng) })
+        val candidateIds = synchronized(indexLock) {
+            val snap = readSnapshot()
+            coarseCells.flatMapTo(HashSet()) { snap[it] ?: emptySet() }
+        } + newTrack.id
+        val metas = candidateIds.mapNotNull { id -> loadTrack(id)?.let { trackMetaOf(it) } }
+        val toArchive = selectArchivable(metas)
+        archive(toArchive)
+        toArchive.size
+    }
+
+    /**
+     * One-time backlog pass over the WHOLE active library: stream-build [TrackMeta] for every active
+     * track (small peak memory — one [RecordedTrack] parsed at a time), run [selectArchivable] over all
+     * (group-correct), [archive] the result. Skips (returns 0) when the library exceeds [maxTracks]
+     * (a degenerate library; ride-end [tidyGroup] still cleans new rides). Serialized by [tidyLock].
+     */
+    fun sweep(maxTracks: Int = sweepMaxDefault): Int = synchronized(tidyLock) {
+        val ids = allTrackIds()
+        if (ids.size > maxTracks) {
+            Timber.i("KVP tidy: sweep skipped (%d tracks > cap %d)", ids.size, maxTracks)
+            return@synchronized 0
+        }
+        val metas = ids.mapNotNull { id -> loadTrack(id)?.let { trackMetaOf(it) } }
+        val toArchive = selectArchivable(metas)
+        archive(toArchive)
+        toArchive.size
+    }
+
+    /**
      * Writes `<id>.json` for [track] and folds its PATH cells into `index.json`.
      *
      * The track is registered against the cells its path actually passes through
@@ -217,6 +266,9 @@ class TrackStore(private val dir: File) {
             runCatching { jsonWithUnknownKeys.decodeFromString<RecordedTrack>(f.readText()) }
                 .getOrNull()
         }
+
+    /** Loads + parses one `<id>.json`; null if missing/unparseable. */
+    private fun loadTrack(id: String): RecordedTrack? = loadByIds(listOf(id)).firstOrNull()
 
     // --- file helpers -------------------------------------------------------
 
@@ -359,6 +411,14 @@ class TrackStore(private val dir: File) {
         private fun lockFor(dir: File): Any {
             val key = runCatching { dir.canonicalPath }.getOrDefault(dir.absolutePath)
             return dirLocks.computeIfAbsent(key) { Any() }
+        }
+
+        /** Process-wide tidy locks, keyed by canonical dir path (separate monitor from [dirLocks]). */
+        private val dirTidyLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+        private fun tidyLockFor(dir: File): Any {
+            val key = runCatching { dir.canonicalPath }.getOrDefault(dir.absolutePath)
+            return dirTidyLocks.computeIfAbsent(key) { Any() }
         }
 
         private const val JSON_SUFFIX = ".json"
