@@ -207,6 +207,38 @@ class SpatialIndex(val precision: Int = 6) {
         return cells
     }
 
+    /**
+     * Like [cellsForPath] but each segment's bounding box is grown by ONE cell in every direction
+     * before sampling — a Minkowski dilation by ~one cell. The result is a SUPERSET of [cellsForPath]
+     * (the un-grown bbox is contained in the grown one) that absorbs ~one cell of lateral GPS jitter:
+     * a point that wobbles into a neighbouring cell still lands inside the dilated footprint. Used for
+     * jitter-tolerant overlap (twin grouping) and the coverage guard — the raw [cellsForPath] of two
+     * runs of the SAME road differ by ~15–20 % of edge cells under ±4 m consumer-GPS noise, so a raw
+     * set-equality / subset test silently fails to match real repeats.
+     */
+    fun cellsForPathDilated(points: List<LatLng>): Set<String> {
+        if (points.isEmpty()) return emptySet()
+        val (dLat, dLng) = cellDims()
+        if (points.size == 1) {
+            val p = points[0]
+            return cellsFor(BBox(p.lat - dLat, p.lat + dLat, p.lng - dLng, p.lng + dLng))
+        }
+        val cells = HashSet<String>()
+        for (i in 0 until points.size - 1) {
+            val box = BBox.around(listOf(points[i], points[i + 1])) ?: continue
+            cells.addAll(cellsFor(BBox(box.minLat - dLat, box.maxLat + dLat, box.minLng - dLng, box.maxLng + dLng)))
+        }
+        return cells
+    }
+
+    /** This precision's geohash cell size in degrees as (heightDeg, widthDeg). */
+    private fun cellDims(): Pair<Double, Double> {
+        val bits = 5 * precision
+        val lngBits = ceil(bits / 2.0).toInt()
+        val latBits = floor(bits / 2.0).toInt()
+        return (180.0 / 2.0.pow(latBits)) to (360.0 / 2.0.pow(lngBits))
+    }
+
     /** Records [trackId] against every cell touched by [bbox]. */
     fun add(trackId: String, bbox: BBox) {
         add(trackId, cellsFor(bbox))
