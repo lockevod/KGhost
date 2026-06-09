@@ -1002,6 +1002,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // elapsedS − ghostStartElapsedS = elapsedS + rg.timeAt(D0)). No rider-position anchor, so the
         // gap self-corrects the instant the Karoo position becomes real. null until set.
         var ghostStartElapsedS: Double? = null
+        // The rider's last TRUSTWORTHY route distance (m). While off-route / rejoining the Karoo's
+        // remaining is rejoin-relative (untrustworthy), so we freeze here the last good along-route
+        // position and keep showing the ghost + an ESTIMATE gap from it (like a GPS dropout) instead of
+        // blanking — it self-corrects the instant the rider rejoins. null until the first good fix.
+        var lastGoodRouteDistM: Double? = null
         // Throttle for the per-tick route-mode diagnostic log (≤ ~once per DIAG_LOG_MS). Kept local
         // to the tick so it resets per ride. Set to 0 to disable.
         var lastDiagLogMs = 0L
@@ -1246,6 +1251,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             ghostStartElapsedS = null
                             routeStartDistM = null
                             firstMoveElapsedS = null
+                            lastGoodRouteDistM = null
                             rideDistAtRouteStartM = distM
                             // Distrust the OLD route's remaining until destJob emits the NEW route's value:
                             // routeDistanceM flips with the path (atomic in RouteMode) but lastDistToDestM is
@@ -1292,9 +1298,35 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // valid along-route position — RouteGraph nulls the position in exactly this case).
                         val haveRoutePos = lastOnRoute && !lastRejoinActive && remainingM.isFinite() && routeLenM > 0.0
                         if (!haveRoutePos) {
-                            // No trustworthy on-route position yet: no GPS lock, off route, or rejoining.
-                            // Hold --- and hide the ghost; leave D0/anchor null so they're set from the
-                            // FIRST real on-route fix — wherever it lands — not a fabricated start.
+                            // No trustworthy on-route position THIS tick (no lock, off route, or rejoining).
+                            // If the race is already running (ghost anchored) and we had a good position,
+                            // KEEP the ghost gliding (it's purely time-based) and show the gap as an
+                            // ESTIMATE from that frozen position — like a GPS dropout — instead of blanking;
+                            // it self-corrects the instant the rider rejoins. Otherwise (never positioned /
+                            // race not started) hold --- and hide, leaving the anchor null for the first fix.
+                            val anchorS = ghostStartElapsedS
+                            val frozenPos = lastGoodRouteDistM
+                            if (anchorS != null && frozenPos != null) {
+                                val ghostElapsed = elapsedS - anchorS
+                                val gap = GapCalculator.compute(frozenPos, ghostElapsed, rg, fresh = false)
+                                GapStateHolder.update(gap)
+                                // Keep the SEG/GP tag from the frozen position; the seg is unchanged so this
+                                // fires no entry/exit alert (publishSegment is edge-triggered on routeStartM).
+                                publishSegment(rm.segments.firstOrNull { frozenPos in it.routeStartM..it.routeEndM }, rm.segments)
+                                mapGhostState = if (activeConfig.value.showGhostOnMap) {
+                                    MapGhostState(rg, rm.path, anchorS, elapsedS, System.currentTimeMillis())
+                                } else {
+                                    null
+                                }
+                                val nowMs = System.currentTimeMillis()
+                                if (nowMs - lastDiagLogMs >= diagLogMs) {
+                                    lastDiagLogMs = nowMs
+                                    Timber.d("KVP tick route: off-route/rejoin (onRoute=$lastOnRoute rejoin=$lastRejoinActive) — estimate from frozen routeDist=${"%.0f".format(frozenPos)} gapT=${"%.0f".format(gap.gapTimeS)}s (ghost kept)")
+                                }
+                                return@runCatching
+                            }
+                            // No anchor / no good position yet: hold --- and hide the ghost; leave D0/anchor
+                            // null so they're set from the FIRST real on-route fix — not a fabricated start.
                             val nowMs = System.currentTimeMillis()
                             if (nowMs - lastDiagLogMs >= diagLogMs) {
                                 lastDiagLogMs = nowMs
@@ -1380,6 +1412,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // clock = ghostElapsed, curve = the continuous route ghost (route-distance axis).
                         val gap = GapCalculator.compute(routeDist, ghostElapsed, rg, fresh)
                         GapStateHolder.update(gap)
+                        // Remember this trustworthy position so a following off-route/rejoin tick can keep
+                        // showing the ghost + an estimate gap from it instead of blanking (see !haveRoutePos).
+                        lastGoodRouteDistM = routeDist
                         run {
                             val nowMs = System.currentTimeMillis()
                             // The rich state-snapshot line — INCLUDING the computed gap (the thing you study).
