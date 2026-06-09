@@ -1,9 +1,14 @@
 package com.enderthor.kghost.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Card
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -14,6 +19,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -22,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import com.enderthor.kghost.R
 import com.enderthor.kghost.data.KGhostConfig
 import com.enderthor.kghost.data.MAX_TARGET_SPEED_MS
+import com.enderthor.kghost.data.ProfileSetting
 import com.enderthor.kghost.data.kmhToMs
 import com.enderthor.kghost.data.mphToMs
 import com.enderthor.kghost.data.msToKmh
@@ -32,6 +39,7 @@ import com.enderthor.kghost.data.paceMinKmToMs
 import com.enderthor.kghost.data.paceMinMiToMs
 import com.enderthor.kghost.managers.ConfigurationManager
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 /** Whether the target is entered as a speed or as a pace. */
@@ -57,6 +65,7 @@ fun PartnerSection(
     config: KGhostConfig,
     configManager: ConfigurationManager,
     imperial: Boolean = false,
+    activeProfileId: String? = null,
 ) {
     var mode by remember { mutableStateOf(TargetMode.SPEED) }
     var targetText by remember { mutableStateOf("") }
@@ -158,5 +167,128 @@ fun PartnerSection(
     }
     if (status == "saveFailed") {
         Text(text = stringResource(R.string.settings_save_failed))
+    }
+
+    val pScope = rememberCoroutineScope()
+
+    HorizontalDivider()
+    Text(text = stringResource(R.string.profile_section_title), style = MaterialTheme.typography.titleMedium)
+    Text(
+        text = stringResource(R.string.profile_section_description),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    val settings = config.profileSettings
+    if (settings.isEmpty()) {
+        Text(
+            text = stringResource(R.string.profile_roster_empty),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    } else {
+        val active = settings.filter { it.profileId == activeProfileId }
+        val customized = settings.filter { it.profileId != activeProfileId && !it.useGlobal }
+        val globalStubs = settings.filter { it.profileId != activeProfileId && it.useGlobal }
+
+        val persist: (ProfileSetting) -> Unit = { updated ->
+            pScope.launch {
+                configManager.updateConfig { c ->
+                    c.copy(profileSettings = c.profileSettings.map { if (it.profileId == updated.profileId) updated else it })
+                }
+            }
+        }
+
+        (active + customized).forEach { setting ->
+            ProfileCard(setting, setting.profileId == activeProfileId, imperial, persist)
+        }
+
+        if (globalStubs.isNotEmpty()) {
+            var expanded by remember { mutableStateOf(false) }
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.profile_using_global_group, globalStubs.size),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(text = if (expanded) "▾" else "▸", style = MaterialTheme.typography.bodyMedium)
+            }
+            if (expanded) {
+                globalStubs.forEach { setting -> ProfileCard(setting, false, imperial, persist) }
+            }
+        }
+    }
+}
+
+/**
+ * One per-profile card: name + Active badge, a Use-Global toggle, and (when custom) a speed-only
+ * Ghost-Pace base entry plus an enable switch. Edits are pushed up via [onChange]; the parent persists.
+ */
+@Composable
+private fun ProfileCard(
+    setting: ProfileSetting,
+    isActive: Boolean,
+    imperial: Boolean,
+    onChange: (ProfileSetting) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            val title = if (isActive) {
+                "${setting.profileName}  ·  ${stringResource(R.string.profile_active_badge)}"
+            } else {
+                setting.profileName
+            }
+            Text(text = title, style = MaterialTheme.typography.titleSmall)
+
+            SwitchRow(
+                label = stringResource(R.string.profile_use_global),
+                checked = setting.useGlobal,
+                onCheckedChange = { onChange(setting.copy(useGlobal = it)) },
+            )
+
+            if (!setting.useGlobal) {
+                SwitchRow(
+                    label = stringResource(R.string.profile_enabled_label),
+                    checked = setting.enabled,
+                    onCheckedChange = { onChange(setting.copy(enabled = it)) },
+                )
+
+                var text by remember(setting.profileId, setting.useGlobal, imperial) {
+                    mutableStateOf(
+                        String.format(
+                            Locale.US, "%.1f",
+                            if (imperial) msToMph(setting.targetSpeedMs) else msToKmh(setting.targetSpeedMs),
+                        ),
+                    )
+                }
+                var edited by remember(setting.profileId) { mutableStateOf(false) }
+                LaunchedEffect(text, imperial) {
+                    if (!edited) return@LaunchedEffect
+                    delay(700)
+                    val v = text.replace(',', '.').trim().toDoubleOrNull()
+                    val ms = v?.let { if (imperial) mphToMs(it) else kmhToMs(it) }
+                    if (ms != null && ms.isFinite() && ms > 0.0 && ms <= MAX_TARGET_SPEED_MS && ms != setting.targetSpeedMs) {
+                        onChange(setting.copy(targetSpeedMs = ms))
+                    }
+                }
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it; edited = true },
+                    label = {
+                        Text(stringResource(if (imperial) R.string.profile_target_label_imperial else R.string.profile_target_label_metric))
+                    },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
     }
 }
