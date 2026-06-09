@@ -77,16 +77,22 @@ class TrackStorageTest {
         assertEquals("external-A", File(external, "a.json").readText())
     }
 
-    @Test fun `migrateIfNeeded skips directories and only copies regular files`() {
+    @Test fun `migrateIfNeeded skips unknown directories but DOES copy the archive subdir`() {
         val internal = tmp.newFolder("internal")
         val external = tmp.newFolder("external")
         internal.writeFile("a.json", "A")
-        File(internal, "subdir").mkdirs()
+        File(internal, "subdir").mkdirs() // unrelated dir → skipped
+        val internalArchive = File(internal, TrackStore.ARCHIVE_SUBDIR).apply { mkdirs() }
+        File(internalArchive, "old.json").writeText("OLD")
 
         val copied = TrackStorage.migrateIfNeeded(internal, external)
 
-        assertEquals(1, copied)
+        assertEquals(2, copied) // a.json + archive/old.json
         assertTrue(File(external, "a.json").exists())
         assertTrue(!File(external, "subdir").exists())
+        // The archived ride is brought across so it stays recoverable on external.
+        assertEquals("OLD", File(File(external, TrackStore.ARCHIVE_SUBDIR), "old.json").readText())
+        // Internal archive kept as a backup.
+        assertTrue(File(internalArchive, "old.json").exists())
     }
 }

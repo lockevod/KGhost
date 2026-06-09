@@ -63,6 +63,23 @@ object TrackStorage {
                     .onFailure { Timber.w(it, "failed migrating ${f.name}") }
             }
         }
+        // Also migrate the archive/ subdir (pruned tracks) so they stay recoverable after the store
+        // switches to external — the isFile filter above skips the subdir, so without this the archived
+        // rides would be stranded on internal storage.
+        File(internal, TrackStore.ARCHIVE_SUBDIR).listFiles()?.filter { it.isFile }?.let { archived ->
+            if (archived.isNotEmpty()) {
+                val externalArchive = File(external, TrackStore.ARCHIVE_SUBDIR)
+                externalArchive.mkdirs()
+                for (f in archived) {
+                    val dest = File(externalArchive, f.name)
+                    if (!dest.exists()) {
+                        runCatching { f.copyTo(dest, overwrite = false) }
+                            .onSuccess { copied++ }
+                            .onFailure { Timber.w(it, "failed migrating archive/${f.name}") }
+                    }
+                }
+            }
+        }
         Timber.d("migrated $copied internal track files to external")
         return copied
     }
