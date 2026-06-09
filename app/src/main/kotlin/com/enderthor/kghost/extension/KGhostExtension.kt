@@ -65,6 +65,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
@@ -455,6 +456,18 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             .distinctUntilChanged()
             .onEach { RenderPrefs.setGapDisplay(it) }
             .launchIn(scope)
+        // One-time backlog sweep: clean the EXISTING library once (off-Main), then stamp the epoch so it
+        // never re-runs. Gated on autoTidy; sweep() has its own hard cap for a degenerate library.
+        scope.launch(Dispatchers.IO) {
+            val cfg = configManager.loadConfigFlow().first()
+            if (cfg.autoTidy && cfg.tidySweepEpoch == 0L) {
+                val archived = runCatching { trackStore().sweep() }.getOrElse { e ->
+                    Timber.w(e, "KVP tidy: backlog sweep failed"); 0
+                }
+                Timber.i("KVP tidy: backlog sweep archived $archived")
+                configManager.updateConfig { it.copy(tidySweepEpoch = System.currentTimeMillis()) }
+            }
+        }
         karooSystem.connect { connected -> if (connected) onConnected() }
     }
 
@@ -1546,6 +1559,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             scope.launch(Dispatchers.IO) {
                 if (trackStore().add(track)) {
                     Timber.i("KVP recording: saved track ${track.id} (${track.points.size} pts) → ${trackStoreDir}")
+                    // Auto-clean: archive near-duplicate rides of this route so BEST/LAST stay solid.
+                    if (activeConfig.value.autoTidy) {
+                        val archived = runCatching { trackStore().tidyGroup(track) }.getOrElse { e ->
+                            Timber.w(e, "KVP tidy: tidyGroup failed for ${track.id}"); 0
+                        }
+                        if (archived > 0) Timber.i("KVP tidy: archived $archived near-duplicate(s) of ${track.id}")
+                    }
                 } else {
                     Timber.i("KVP recording: track ${track.id} skipped (sourceKey ${track.sourceKey} already stored)")
                 }
