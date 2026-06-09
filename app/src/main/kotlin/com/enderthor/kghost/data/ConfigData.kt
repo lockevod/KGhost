@@ -4,7 +4,7 @@ import com.enderthor.kghost.engine.GhostPick
 import kotlinx.serialization.Serializable
 
 /** Current schema version. Bump this and add a branch in [migrateToLatest] when defaults change. */
-const val CONFIG_VERSION = 5
+const val CONFIG_VERSION = 6
 
 /** Default Ghost Pace target speed (12 km/h) used when the user hasn't set one. */
 val DEFAULT_TARGET_SPEED_MS: Double = kmhToMs(12.0)
@@ -82,6 +82,10 @@ data class KGhostConfig(
     val masterEnabled: Boolean = true,
     /** Auto-learned per-profile overrides, keyed by RideProfile.id. Empty = every profile uses global. */
     val profileSettings: List<ProfileSetting> = emptyList(),
+    /** Auto-clean the recorded-track library (archive near-duplicate rides). Default on. */
+    val autoTidy: Boolean = true,
+    /** Epoch millis when the one-time backlog sweep last ran. 0 = never swept. */
+    val tidySweepEpoch: Long = 0L,
 ) {
     /**
      * The Ghost Pace target speed (m/s) — ALWAYS valid and present. The VP can never be
@@ -143,5 +147,8 @@ fun KGhostConfig.migrateToLatest(): KGhostConfig {
     // v4 → v5: master kill-switch + per-profile overrides added; both take Kotlin defaults
     // (masterEnabled = true, profileSettings = empty), so existing installs behave identically.
     if (c.version < 5) c = c.copy(version = 5)
+    // v5 → v6: auto-clean fields added; both take Kotlin defaults (autoTidy = true, tidySweepEpoch = 0),
+    // so existing installs behave identically until the first sweep/ride-end tidy runs.
+    if (c.version < 6) c = c.copy(version = 6)
     return c
 }

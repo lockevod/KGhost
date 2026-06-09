@@ -54,7 +54,7 @@ class ConfigDataTest {
         assertFalse(c.segmentEntryAlert)     // alerts off by default (sounds off by default)
     }
 
-    @Test fun `config version bumped to 5`() { assertEquals(5, CONFIG_VERSION) }
+    @Test fun `config version bumped to 6`() { assertEquals(6, CONFIG_VERSION) }
 
     @Test fun `ghost icon default`() {
         assertEquals(GhostIcon.GHOST, KGhostConfig().ghostIcon)
