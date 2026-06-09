@@ -119,6 +119,41 @@ class TrackStore(private val dir: File) {
     }
 
     /**
+     * Archive (do not delete) the given tracks: under [indexLock], FIRST rewrite `index.json` with the
+     * ids removed (from the RAW [readSnapshot], so no path-cell rebuild runs under the lock), THEN move
+     * each `<id>.json` into [ARCHIVE_SUBDIR]. Index-first ordering is crash-safe: a crash after the
+     * index write but before a move leaves an un-indexed *live* file (excluded from matching, re-archived
+     * by the next tidy) rather than a permanent stale index entry. `sourcekeys.json` is left untouched:
+     * a keyed track's sourceKey stays known (a re-scan won't re-add it); a manual move-back is intentional
+     * recovery. Returns the number of files actually moved.
+     */
+    fun archive(ids: Collection<String>): Int {
+        if (ids.isEmpty()) return 0
+        val idSet = ids.toHashSet()
+        return synchronized(indexLock) {
+            val cleaned = readSnapshot()
+                .mapValues { (_, v) -> v - idSet }
+                .filterValues { it.isNotEmpty() }
+            writeSnapshot(cleaned)
+            val archiveDir = File(dir, ARCHIVE_SUBDIR)
+            archiveDir.mkdirs()
+            if (!archiveDir.isDirectory) {
+                // The index was already cleaned of these ids (still safe — they drop out of matching),
+                // but the files can't be moved. Surface it: a silent no-op archive is hard to diagnose
+                // on a device that power-cycles daily.
+                Timber.w("KVP tidy: archive dir unavailable at %s; files not moved", archiveDir.path)
+                return@synchronized 0
+            }
+            var moved = 0
+            for (id in idSet) {
+                val src = File(dir, id + JSON_SUFFIX)
+                if (src.isFile && src.renameTo(File(archiveDir, id + JSON_SUFFIX))) moved++
+            }
+            moved
+        }
+    }
+
+    /**
      * Writes `<id>.json` for [track] and folds its PATH cells into `index.json`.
      *
      * The track is registered against the cells its path actually passes through
@@ -331,6 +366,9 @@ class TrackStore(private val dir: File) {
 
         /** Stores the serialized `Set<String>` of source keys ingested via [add] (dedup state). */
         private const val SOURCEKEYS_FILE = "sourcekeys.json"
+
+        /** Subdirectory holding archived (pruned) tracks; excluded from listing/index/matching. */
+        const val ARCHIVE_SUBDIR = "archive"
 
         /**
          * Marker file whose presence records that `index.json` is PATH-CELL based (not the legacy
