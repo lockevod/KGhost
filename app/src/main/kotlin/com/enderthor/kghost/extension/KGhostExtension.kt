@@ -947,10 +947,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // since this route began". 0 for the first route (ride start); on a reroute it's the odometer
         // then, so D0 stays correct (the new route's distance restarts at 0 while the odometer doesn't).
         var rideDistAtRouteStartM = 0.0
-        // Ride-elapsed (s) when the rider FIRST started moving on this route (speed over the moving
-        // threshold). The ghost clock starts here, NOT at ride-elapsed 0, so a stationary wait for GPS
-        // lock is never counted as a deficit — independent of the Karoo's optional auto-pause. null
-        // until the rider moves.
+        // Ride-elapsed (s) when the rider FIRST started moving this ride (speed over the moving
+        // threshold). BOTH modes' race clocks start here, NOT at ride-elapsed 0, so a stationary wait
+        // for a GPS lock is never counted as a deficit — independent of the Karoo's optional auto-pause.
+        // Re-nulled on a route change (the new route re-anchors). null until the rider moves.
         var firstMoveElapsedS: Double? = null
         // Ride-elapsed seconds at the whole-route ghost's t=0. Set ONCE per route to −rg.timeAt(D0) so
         // the ghost sits at D0 at ride-elapsed 0 and then advances on REAL elapsed time (ghostElapsed =
@@ -1125,19 +1125,21 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         mapGhostState = null
                         GapStateHolder.clear()
                     }
-                    // Computes the ① VP gap (whole-ride distance vs elapsed at the fixed target pace).
-                    // The VP target is ALWAYS present (defaults to 12 km/h — it can't be deactivated, it's
-                    // the fallback), so this always returns a gap. The gap is shown even while
-                    // dead-reckoning; only a prolonged loss (LONG_LOSS) marks it as an estimate
-                    // (fresh = false) — it never blanks for GPS loss.
-                    fun vpGap(): GapState {
+                    // Computes the ① VP gap (ridden distance vs race-elapsed at the fixed target pace).
+                    // [raceElapsedS] is elapsed since FIRST MOVEMENT, not ride-start, so the ghost-pace
+                    // race begins when the rider actually rolls (fair start) — the caller only reaches
+                    // here once firstMove is set. The VP target is ALWAYS present (defaults to 12 km/h —
+                    // it can't be deactivated, it's the fallback), so this always returns a gap. The gap
+                    // is shown even while dead-reckoning; only a prolonged loss (LONG_LOSS) marks it as an
+                    // estimate (fresh = false) — it never blanks for GPS loss.
+                    fun vpGap(raceElapsedS: Double): GapState {
                         val target = activeConfig.value.targetMs()
                         if (cachedTargetMs != target || cachedCurve == null) {
                             cachedCurve = GhostPaceSource(target).curve()
                             cachedTargetMs = target
                         }
                         return GapCalculator.compute(
-                            coast.effectiveDistanceM, elapsedS, cachedCurve!!,
+                            coast.effectiveDistanceM, raceElapsedS, cachedCurve!!,
                             fresh = coast.quality != CoastQuality.LONG_LOSS,
                         )
                     }
@@ -1157,6 +1159,16 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     "speed=${speedMs?.let { "%.1f".format(it) } ?: "null"}",
                             )
                         }
+                    }
+
+                    // Record WHEN the rider first started moving this ride (speed over the moving
+                    // threshold) BEFORE picking a mode, so BOTH the route ghost and the ① Ghost-Pace gap
+                    // anchor their clock to the real race start — captured even before the first GPS fix
+                    // so a blind-but-moving start (a paired speed sensor with no GPS yet) is timed from
+                    // its real beginning. Until the rider moves, both modes hold --- (a stationary wait
+                    // for a lock is never a deficit). A route change re-nulls this below to re-anchor.
+                    if (firstMoveElapsedS == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS) {
+                        firstMoveElapsedS = elapsedS
                     }
 
                     // --- mode select: ② route mode vs ① Ghost Pace ---------------------
@@ -1190,21 +1202,21 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val rg = rm.routeGhost
                         if (rg == null) {
                             // Couldn't build the continuous whole-route ghost. Fall back to the ①
-                            // whole-ride Ghost Pace gap (always available); no map ghost.
+                            // Ghost-Pace gap (always available); no map ghost. Same fair start as VP
+                            // mode: hold --- until the rider first moves, so a stationary wait isn't a
+                            // growing false deficit.
                             publishSegment(null, fireExit = false)
                             mapGhostState = null
-                            val g = vpGap()
-                            GapStateHolder.update(g)
-                            logVp("route present, no ghost curve", g)
+                            val moveStart = firstMoveElapsedS
+                            if (moveStart == null) {
+                                GapStateHolder.clear()
+                                logVp("route present, no ghost curve — waiting for first movement", null)
+                            } else {
+                                val g = vpGap(elapsedS - moveStart)
+                                GapStateHolder.update(g)
+                                logVp("route present, no ghost curve", g)
+                            }
                             return@runCatching
-                        }
-                        // Record WHEN the rider first started moving on this route (speed over the moving
-                        // threshold), captured even before the first on-route fix so a blind-but-moving start
-                        // (a paired speed sensor with no GPS yet) is timed from its real beginning. The ghost
-                        // clock is anchored to this, NOT ride-elapsed 0, so a stationary wait for a GPS lock
-                        // is never a false deficit — works whether or not the rider enabled auto-pause.
-                        if (firstMoveElapsedS == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS) {
-                            firstMoveElapsedS = elapsedS
                         }
                         // ② Route position from the Karoo itself (map-matched), NOT a local GPS
                         // projection: distance-along-route = total route length − the Karoo's
@@ -1361,11 +1373,19 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // Distinguish "no route navigated" from "route loaded but no recorded stretches
                         // overlap it" (rm != null, segments empty) — both race VP, but the cause differs.
                         val vpReason = if (rm != null) "route loaded, no recorded stretches" else "no route"
-                        if (handleGpsLoss(coast.coastingSeconds)) {
+                        val moveStart = firstMoveElapsedS
+                        if (moveStart == null) {
+                            // Fair start, same as route mode: the ghost-pace race begins when the rider
+                            // first rolls — NOT at ride-elapsed 0. So a cold start with no GPS / not yet
+                            // moving holds --- instead of counting a growing phantom deficit. Checked
+                            // BEFORE handleGpsLoss so a stationary pre-lock start doesn't fire "GPS lost".
+                            GapStateHolder.clear()
+                            logVp("$vpReason — waiting for first movement (race not started)", null)
+                        } else if (handleGpsLoss(coast.coastingSeconds)) {
                             GapStateHolder.clear()
                             logVp("$vpReason — sustained GPS loss, blanked", null)
                         } else {
-                            val g = vpGap()
+                            val g = vpGap(elapsedS - moveStart)
                             GapStateHolder.update(g)
                             logVp(vpReason, g)
                         }
