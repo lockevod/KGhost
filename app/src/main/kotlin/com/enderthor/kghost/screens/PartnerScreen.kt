@@ -19,6 +19,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -200,7 +201,9 @@ fun PartnerSection(
         }
 
         (active + customized).forEach { setting ->
-            ProfileCard(setting, setting.profileId == activeProfileId, imperial, persist)
+            key(setting.profileId) {
+                ProfileCard(setting, setting.profileId == activeProfileId, imperial, persist)
+            }
         }
 
         if (globalStubs.isNotEmpty()) {
@@ -218,7 +221,9 @@ fun PartnerSection(
                 Text(text = if (expanded) "▾" else "▸", style = MaterialTheme.typography.bodyMedium)
             }
             if (expanded) {
-                globalStubs.forEach { setting -> ProfileCard(setting, false, imperial, persist) }
+                globalStubs.forEach { setting ->
+                    key(setting.profileId) { ProfileCard(setting, false, imperial, persist) }
+                }
             }
         }
     }
@@ -268,7 +273,7 @@ private fun ProfileCard(
                         ),
                     )
                 }
-                var edited by remember(setting.profileId) { mutableStateOf(false) }
+                var edited by remember(setting.profileId, setting.useGlobal, imperial) { mutableStateOf(false) }
                 LaunchedEffect(text, imperial) {
                     if (!edited) return@LaunchedEffect
                     delay(700)
