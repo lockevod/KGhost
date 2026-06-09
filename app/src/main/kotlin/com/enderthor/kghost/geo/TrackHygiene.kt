@@ -60,3 +60,52 @@ fun areTwins(a: TrackMeta, b: TrackMeta): Boolean {
     if (union == 0) return false
     return inter.toDouble() / union.toDouble() >= TWIN_JACCARD
 }
+
+/**
+ * Given a set of candidate tracks (a coarse cluster, or the whole library), return the ids safe to
+ * archive. Pure. (1) partition into twin-groups; (2) per group keep the fastest-plausible + the two
+ * most recent; (3) archive a loser ONLY when every fine cell it covers is also covered by a kept
+ * track (the coverage guard, single-pass against survivors → provably never loses coverage).
+ */
+fun selectArchivable(tracks: List<TrackMeta>): List<String> {
+    if (tracks.size < 2) return emptyList()
+    val survivorCells = HashSet<String>()
+    val losers = ArrayList<TrackMeta>()
+    for (group in groupTwins(tracks)) {
+        if (group.size <= 3) {
+            group.forEach { survivorCells.addAll(it.fineCells) }
+            continue
+        }
+        val fastest = group.filter { it.isPlausible() }.minByOrNull { it.totalTimeS!! }
+        val twoLatest = group.sortedByDescending { it.startedAtEpoch }.take(2)
+        val survivors = (listOfNotNull(fastest) + twoLatest).toSet()
+        survivors.forEach { survivorCells.addAll(it.fineCells) }
+        group.filterTo(losers) { it !in survivors }
+    }
+    return losers.filter { loser -> loser.fineCells.all { it in survivorCells } }.map { it.id }
+}
+
+private fun TrackMeta.isPlausible(): Boolean {
+    val t = totalTimeS ?: return false
+    if (t <= 0.0) return false
+    val v = totalDistanceM / t
+    return v in MIN_PLAUSIBLE_MS..MAX_PLAUSIBLE_MS
+}
+
+/** Partition [tracks] into near-twin groups via union-find over [areTwins] (order-independent). */
+private fun groupTwins(tracks: List<TrackMeta>): List<List<TrackMeta>> {
+    val parent = IntArray(tracks.size) { it }
+    fun find(x: Int): Int {
+        var root = x
+        while (parent[root] != root) root = parent[root]
+        var cur = x
+        while (parent[cur] != cur) { val next = parent[cur]; parent[cur] = root; cur = next }
+        return root
+    }
+    for (i in tracks.indices) {
+        for (j in i + 1 until tracks.size) {
+            if (areTwins(tracks[i], tracks[j])) parent[find(i)] = find(j)
+        }
+    }
+    return tracks.indices.groupBy { find(it) }.values.map { idxs -> idxs.map { tracks[it] } }
+}
