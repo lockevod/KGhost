@@ -67,8 +67,6 @@ import java.io.File
 fun RaceSection(
     config: KGhostConfig,
     configManager: ConfigurationManager,
-    recordedCount: Int? = null,
-    onTracksChanged: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var saveFailed by remember { mutableStateOf(false) }
@@ -125,29 +123,6 @@ fun RaceSection(
                 },
                 label = { Text(stringResource(R.string.race_ghost_last)) },
                 modifier = Modifier.heightIn(min = 48.dp),
-            )
-        }
-
-        HorizontalDivider()
-
-        // ── Auto-record switch ────────────────────────────────────────────────
-        SwitchRow(
-            label = stringResource(R.string.race_auto_record_label),
-            description = stringResource(R.string.race_auto_record_description),
-            checked = config.autoRecord,
-            onCheckedChange = { record ->
-                scope.launch {
-                    saveFailed = !configManager.updateConfig { it.copy(autoRecord = record) }
-                }
-            },
-        )
-
-        // Track count info line (shown only when the count is available).
-        if (recordedCount != null) {
-            Text(
-                text = stringResource(R.string.race_recorded_tracks, recordedCount),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
@@ -230,16 +205,6 @@ fun RaceSection(
         // Ghost icon SIZE is automatic — it follows the map zoom level (OnMapZoomLevel), so there is
         // no manual size picker.
 
-        HorizontalDivider()
-
-        // ── History import ────────────────────────────────────────────────────
-        ImportSection(
-            config = config,
-            configManager = configManager,
-            scope = scope,
-            onTracksChanged = onTracksChanged,
-        )
-
         // ── Save-failure notice ───────────────────────────────────────────────
         if (saveFailed) {
             Text(text = stringResource(R.string.settings_save_failed))
@@ -260,7 +225,7 @@ fun RaceSection(
  * [ConfigurationManager]. The importer's synchronous `lastScanSetter` launches a save on [scope].
  */
 @Composable
-private fun ImportSection(
+internal fun ImportSection(
     config: KGhostConfig,
     configManager: ConfigurationManager,
     scope: CoroutineScope,

@@ -34,8 +34,6 @@ import com.enderthor.kghost.managers.ConfigurationManager
 fun SettingsScreen(
     config: KGhostConfig,
     configManager: ConfigurationManager,
-    recordedCount: Int? = null,
-    onTracksChanged: () -> Unit = {},
     imperial: Boolean = false,
     activeProfileId: String? = null,
 ) {
@@ -64,12 +62,10 @@ fun SettingsScreen(
 
         HorizontalDivider()
 
-        // Race Your Own (recorded ghosts, history, ghost-on-map icon/size).
+        // Race Your Own (recorded ghosts, ghost-on-map icon/size).
         RaceSection(
             config = config,
             configManager = configManager,
-            recordedCount = recordedCount,
-            onTracksChanged = onTracksChanged,
         )
     }
 }

@@ -94,20 +94,22 @@ The Ghost Pace and "race your own" are two halves of one ghost, so they are conf
   profile can follow the global pace, or set **its own Ghost Pace base** and be turned **on/off**
   individually — so your road bike and your MTB can race at different paces (or one can have KGhost off
   entirely). A profile shows up here after you have selected it on the Karoo at least once.
-- **Race your own** — which past ride to race (**best** / **last**), the **auto-record** toggle, and
-  optional alerts when you **enter** and **leave** a stretch that has a recorded ghost (nearby
-  stretches won't double-alert).
+- **Race your own** — which past ride to race (**best** / **last**) and optional alerts when you
+  **enter** and **leave** a stretch that has a recorded ghost (nearby stretches won't double-alert).
 - **Ghost on map** — show/hide and the marker **icon** (ghost / cyclist / arrow / dot). The icon size
   is automatic (it scales with the map zoom), so there is no size setting.
-- **Import history** — scan the Karoo's `/sdcard/FitFiles` and import GPX/FIT from `/sdcard/KGhost/`
-  (needs all-files access); "import all" or "new only".
+
+(Recording and importing your ride history live in the **Settings** tab below.)
 
 ### Settings tab
 
-Device-level switches that are *not* per profile:
+Device-level switches and recorded-track-library management (not per profile):
 
 - **KGhost enabled** — the master on/off. When off, KGhost does nothing on any profile (no ghost, no
   recording, no alerts).
+- **Record rides** — auto-record each ride as a GPS track for future ghost comparison.
+- **Import history** — scan the Karoo's `/sdcard/FitFiles` and import GPX/FIT from `/sdcard/KGhost/`
+  (needs all-files access); "import all" or "new only". Shows the recorded-track count.
 - **Auto-clean library** — keeps your recorded rides tidy by archiving near-duplicate rides of a route
   (keeping the **fastest and two most recent** of each), so the ghosts stay meaningful and storage
   stays bounded. Archived rides are moved to `/sdcard/KGhost/tracks/archive` and can be restored. On by

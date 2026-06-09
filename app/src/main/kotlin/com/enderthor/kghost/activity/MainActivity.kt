@@ -152,12 +152,15 @@ fun TabLayout() {
             0 -> SettingsScreen(
                 config = config,
                 configManager = configManager,
-                recordedCount = trackCount,
-                onTracksChanged = { refreshKey++ },
                 imperial = imperial,
                 activeProfileId = activeProfileId,
             )
-            else -> AppSettingsScreen(config = config, configManager = configManager)
+            else -> AppSettingsScreen(
+                config = config,
+                configManager = configManager,
+                recordedCount = trackCount,
+                onTracksChanged = { refreshKey++ },
+            )
         }
     }
 }

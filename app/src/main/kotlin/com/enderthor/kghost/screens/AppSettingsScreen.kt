@@ -25,13 +25,16 @@ import com.enderthor.kghost.managers.ConfigurationManager
 import kotlinx.coroutines.launch
 
 /**
- * The "Settings" tab: device-level toggles that are NOT per-profile — the master kill-switch and the
- * file-logging diagnostic. Kept separate from the per-profile Ghost Pace tab on purpose.
+ * The "Settings" tab: device-level + track-library management that is NOT per-profile — the master
+ * kill-switch, the recorded-track library (auto-clean, record, import), and the diagnostic log. Kept
+ * separate from the per-profile Ghost Pace tab on purpose.
  */
 @Composable
 fun AppSettingsScreen(
     config: KGhostConfig,
     configManager: ConfigurationManager,
+    recordedCount: Int? = null,
+    onTracksChanged: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var saveFailed by remember { mutableStateOf(false) }
@@ -40,6 +43,7 @@ fun AppSettingsScreen(
         modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        // ── Master switch ─────────────────────────────────────────────────────
         SwitchRow(
             label = stringResource(R.string.master_enabled_label),
             description = stringResource(R.string.master_enabled_description),
@@ -49,6 +53,9 @@ fun AppSettingsScreen(
             },
         )
 
+        HorizontalDivider()
+
+        // ── Recorded-track library: auto-clean, record, import ────────────────
         SwitchRow(
             label = stringResource(R.string.tidy_label),
             description = stringResource(R.string.tidy_description),
@@ -58,8 +65,34 @@ fun AppSettingsScreen(
             },
         )
 
+        SwitchRow(
+            label = stringResource(R.string.race_auto_record_label),
+            description = stringResource(R.string.race_auto_record_description),
+            checked = config.autoRecord,
+            onCheckedChange = { record ->
+                scope.launch { saveFailed = !configManager.updateConfig { it.copy(autoRecord = record) } }
+            },
+        )
+
+        // Track count info line (shown only when the count is available).
+        if (recordedCount != null) {
+            Text(
+                text = stringResource(R.string.race_recorded_tracks, recordedCount),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        ImportSection(
+            config = config,
+            configManager = configManager,
+            scope = scope,
+            onTracksChanged = onTracksChanged,
+        )
+
         HorizontalDivider()
 
+        // ── Diagnostics: file logging ─────────────────────────────────────────
         SwitchRow(
             label = stringResource(R.string.race_filelog_label),
             description = stringResource(R.string.race_filelog_description),
