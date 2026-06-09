@@ -49,6 +49,15 @@ fun AppSettingsScreen(
             },
         )
 
+        SwitchRow(
+            label = stringResource(R.string.tidy_label),
+            description = stringResource(R.string.tidy_description),
+            checked = config.autoTidy,
+            onCheckedChange = { on ->
+                scope.launch { saveFailed = !configManager.updateConfig { it.copy(autoTidy = on) } }
+            },
+        )
+
         HorizontalDivider()
 
         SwitchRow(

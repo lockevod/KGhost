@@ -48,6 +48,10 @@
     <string name="master_enabled_label">KGhost enabled</string>
     <string name="master_enabled_description">Master switch. When off, KGhost does nothing on any profile — no ghost, no recording, no alerts.</string>
 
+    <!-- Settings tab: auto-clean library -->
+    <string name="tidy_label">Auto-clean library</string>
+    <string name="tidy_description">Archive near-duplicate recorded rides (keep the fastest and two most recent of each route) so ghosts stay solid. Archived rides move to /sdcard/KGhost/tracks/archive and are recoverable.</string>
+
     <!-- Ghost Pace tab: per-profile overrides -->
     <string name="profile_section_title">Per-profile Ghost Pace</string>
     <string name="profile_section_description">Each Karoo ride profile can use its own Ghost Pace base, or follow the global one above. Profiles appear here after you ride or open settings with them selected.</string>

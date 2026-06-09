@@ -49,6 +49,10 @@
     <string name="master_enabled_label">KGhost activado</string>
     <string name="master_enabled_description">Interruptor maestro. Si está apagado, KGhost no hace nada en ningún perfil: sin fantasma, sin grabación, sin avisos.</string>
 
+    <!-- Pestaña Ajustes: auto-limpiar biblioteca -->
+    <string name="tidy_label">Auto-limpiar biblioteca</string>
+    <string name="tidy_description">Archiva salidas grabadas casi duplicadas (conserva la más rápida y las dos más recientes de cada ruta) para que los fantasmas sean sólidos. Las salidas archivadas se mueven a /sdcard/KGhost/tracks/archive y son recuperables.</string>
+
     <!-- Pestaña Ghost Pace: ajustes por perfil -->
     <string name="profile_section_title">Ghost Pace por perfil</string>
     <string name="profile_section_description">Cada perfil de actividad del Karoo puede usar su propia base de Ghost Pace o seguir la global de arriba. Los perfiles aparecen aquí tras rodar o abrir los ajustes con ese perfil seleccionado.</string>
