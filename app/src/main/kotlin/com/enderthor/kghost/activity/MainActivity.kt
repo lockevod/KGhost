@@ -30,8 +30,10 @@ import com.enderthor.kghost.data.KGhostConfig
 import com.enderthor.kghost.geo.TrackStore
 import com.enderthor.kghost.geo.TrackStorage
 import com.enderthor.kghost.managers.ConfigurationManager
+import com.enderthor.kghost.screens.AppSettingsScreen
 import com.enderthor.kghost.screens.SettingsScreen
 import io.hammerhead.karooext.KarooSystemService
+import io.hammerhead.karooext.models.ActiveRideProfile
 import io.hammerhead.karooext.models.UserProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -98,18 +100,24 @@ fun TabLayout() {
     // its own KarooSystemService to read the rider's unit system (UserProfile.preferredUnit.distance)
     // and show the Ghost Pace target in km/h or mph. Connected for the lifetime of this screen.
     var imperial by remember { mutableStateOf(false) }
+    var activeProfileId by remember { mutableStateOf<String?>(null) }
     DisposableEffect(Unit) {
         val karooSystem = KarooSystemService(context)
-        var consumerId: String? = null
+        var unitsConsumer: String? = null
+        var profileConsumer: String? = null
         karooSystem.connect { connected ->
             if (connected) {
-                consumerId = karooSystem.addConsumer<UserProfile> { profile ->
+                unitsConsumer = karooSystem.addConsumer<UserProfile> { profile ->
                     imperial = profile.preferredUnit.distance == UserProfile.PreferredUnit.UnitType.IMPERIAL
+                }
+                profileConsumer = karooSystem.addConsumer<ActiveRideProfile> { evt ->
+                    activeProfileId = evt.profile.id
                 }
             }
         }
         onDispose {
-            consumerId?.let { karooSystem.removeConsumer(it) }
+            unitsConsumer?.let { karooSystem.removeConsumer(it) }
+            profileConsumer?.let { karooSystem.removeConsumer(it) }
             karooSystem.disconnect()
         }
     }
@@ -120,6 +128,7 @@ fun TabLayout() {
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabTitles = listOf(
         stringResource(R.string.tab_main),
+        stringResource(R.string.tab_settings),
     )
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -139,12 +148,16 @@ fun TabLayout() {
                 )
             }
         }
-        SettingsScreen(
-            config = config,
-            configManager = configManager,
-            recordedCount = trackCount,
-            onTracksChanged = { refreshKey++ },
-            imperial = imperial,
-        )
+        when (selectedTab) {
+            0 -> SettingsScreen(
+                config = config,
+                configManager = configManager,
+                recordedCount = trackCount,
+                onTracksChanged = { refreshKey++ },
+                imperial = imperial,
+                activeProfileId = activeProfileId,
+            )
+            else -> AppSettingsScreen(config = config, configManager = configManager)
+        }
     }
 }

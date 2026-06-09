@@ -37,6 +37,7 @@ fun SettingsScreen(
     recordedCount: Int? = null,
     onTracksChanged: () -> Unit = {},
     imperial: Boolean = false,
+    activeProfileId: String? = null,
 ) {
     Column(
         modifier = Modifier
@@ -59,7 +60,7 @@ fun SettingsScreen(
         HorizontalDivider()
 
         // Ghost Pace pace (the fill pace / used when no route is loaded).
-        PartnerSection(config = config, configManager = configManager, imperial = imperial)
+        PartnerSection(config = config, configManager = configManager, imperial = imperial, activeProfileId = activeProfileId)
 
         HorizontalDivider()
 
