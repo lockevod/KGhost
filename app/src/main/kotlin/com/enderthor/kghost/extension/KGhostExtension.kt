@@ -803,6 +803,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Build the ONE continuous whole-route ghost (recorded stretches + VP-pace fills).
                     // Fill pace = the always-present VP target (default 12 km/h), so the ghost always
                     // flows across gaps with no recorded history.
+                    // NOTE: the per-profile target is snapshotted at match time; a mid-route profile
+                    // change takes effect only after a re-match (nav state change). The live per-tick gap
+                    // still uses the current target via eff.targetSpeedMs — only the VP-fill pace is snapshotted.
                     val routeGhost = RouteGhost.build(path.totalM, matched, resolveProfile(activeConfig.value, activeProfileId).targetSpeedMs)
                     // Single atomic publish: path + segments + ghost together so the tick never sees a
                     // NEW path paired with OLD segments. Guarded: only publish if a newer route has not
@@ -1018,17 +1021,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 .drop(1)
                 .onEach { (d, e, sp) ->
                     runCatching {
-                    // Per-profile + master gate: when inactive the extension is fully inert — clear the
-                    // gap/segment fields (→ `---`), hide the ghost, skip recording, and emit nothing.
-                    // The service stays subscribed, so flipping the master switch or the profile's enable
-                    // (config flow) or changing profile (rideProfileJob) re-activates on the next tick.
-                    val eff: EffectiveProfile = resolveProfile(activeConfig.value, activeProfileId)
-                    if (!eff.active) {
-                        GapStateHolder.clear()
-                        SegmentInfoHolder.clear()
-                        mapGhostState = null
-                        return@runCatching
-                    }
                     // DISTANCE is in metres. Drop non-finite values (NaN/±Inf) so they never reach
                     // the gap engine.
                     val distM = (d as? StreamState.Streaming)?.dataPoint?.singleValue
@@ -1048,6 +1040,27 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     val speedMs = (sp as? StreamState.Streaming)?.dataPoint?.singleValue
                         ?.takeIf { it.isFinite() }
 
+                    // ① Ghost Pace machinery, hoisted to run EVERY tick regardless of mode so
+                    // it is always ready as the fallback when no segment is active. coast tracks the
+                    // whole-ride DISTANCE odometer (dead-reckoning during brief GPS gaps); the cached
+                    // VP curve is rebuilt lazily when the target changes (below, in vpGap). Updated
+                    // BEFORE the per-profile gate so the odometer stays in sync even while the extension
+                    // is inert — otherwise re-activating after a disabled stretch would see a distance
+                    // jump and misread it as a GPS freeze.
+                    coast.update(distM, speedMs, elapsedS)
+
+                    // Per-profile + master gate: when inactive the extension is fully inert — clear the
+                    // gap/segment fields (→ `---`), hide the ghost, skip recording, and emit nothing.
+                    // The service stays subscribed, so flipping the master switch or the profile's enable
+                    // (config flow) or changing profile (rideProfileJob) re-activates on the next tick.
+                    val eff: EffectiveProfile = resolveProfile(activeConfig.value, activeProfileId)
+                    if (!eff.active) {
+                        GapStateHolder.clear()
+                        SegmentInfoHolder.clear()
+                        mapGhostState = null
+                        return@runCatching
+                    }
+
                     // History recording: feed the decimating recorder the latest fix while the ride
                     // is recording (only when autoRecord is on). Skipped until a finite GPS fix has
                     // arrived. The recorder decimates by distance, so a 1 Hz feed is fine.
@@ -1058,12 +1071,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             recorder.onSample(lat, lng, distM, elapsedS)
                         }
                     }
-
-                    // ① Ghost Pace machinery, hoisted to run EVERY tick regardless of mode so
-                    // it is always ready as the fallback when no segment is active. coast tracks the
-                    // whole-ride DISTANCE odometer (dead-reckoning during brief GPS gaps); the cached
-                    // VP curve is rebuilt lazily when the target changes (below, in vpGap).
-                    coast.update(distM, speedMs, elapsedS)
                     // GPS-loss handling, fed the ACTIVE mode's staleness seconds: the whole-ride odometer
                     // coast in ① VP mode, the route-position staleness (lastDestChangeMs) in ② route mode.
                     // Sourcing it per-mode keeps the alert in step with the field's estimate mark, since the
