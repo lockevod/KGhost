@@ -1346,25 +1346,60 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val haveRoutePos = lastOnRoute && !lastRejoinActive && remainingM.isFinite() && routeLenM > 0.0
                         if (!haveRoutePos) {
                             // No trustworthy on-route position THIS tick (no lock, off route, or rejoining).
-                            // If the race is already running (ghost anchored) and we had a good position,
-                            // KEEP the ghost gliding (it's purely time-based) and show the gap as an
-                            // ESTIMATE from that frozen position — like a GPS dropout — instead of blanking;
-                            // it self-corrects the instant the rider rejoins. Otherwise (never positioned /
-                            // race not started) hold --- and hide, leaving the anchor null for the first fix.
-                            val anchorS = ghostStartElapsedS
-                            // When the Karoo is computing a rejoin path, DISTANCE_TO_DESTINATION includes
-                            // the rejoin leg, so: remaining_from_rejoin = remaining − rejoinDist, and the
-                            // planned rejoin point on the original route = routeLen − (remaining − rejoinDist).
-                            // This is a much better position estimate than the frozen exit point: it tracks
-                            // the real planned re-entry, updating live as the Karoo refines its rejoin.
-                            // We only accept it when it's ≥ the last good position (can't go backward on the
-                            // route) and within the route length. If unavailable, fall back to frozen pos.
+                            // Fallback strategy (in priority order):
+                            //  1. Rejoin-corrected estimate: routeLen − (remaining − rejoinDist). The best
+                            //     available position when rejoin=true and the Karoo has computed its path.
+                            //  2. Plain remaining fallback: when rejoin=true but rejoinDist not computed yet
+                            //     (Karoo just flipped to rejoin mode), remaining is still route-relative so
+                            //     routeLen − remaining gives a usable provisional position for anchoring.
+                            //  3. Last known good position from before the off-route event.
+                            //
+                            // Critically, if the ghost has not been anchored yet (ghostStartElapsedS=null)
+                            // and the Karoo enters rejoin=true BEFORE onRoute=true is ever seen (common when
+                            // the route is loaded while the rider is slightly off the path), the race would
+                            // never start via the normal haveRoutePos path. We allow anchoring here from the
+                            // best available estimate so the ghost and gap can start immediately.
                             val rejoinDistM = lastRejoinDistM
                             val estimatedRoutePos: Double? = if (lastRejoinActive && rejoinDistM.isFinite() && remainingM.isFinite()) {
+                                // Karoo has computed rejoin path: use rejoin-corrected formula.
                                 val est = routeLenM - (remainingM - rejoinDistM)
                                 est.takeIf { it.isFinite() && it >= (lastGoodRouteDistM ?: 0.0) && it <= routeLenM }
                             } else null
-                            val frozenPos = estimatedRoutePos ?: lastGoodRouteDistM
+
+                            // Best available position: prefer corrected estimate, then last good pos.
+                            var frozenPos = estimatedRoutePos ?: lastGoodRouteDistM
+
+                            // Provisional fallback: when anchor not yet set AND rejoin=true AND rejoinDist
+                            // not computed yet (NaN), the Karoo just flipped to rejoin but hasn't finished
+                            // the path calculation — remaining is still route-relative. Use it directly.
+                            if (ghostStartElapsedS == null && frozenPos == null && lastRejoinActive &&
+                                !rejoinDistM.isFinite() && remainingM.isFinite()
+                            ) {
+                                val provisional = (routeLenM - remainingM).coerceIn(0.0, routeLenM)
+                                if (provisional.isFinite()) frozenPos = provisional
+                            }
+
+                            // Anchor the race from the estimated position if not yet anchored.
+                            // This is the same math as the haveRoutePos path but using the estimate.
+                            if (ghostStartElapsedS == null && frozenPos != null) {
+                                if (routeStartDistM == null) {
+                                    routeStartDistM = (frozenPos - (distM - rideDistAtRouteStartM)).coerceIn(0.0, routeLenM)
+                                }
+                                val moveStart = firstMoveElapsedS
+                                if (moveStart != null) {
+                                    val d0 = routeStartDistM!!
+                                    ghostStartElapsedS = moveStart - rg.timeAt(d0)
+                                    if (lastGoodRouteDistM == null) lastGoodRouteDistM = frozenPos
+                                    Timber.i(
+                                        "KVP race anchored (rejoin-fallback): firstMove=${"%.0f".format(moveStart)}s " +
+                                            "D0=${"%.0f".format(d0)}m ghostStart=${"%.0f".format(ghostStartElapsedS!!)}s " +
+                                            "@ estimatedPos=${"%.0f".format(frozenPos)}m elapsed=${"%.0f".format(elapsedS)}s",
+                                    )
+                                }
+                            }
+
+                            // Use the anchor (freshly set above or previously set) to show the gap.
+                            val anchorS = ghostStartElapsedS
                             if (anchorS != null && frozenPos != null) {
                                 val ghostElapsed = elapsedS - anchorS
                                 val gap = GapCalculator.compute(frozenPos, ghostElapsed, rg, fresh = false)
