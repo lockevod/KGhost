@@ -148,6 +148,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         private const val MAP_REFRESH_MS_K2 = 333L
 
         /**
+         * Map-loop cadence (ms) when there is no ghost to show (VP mode / route not yet matched / map
+         * ghost disabled). Saves ~4 wakeups/s relative to the active rate: the loop just checks
+         * [mapGhostState] and calls publishGhostMarker(null), which is a no-op when already hidden.
+         * 1 s gives a worst-case latency of ~1 s from the tick setting mapGhostState to the first
+         * glide frame — acceptable since the tick itself has ~1 s latency.
+         */
+        private const val MAP_IDLE_REFRESH_MS = 1000L
+
+        /**
          * Cap (ms) on how far the map loop extrapolates the ghost past the last gap-tick anchor using
          * wall-clock, so a stalled tick can't run the ghost away. Pause is handled separately (the loop
          * freezes on [ridePaused]); this is only a safety net for an unusually late tick. Set well above
@@ -709,9 +718,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         if (mapLoopJob?.isActive == true) return
         mapLoopJob = scope.launch(Dispatchers.Default) {
             while (isActive) {
-                delay(mapRefreshMs)
+                // Back off to a slow poll when there is no ghost to show: saves ~4 wakeups/s in VP
+                // mode or before the first route match. When mapGhostState becomes non-null the next
+                // slow delay completes (≤ MAP_IDLE_REFRESH_MS) and the loop switches to the fast rate.
                 val s = mapGhostState
-                if (s == null || mapEmitter == null || !activeConfig.value.showGhostOnMap) {
+                delay(if (s == null) MAP_IDLE_REFRESH_MS else mapRefreshMs)
+                val s2 = mapGhostState
+                if (s2 == null || mapEmitter == null || !activeConfig.value.showGhostOnMap) {
                     publishGhostMarker(null) // hide (idempotent — no-op when already hidden)
                     continue
                 }
@@ -720,11 +733,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 val extrapMs = if (ridePaused) {
                     0L
                 } else {
-                    (System.currentTimeMillis() - s.anchorWallMs).coerceIn(0L, MAX_GHOST_EXTRAP_MS)
+                    (System.currentTimeMillis() - s2.anchorWallMs).coerceIn(0L, MAX_GHOST_EXTRAP_MS)
                 }
-                val ghostElapsed = (s.anchorElapsedS + extrapMs / 1000.0) - s.ghostStartElapsedS
-                val ghostDistM = s.rg.distanceAt(ghostElapsed)
-                publishGhostMarker(GhostMapPresenter.marker(ghostDistM, s.path, fresh = true))
+                val ghostElapsed = (s2.anchorElapsedS + extrapMs / 1000.0) - s2.ghostStartElapsedS
+                val ghostDistM = s2.rg.distanceAt(ghostElapsed)
+                publishGhostMarker(GhostMapPresenter.marker(ghostDistM, s2.path, fresh = true))
             }
         }
     }
@@ -739,16 +752,23 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         val state = event.state
         // Compact + deduped: the host re-emits NavigatingRoute MANY times (computing climbs/progress);
         // logging the full object (polyline + climbs arrays) on every re-emit floods the log. Summarise,
-        // and log only when the summary changes.
-        val navSummary = when (state) {
+        // and log only when the summary changes. The dedup key avoids String.format (which allocates a
+        // Formatter + StringBuilder) on the hot re-emit path — toInt() is allocation-free by JVM rules
+        // for small values; the full formatted string is built only when something actually changes.
+        val navKey = when (state) {
             is OnNavigationState.NavigationState.NavigatingRoute ->
-                "NavigatingRoute name=${state.name} routeLen=${"%.0f".format(state.routeDistance)} " +
-                    "rejoin=${state.rejoinDistance != null || state.rejoinPolyline != null}"
+                "NavigatingRoute|${state.name}|${state.routeDistance.toInt()}|${state.rejoinDistance != null || state.rejoinPolyline != null}"
             else -> state::class.simpleName ?: "?"
         }
-        if (navSummary != lastNavLog) {
-            lastNavLog = navSummary
-            Timber.d("nav=$navSummary")
+        if (navKey != lastNavLog) {
+            lastNavLog = navKey
+            val logMsg = when (state) {
+                is OnNavigationState.NavigationState.NavigatingRoute ->
+                    "NavigatingRoute name=${state.name} routeLen=${"%.0f".format(state.routeDistance)} " +
+                        "rejoin=${state.rejoinDistance != null || state.rejoinPolyline != null}"
+                else -> navKey
+            }
+            Timber.d("nav=$logMsg")
         }
         if (state is OnNavigationState.NavigationState.NavigatingRoute && activeConfig.value.raceEnabled) {
             // Track REJOIN state live (the host re-emits NavigatingRoute as it computes a rejoin, so this
@@ -1070,6 +1090,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     val speedMs = (sp as? StreamState.Streaming)?.dataPoint?.singleValue
                         ?.takeIf { it.isFinite() }
 
+                    // Cache the config snapshot once per tick: activeConfig.value is a volatile StateFlow
+                    // read (memory barrier), and it is accessed 5+ times below — reading it once and
+                    // reusing the snapshot eliminates the repeated barriers and guarantees the tick sees
+                    // a consistent config even if the rider changes a setting mid-tick.
+                    val cfg = activeConfig.value
+
                     // ① Ghost Pace machinery, hoisted to run EVERY tick regardless of mode so
                     // it is always ready as the fallback when no segment is active. coast tracks the
                     // whole-ride DISTANCE odometer (dead-reckoning during brief GPS gaps); the cached
@@ -1083,7 +1109,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // gap/segment fields (→ `---`), hide the ghost, skip recording, and emit nothing.
                     // The service stays subscribed, so flipping the master switch or the profile's enable
                     // (config flow) or changing profile (rideProfileJob) re-activates on the next tick.
-                    val eff: EffectiveProfile = resolveProfile(activeConfig.value, activeProfileId)
+                    val eff: EffectiveProfile = resolveProfile(cfg, activeProfileId)
                     if (!eff.active) {
                         GapStateHolder.clear()
                         SegmentInfoHolder.clear()
@@ -1094,7 +1120,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // History recording: feed the decimating recorder the latest fix while the ride
                     // is recording (only when autoRecord is on). Skipped until a finite GPS fix has
                     // arrived. The recorder decimates by distance, so a 1 Hz feed is fine.
-                    if (activeConfig.value.autoRecord) {
+                    if (cfg.autoRecord) {
                         val lat = lastLat
                         val lng = lastLng
                         if (lat.isFinite() && lng.isFinite()) {
@@ -1166,7 +1192,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         if (seg == null) {
                             val leftStart = prevSegStartM
                             if (fireExit) {
-                                if (leftStart != null && activeConfig.value.segmentExitAlert) {
+                                if (leftStart != null && cfg.segmentExitAlert) {
                                     val left = segments.firstOrNull { it.routeStartM == leftStart }
                                     val nextStart = segments.asSequence()
                                         .map { it.routeStartM }
@@ -1185,7 +1211,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             SegmentInfoHolder.clear()
                             return
                         }
-                        if (activeConfig.value.segmentEntryAlert && seg.routeStartM != prevSegStartM) {
+                        if (cfg.segmentEntryAlert && seg.routeStartM != prevSegStartM) {
                             fireSegAlert(entry = true, label = seg.ghostLabel, atM = seg.routeStartM)
                         }
                         prevSegStartM = seg.routeStartM
@@ -1335,7 +1361,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 // Keep the SEG/GP tag from the frozen position; the seg is unchanged so this
                                 // fires no entry/exit alert (publishSegment is edge-triggered on routeStartM).
                                 publishSegment(rm.segments.firstOrNull { frozenPos in it.routeStartM..it.routeEndM }, rm.segments)
-                                mapGhostState = if (activeConfig.value.showGhostOnMap) {
+                                mapGhostState = if (cfg.showGhostOnMap) {
                                     MapGhostState(rg, rm.path, anchorS, elapsedS, System.currentTimeMillis())
                                 } else {
                                     null
@@ -1454,7 +1480,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                         "elapsed=${"%.0f".format(elapsedS)} ghostElapsed=${"%.0f".format(ghostElapsed)} " +
                                         "fresh=$fresh onRoute=$lastOnRoute rejoin=$lastRejoinActive " +
                                         "speed=${speedMs?.let { "%.1f".format(it) } ?: "null"} " +
-                                        "showMap=${activeConfig.value.showGhostOnMap} mapEmitter=${mapEmitter != null}",
+                                        "showMap=${cfg.showGhostOnMap} mapEmitter=${mapEmitter != null}",
                                 )
                             }
                         }
@@ -1467,7 +1493,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // the loop advances it smoothly until the next tick. Drawn regardless of GPS
                         // freshness — the ghost position is purely time-based, so a dropout/stop never
                         // makes it "unknown". null disables it (rider turned the map ghost off).
-                        mapGhostState = if (activeConfig.value.showGhostOnMap) {
+                        mapGhostState = if (cfg.showGhostOnMap) {
                             MapGhostState(
                                 rg = rg,
                                 path = rm.path,
