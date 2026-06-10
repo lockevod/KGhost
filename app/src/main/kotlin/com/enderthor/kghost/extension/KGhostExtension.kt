@@ -226,15 +226,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         private const val SEG_CLOSE_GAP_M = 1000.0
 
         /**
-         * Maximum forward jump (m) in route position that is considered plausible when re-entering the
-         * route after a rejoin. On loop routes the Karoo can snap the rider to a DIFFERENT PASS through
-         * the same geographic area (e.g. km 9 and km 20 run through the same streets). When
-         * [DISTANCE_TO_DESTINATION] drops by >>3 km compared to the last known good position, it almost
-         * certainly reflects a Karoo reroute to a later loop-pass rather than genuine rider movement.
-         * Detecting this triggers a ghost re-anchor so the gap continues to make sense from the new
-         * (Karoo-assigned) position instead of showing a nonsensical 30-60 min error.
+         * Slack (m) for the odometric plausibility filter. Route progress can never exceed the physical
+         * distance ridden (the route is ≤ the path travelled), so when the Karoo's routeDist jumps beyond
+         * the odometer delta by more than this slack it is physically impossible — a loop snap to a later
+         * pass through the same streets (km 9 → km 20), or a backward re-correction. The slack only
+         * absorbs GPS noise in the two measurements; the real signal (a loop snap) is kilometres.
          */
-        private const val REROUTE_JUMP_THRESHOLD_M = 3000.0
+        private const val REROUTE_JUMP_SLACK_M = 500.0
     }
 
     lateinit var karooSystem: KarooSystemService
@@ -1048,6 +1046,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // position and keep showing the ghost + an ESTIMATE gap from it (like a GPS dropout) instead of
         // blanking — it self-corrects the instant the rider rejoins. null until the first good fix.
         var lastGoodRouteDistM: Double? = null
+        // Ride odometer (m) captured alongside [lastGoodRouteDistM]. The odometric plausibility filter
+        // compares the Karoo's routeDist jump against the odometer delta here: route progress can never
+        // exceed physical distance ridden, so a jump far beyond it (a loop snap) is rejected. null until
+        // the first good fix; both are updated together only on a trustworthy (non-spurious) tick.
+        var distMAtLastGoodM: Double? = null
         // Throttle for the per-tick route-mode diagnostic log (≤ ~once per DIAG_LOG_MS). Kept local
         // to the tick so it resets per ride. Set to 0 to disable.
         var lastDiagLogMs = 0L
@@ -1299,6 +1302,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             routeStartDistM = null
                             firstMoveElapsedS = null
                             lastGoodRouteDistM = null
+                            distMAtLastGoodM = null
                             rideDistAtRouteStartM = distM
                             // Distrust the OLD route's remaining until destJob emits the NEW route's value:
                             // routeDistanceM flips with the path (atomic in RouteMode) but lastDistToDestM is
@@ -1448,32 +1452,26 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             holdGap()
                             return@runCatching
                         }
-                        // Detect a REROUTE POSITION JUMP: on loop routes the Karoo sometimes snaps the
-                        // rider to a later pass through the same geographic area after a rejoin (e.g. the
-                        // route crosses km 9 and km 20 through the same street; after going off-route at
-                        // km 9 the Karoo places the rider back at km 20). The resulting DISTANCE_TO_DESTINATION
-                        // is now relative to the rerouted path, not the original, making the formula
-                        // routeDist = routeLen − remaining give a position that is thousands of metres ahead
-                        // of reality. Detecting this via a jump > REROUTE_JUMP_THRESHOLD_M and resetting the
-                        // ghost anchor avoids a 30–60 min gap error for the rest of the ride.
+                        // ODOMETRIC PLAUSIBILITY FILTER. Route progress can NEVER exceed the physical
+                        // distance ridden (the route is ≤ the path travelled). On a self-intersecting loop
+                        // the Karoo can snap the rider to a LATER pass through the same streets (km 9 →
+                        // km 20) — or re-correct backward — making routeDist jump far beyond what the
+                        // odometer says we rode. When |routeDist − lastGood| exceeds the odometer delta by
+                        // more than REROUTE_JUMP_SLACK_M the position is physically impossible → reject it
+                        // and project the rider's TRUE position from the last good fix by the distance
+                        // actually ridden (lastGood + odoΔ). We do NOT latch the projection, so we keep
+                        // tracking until the Karoo re-matches plausibly (|jump| ≈ odoΔ again). This flags
+                        // ONLY the impossible; a real fast section / shortcut always has odoΔ ≥ progress,
+                        // so it is never misclassified — unlike a position-delta "teleport" heuristic.
                         val lastGoodPos = lastGoodRouteDistM
-                        if (lastGoodPos != null && (routeDist - lastGoodPos) > REROUTE_JUMP_THRESHOLD_M) {
-                            Timber.w(
-                                "KVP route: reroute position jump ${"%.0f".format(lastGoodPos)}m → " +
-                                    "${"%.0f".format(routeDist)}m (+${"%.0f".format(routeDist - lastGoodPos)}m) — " +
-                                    "ghost re-anchoring at new position",
-                            )
-                            // Re-anchor the race cleanly AT the new position. Resetting the anchor and
-                            // setting the move-start to NOW makes the anchor block below compute
-                            // ghostStart = elapsedS − rg.timeAt(routeDist), so the ghost sits exactly on
-                            // the rider here and the gap restarts at ~0. Using the OLD firstMoveElapsedS
-                            // would instead leave ghostStart = oldFirstMove − timeAt(routeDist), shifting
-                            // the ghost forward by timeAt(routeDist) and re-creating a huge bogus gap.
-                            ghostStartElapsedS = null
-                            routeStartDistM = null
-                            rideDistAtRouteStartM = distM
-                            firstMoveElapsedS = elapsedS
-                            lastGoodRouteDistM = routeDist
+                        val lastGoodOdo = distMAtLastGoodM
+                        val odoDelta = if (lastGoodOdo != null) (distM - lastGoodOdo).coerceAtLeast(0.0) else null
+                        val spurious = lastGoodPos != null && odoDelta != null &&
+                            kotlin.math.abs(routeDist - lastGoodPos) > odoDelta + REROUTE_JUMP_SLACK_M
+                        val effRouteDist = if (spurious) {
+                            (lastGoodPos!! + odoDelta!!).coerceIn(0.0, routeLenM)
+                        } else {
+                            routeDist
                         }
                         // Route-position staleness drives the GPS-lost alert + give-up in route mode — NOT
                         // the whole-ride odometer (which can be fresh while the nav fix is wedged, or vice
@@ -1494,7 +1492,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // on-route, so it back-figures any head start ridden BLIND before GPS locked and
                         // detects a deliberate mid-route start (D0 > 0).
                         if (routeStartDistM == null) {
-                            routeStartDistM = (routeDist - (distM - rideDistAtRouteStartM)).coerceIn(0.0, routeLenM)
+                            routeStartDistM = (effRouteDist - (distM - rideDistAtRouteStartM)).coerceIn(0.0, routeLenM)
                         }
                         val d0 = routeStartDistM!!
                         // Anchor the ghost clock to the rider's REAL race start: at firstMoveElapsedS the
@@ -1508,7 +1506,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 val nowMs = System.currentTimeMillis()
                                 if (nowMs - lastDiagLogMs >= diagLogMs) {
                                     lastDiagLogMs = nowMs
-                                    Timber.d("KVP tick route: on route at ${"%.0f".format(routeDist)}m, D0=${"%.0f".format(d0)} — waiting for first movement (race not started)")
+                                    Timber.d("KVP tick route: on route at ${"%.0f".format(effRouteDist)}m, D0=${"%.0f".format(d0)} — waiting for first movement (race not started)")
                                 }
                                 holdGap()
                                 return@runCatching
@@ -1517,25 +1515,30 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             ghostStartElapsedS = moveStart - rg.timeAt(d0)
                             Timber.i(
                                 "KVP race anchored: firstMove=${"%.0f".format(moveStart)}s D0=${"%.0f".format(d0)}m " +
-                                    "ghostStart=${"%.0f".format(ghostStartElapsedS!!)}s @ routeDist=${"%.0f".format(routeDist)}m elapsed=${"%.0f".format(elapsedS)}s",
+                                    "ghostStart=${"%.0f".format(ghostStartElapsedS!!)}s @ routeDist=${"%.0f".format(effRouteDist)}m elapsed=${"%.0f".format(elapsedS)}s",
                             )
                         }
                         // ghostElapsed = (elapsedS − firstMove) + rg.timeAt(D0): ghost at D0 at race start,
                         // then advances on real elapsed time (frozen only on pause — ELAPSED_TIME stops).
                         val ghostElapsed = elapsedS - ghostStartElapsedS!!
-                        // Mark the gap as an estimate once the route position has been stale (frozen while
-                        // moving) past the coast window; it never blanks for a brief gap.
-                        val fresh = routePosStaleS < CoastingEstimator.COAST_WINDOW_MS / 1000.0
+                        // Mark the gap as an estimate while the route position is stale (frozen while
+                        // moving) past the coast window OR while we're projecting through a spurious jump;
+                        // it never blanks for a brief gap.
+                        val fresh = !spurious && routePosStaleS < CoastingEstimator.COAST_WINDOW_MS / 1000.0
                         // Which recorded stretch the rider is currently on — drives only the data fields'
                         // SEG/GP tag (via SegmentInfoHolder). The ghost is whole-route, not per-segment.
-                        val seg = rm.segments.firstOrNull { routeDist in it.routeStartM..it.routeEndM }
+                        val seg = rm.segments.firstOrNull { effRouteDist in it.routeStartM..it.routeEndM }
                         // One gap against the whole-route ghost: progress = rider's route distance,
                         // clock = ghostElapsed, curve = the continuous route ghost (route-distance axis).
-                        val gap = GapCalculator.compute(routeDist, ghostElapsed, rg, fresh)
+                        val gap = GapCalculator.compute(effRouteDist, ghostElapsed, rg, fresh)
                         GapStateHolder.update(gap)
-                        // Remember this trustworthy position so a following off-route/rejoin tick can keep
-                        // showing the ghost + an estimate gap from it instead of blanking (see !haveRoutePos).
-                        lastGoodRouteDistM = routeDist
+                        // Latch the trustworthy position + its odometer ONLY on a non-spurious tick — so a
+                        // rejoin/off-route tick can estimate from it, and the plausibility filter keeps
+                        // comparing the next jump against the last KNOWN-GOOD baseline (not the projection).
+                        if (!spurious) {
+                            lastGoodRouteDistM = effRouteDist
+                            distMAtLastGoodM = distM
+                        }
                         run {
                             val nowMs = System.currentTimeMillis()
                             // The rich state-snapshot line — INCLUDING the computed gap (the thing you study).
@@ -1545,7 +1548,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             if (nowMs - lastDiagLogMs >= diagLogMs) {
                                 lastDiagLogMs = nowMs
                                 Timber.d(
-                                    "KVP tick route: routeDist=${"%.0f".format(routeDist)} D0=${"%.0f".format(d0)} " +
+                                    "KVP tick route: routeDist=${"%.0f".format(effRouteDist)}${if (spurious) " (raw=${"%.0f".format(routeDist)} SPURIOUS odoΔ=${"%.0f".format(odoDelta ?: 0.0)})" else ""} D0=${"%.0f".format(d0)} " +
                                         "remaining=${"%.0f".format(remainingM)} rideDist=${"%.0f".format(distM)} " +
                                         "ghostDist=${"%.0f".format(gap.ghostProgressM)} gapT=${"%.0f".format(gap.gapTimeS)}s " +
                                         "gapD=${"%.0f".format(gap.gapDistanceM)}m ${if (gap.ahead) "AHEAD" else "BEHIND"} " +
