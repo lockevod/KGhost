@@ -224,6 +224,17 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          * genuinely FAR stretch (entries always fire). ~1 km ≈ the old "a few minutes" intent in distance.
          */
         private const val SEG_CLOSE_GAP_M = 1000.0
+
+        /**
+         * Maximum forward jump (m) in route position that is considered plausible when re-entering the
+         * route after a rejoin. On loop routes the Karoo can snap the rider to a DIFFERENT PASS through
+         * the same geographic area (e.g. km 9 and km 20 run through the same streets). When
+         * [DISTANCE_TO_DESTINATION] drops by >>3 km compared to the last known good position, it almost
+         * certainly reflects a Karoo reroute to a later loop-pass rather than genuine rider movement.
+         * Detecting this triggers a ghost re-anchor so the gap continues to make sense from the new
+         * (Karoo-assigned) position instead of showing a nonsensical 30-60 min error.
+         */
+        private const val REROUTE_JUMP_THRESHOLD_M = 3000.0
     }
 
     lateinit var karooSystem: KarooSystemService
@@ -1401,6 +1412,29 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             }
                             holdGap()
                             return@runCatching
+                        }
+                        // Detect a REROUTE POSITION JUMP: on loop routes the Karoo sometimes snaps the
+                        // rider to a later pass through the same geographic area after a rejoin (e.g. the
+                        // route crosses km 9 and km 20 through the same street; after going off-route at
+                        // km 9 the Karoo places the rider back at km 20). The resulting DISTANCE_TO_DESTINATION
+                        // is now relative to the rerouted path, not the original, making the formula
+                        // routeDist = routeLen − remaining give a position that is thousands of metres ahead
+                        // of reality. Detecting this via a jump > REROUTE_JUMP_THRESHOLD_M and resetting the
+                        // ghost anchor avoids a 30–60 min gap error for the rest of the ride.
+                        val lastGoodPos = lastGoodRouteDistM
+                        if (lastGoodPos != null && (routeDist - lastGoodPos) > REROUTE_JUMP_THRESHOLD_M) {
+                            Timber.w(
+                                "KVP route: reroute position jump ${"%.0f".format(lastGoodPos)}m → " +
+                                    "${"%.0f".format(routeDist)}m (+${"%.0f".format(routeDist - lastGoodPos)}m) — " +
+                                    "ghost re-anchoring at new position",
+                            )
+                            // Reset the ghost clock and D0 so the race re-anchors from the new position.
+                            // rideDistAtRouteStartM is updated so D0 is recalculated correctly at the new
+                            // position. firstMoveElapsedS is kept (the rider was already moving).
+                            ghostStartElapsedS = null
+                            routeStartDistM = null
+                            rideDistAtRouteStartM = distM
+                            lastGoodRouteDistM = routeDist
                         }
                         // Route-position staleness drives the GPS-lost alert + give-up in route mode — NOT
                         // the whole-ride odometer (which can be fresh while the nav fix is wedged, or vice

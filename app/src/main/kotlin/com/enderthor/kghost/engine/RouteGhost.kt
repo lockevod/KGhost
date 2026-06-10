@@ -21,6 +21,15 @@ package com.enderthor.kghost.engine
 object RouteGhost {
 
     /**
+     * Maximum plausible cyclist speed (m/s) that a recorded segment may imply. Any segment whose
+     * average speed (routeSpan / totalTime) exceeds this is treated as corrupt data (GPS dropout,
+     * timestamp glitch) and replaced by a fill-pace bridge — same as if no recording existed for
+     * that stretch. 30 m/s ≈ 108 km/h: reachable only on the steepest descents; a segment at higher
+     * average implies the GPS recorded a huge jump, not real movement.
+     */
+    private const val MAX_SEGMENT_SPEED_MS = 30.0
+
+    /**
      * @param routeLengthM  Total route length in metres ([PolylinePath.totalM]).
      * @param segments      Matched recorded stretches (any order; overlaps are dropped defensively).
      * @param fillSpeedM    Pace (m/s, > 0) used to bridge the gaps between/around segments. Typically
@@ -60,6 +69,22 @@ object RouteGhost {
             if (routeSpan <= 0.0) continue
             val trackSpan = seg.ghost.totalDistanceM
             val scale = if (trackSpan > 0.0) routeSpan / trackSpan else 0.0
+
+            // Sanity-check the implied average speed for this segment. A GPS dropout or timestamp
+            // glitch can make the recorded total time for a segment implausibly short (e.g. 6 s for
+            // 1425 m = 237 m/s), causing the ghost to "fly" through that section and produce a
+            // giant, nonsensical gap spike. Treat such segments as fill-pace stretches instead.
+            val segTimeS = seg.ghost.totalTimeS
+            val impliedSpeedMs = if (segTimeS > 0.0) routeSpan / segTimeS else Double.MAX_VALUE
+            if (impliedSpeedMs > MAX_SEGMENT_SPEED_MS) {
+                // Use fill pace for this stretch (same as if there were no recorded data here).
+                if (!canFill) return null
+                cumTimeS += routeSpan / fillSpeedM
+                addSample(samples, endM, cumTimeS)
+                cursorM = endM
+                continue
+            }
+
             // Emit each internal ghost sample, scaled onto the route span. Skip the first (it is the
             // segment-relative origin and coincides with the cursor sample already added).
             val gs = seg.ghost.samples
