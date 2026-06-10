@@ -1463,12 +1463,16 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     "${"%.0f".format(routeDist)}m (+${"%.0f".format(routeDist - lastGoodPos)}m) — " +
                                     "ghost re-anchoring at new position",
                             )
-                            // Reset the ghost clock and D0 so the race re-anchors from the new position.
-                            // rideDistAtRouteStartM is updated so D0 is recalculated correctly at the new
-                            // position. firstMoveElapsedS is kept (the rider was already moving).
+                            // Re-anchor the race cleanly AT the new position. Resetting the anchor and
+                            // setting the move-start to NOW makes the anchor block below compute
+                            // ghostStart = elapsedS − rg.timeAt(routeDist), so the ghost sits exactly on
+                            // the rider here and the gap restarts at ~0. Using the OLD firstMoveElapsedS
+                            // would instead leave ghostStart = oldFirstMove − timeAt(routeDist), shifting
+                            // the ghost forward by timeAt(routeDist) and re-creating a huge bogus gap.
                             ghostStartElapsedS = null
                             routeStartDistM = null
                             rideDistAtRouteStartM = distM
+                            firstMoveElapsedS = elapsedS
                             lastGoodRouteDistM = routeDist
                         }
                         // Route-position staleness drives the GPS-lost alert + give-up in route mode — NOT
