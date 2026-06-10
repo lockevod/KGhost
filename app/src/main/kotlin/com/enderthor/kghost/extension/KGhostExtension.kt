@@ -284,6 +284,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // from the nav stream (before the match dedup), read on the tick.
     @Volatile
     private var lastRejoinActive: Boolean = false
+    // Latest rejoin-path length (m) from the NavigatingRoute event. When the Karoo is guiding the
+    // rider back, DISTANCE_TO_DESTINATION = rejoin_path + remaining_from_rejoin_point. So the planned
+    // rejoin point on the original route = routeLen − (remaining − rejoinDist). Updated live as the
+    // Karoo re-emits NavigatingRoute with an updated rejoin calculation. NaN when not rejoining.
+    @Volatile
+    private var lastRejoinDistM: Double = Double.NaN
 
     // Wall-clock epoch captured when the current Recording started. Used as the recorded track's
     // id and startedAtEpoch (this is the live service, not a deterministic workflow).
@@ -515,6 +521,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // the fresh NavigatingRoute confirms the real rejoin state — matching the distrust-default of the
         // three resets above (NaN / false).
         lastRejoinActive = true
+        lastRejoinDistM = Double.NaN
         rideJob = karooSystem.streamRide().onEach { state ->
             Timber.d("KVP ride state=$state tickActive=${tickJob?.isActive} route=${routeMode != null}")
             when (state) {
@@ -652,8 +659,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Drawable changed (rider switched icon/size mid-ride): hide first so the re-Show
                     // actually swaps the bitmap instead of just repositioning the old one.
                     if (iconChanged) em.onNext(HideSymbols(listOf(GHOST_SYMBOL_ID)))
-                    // Only rotate directional icons (the arrow) to the route heading; upright glyphs
-                    // (ghost/cyclist) and the symmetric dot are drawn at 0° so they don't tilt sideways.
+                    // Rotate all directional icons (arrow, ghost, cyclist) to the route heading.
+                    // DOT is rotationally symmetric so stays at 0°.
                     val orientation = if (ghostIconRotates(cfg.ghostIcon)) m.bearingDeg else 0.0f
                     em.onNext(
                         ShowSymbols(
@@ -747,8 +754,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // Track REJOIN state live (the host re-emits NavigatingRoute as it computes a rejoin, so this
             // updates even though the heavy match below dedups on the polyline). A non-null rejoin means
             // the rider is off-route being guided back → the route position is not trustworthy; the tick
-            // gates on this in addition to ON_ROUTE.
+            // gates on this in addition to ON_ROUTE. Store the rejoin distance so the tick can estimate
+            // the planned rejoin point: routeLen − (remaining − rejoinDist).
             lastRejoinActive = state.rejoinDistance != null || state.rejoinPolyline != null
+            lastRejoinDistM = state.rejoinDistance ?: Double.NaN
             // A route is present → cancel any pending debounced teardown from a prior transient blip.
             // Because lastMatchedPolyline is preserved across a cancelled pending-clear, a blip→same-
             // route sequence dedups below and does NOT re-match.
@@ -850,6 +859,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // deferred preview match so startTick() doesn't later replay a dead route.
             pendingNavState = null
             lastRejoinActive = false
+            lastRejoinDistM = Double.NaN
             // Debounce the teardown: the host can emit a transient Idle/NavigatingToDestination blip
             // between NavigatingRoute re-emits. Clearing immediately would null
             // routeMode/lastMatchedPolyline → a needless full re-match (and a one-tick VP/`---` flicker)
@@ -1305,7 +1315,19 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             // it self-corrects the instant the rider rejoins. Otherwise (never positioned /
                             // race not started) hold --- and hide, leaving the anchor null for the first fix.
                             val anchorS = ghostStartElapsedS
-                            val frozenPos = lastGoodRouteDistM
+                            // When the Karoo is computing a rejoin path, DISTANCE_TO_DESTINATION includes
+                            // the rejoin leg, so: remaining_from_rejoin = remaining − rejoinDist, and the
+                            // planned rejoin point on the original route = routeLen − (remaining − rejoinDist).
+                            // This is a much better position estimate than the frozen exit point: it tracks
+                            // the real planned re-entry, updating live as the Karoo refines its rejoin.
+                            // We only accept it when it's ≥ the last good position (can't go backward on the
+                            // route) and within the route length. If unavailable, fall back to frozen pos.
+                            val rejoinDistM = lastRejoinDistM
+                            val estimatedRoutePos: Double? = if (lastRejoinActive && rejoinDistM.isFinite() && remainingM.isFinite()) {
+                                val est = routeLenM - (remainingM - rejoinDistM)
+                                est.takeIf { it.isFinite() && it >= (lastGoodRouteDistM ?: 0.0) && it <= routeLenM }
+                            } else null
+                            val frozenPos = estimatedRoutePos ?: lastGoodRouteDistM
                             if (anchorS != null && frozenPos != null) {
                                 val ghostElapsed = elapsedS - anchorS
                                 val gap = GapCalculator.compute(frozenPos, ghostElapsed, rg, fresh = false)
@@ -1321,7 +1343,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 val nowMs = System.currentTimeMillis()
                                 if (nowMs - lastDiagLogMs >= diagLogMs) {
                                     lastDiagLogMs = nowMs
-                                    Timber.d("KVP tick route: off-route/rejoin (onRoute=$lastOnRoute rejoin=$lastRejoinActive) — estimate from frozen routeDist=${"%.0f".format(frozenPos)} gapT=${"%.0f".format(gap.gapTimeS)}s (ghost kept)")
+                                    Timber.d("KVP tick route: off-route/rejoin (onRoute=$lastOnRoute rejoin=$lastRejoinActive) — ${if (estimatedRoutePos != null) "rejoin-estimated routeDist=${"%.0f".format(estimatedRoutePos)}" else "frozen routeDist=${"%.0f".format(frozenPos)}"} gapT=${"%.0f".format(gap.gapTimeS)}s (ghost kept)")
                                 }
                                 return@runCatching
                             }
@@ -1517,6 +1539,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         lastOnRoute = false
         lastDestChangeMs = 0L
         lastRejoinActive = false
+        lastRejoinDistM = Double.NaN
         // Stop the map loop (the sole ghost emitter) and clear its snapshot. This is the onDestroy path
         // (not suspend, so a plain cancel): the scope is cancelled right after and the host tears the
         // map layer down with the service, so a last in-flight Show racing the hide below is moot. The

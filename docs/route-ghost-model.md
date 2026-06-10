@@ -39,10 +39,23 @@ Why this and not our own projection:
 Trust the position only when **on-route AND not mid-rejoin**: `haveRoutePos = lastOnRoute &&
 !lastRejoinActive && remaining.isFinite()`. A non-null `rejoinPolyline`/`rejoinDistance` on the
 `NavigatingRoute` event means the Karoo is guiding the rider back — its `remaining` is then
-rejoin-relative, not a valid along-route position — so we treat it as no-position (this is RouteGraph's
-gate: it nulls `currentDistanceAlongRoute` whenever a rejoin is set). `lastRejoinActive` is read live
-from the nav stream (updated even when the heavy route match dedups on the polyline). Otherwise →
-**show `---`**, hold the ghost.
+`rejoin_path_length + remaining_from_rejoin_point`, not the rider's own along-route position —
+so we can't use `routeLen − remaining` directly. `lastRejoinActive` is read live from the nav stream
+(updated even when the heavy route match dedups on the polyline).
+
+However, when rejoin is active and `lastRejoinDistM` (= `state.rejoinDistance`, stored live) is
+available, we can estimate the **planned rejoin point** on the original route:
+
+```
+estimatedRoutePos = routeLen − (remaining − rejoinDist)
+```
+
+This is used as a dynamic position estimate instead of the frozen exit-point: it tracks the real
+planned re-entry and updates as the Karoo refines its rejoin calculation. The gap is still shown
+marked as an estimate (`fresh = false` → orange field). We only accept the estimate when it is
+≥ the last good position (the rider can't go backward on the route) and ≤ routeLen. If
+`rejoinDistM` is not yet available (e.g. right as the Karoo first detects off-route), we fall
+back to the frozen last-good position.
 
 An implausible `DISTANCE_TO_DESTINATION` is rejected before D0 is latched (a wrong D0 is invariant →
 wrong for the whole route). Two cases, both gated on `routeStartDistM == null` (first latch only): a
@@ -170,6 +183,7 @@ gates now — route *position* comes from the Karoo (§1), not from this stream.
 | `lastDistToDestM`, `lastOnRoute` | Karoo route progress (from `destJob`) |
 | `lastDestChangeMs` | last time `remaining` actually changed → route-position staleness |
 | `lastRejoinActive` | rider mid-rejoin (off-route) → position not trustworthy |
+| `lastRejoinDistM` | latest rejoin-path length from `NavigatingRoute` → used to estimate rejoin point |
 | `RouteMode.routeDistanceM` | total route length from `NavigatingRoute` |
 | `routeStartDistM` | **D0** — route position at the start of this route |
 | `rideDistAtRouteStartM` | odometer baseline when this route became active (reroute-correct D0) |

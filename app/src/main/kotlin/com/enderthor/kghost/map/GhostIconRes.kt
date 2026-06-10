@@ -9,7 +9,7 @@ import com.enderthor.kghost.data.GhostSize
  * Resolves the rider's [GhostIcon] + [GhostSize] choice to a concrete drawable for the map symbol.
  *
  * The Karoo `Symbol.Icon` API carries no size field, so each size is a distinct drawable that differs
- * only in its intrinsic width/height (S=32dp, M=48dp, L=66dp over a shared 48-unit viewport). Every
+ * only in its intrinsic width/height (S=22dp, M=32dp, L=45dp over a shared 48-unit viewport). Every
  * icon paints a white halo behind a dark glyph so it stays legible on any map background.
  */
 @DrawableRes
@@ -39,11 +39,11 @@ fun ghostIconRes(icon: GhostIcon, size: GhostSize): Int = when (icon) {
 /**
  * Whether [icon] should be rotated to the route heading when placed via `Symbol.Icon`.
  *
- * Only the ARROW is directional. GHOST and CYCLIST are upright glyphs that look wrong tilted to a
- * bearing (e.g. lying on their side on a southbound leg), and DOT is rotationally symmetric, so all
- * three are drawn at a fixed 0° heading.
+ * ARROW, GHOST and CYCLIST all rotate: the arrow is explicitly directional, and the ghost/cyclist
+ * glyphs face upward (north) at 0° so rotating them to the route tangent makes the marker visually
+ * follow the direction of travel. DOT is rotationally symmetric and needs no rotation.
  */
-fun ghostIconRotates(icon: GhostIcon): Boolean = icon == GhostIcon.ARROW
+fun ghostIconRotates(icon: GhostIcon): Boolean = icon != GhostIcon.DOT
 
 /**
  * Automatic ghost icon size from the map zoom level (`[8.0, 18.0]`, smaller = more zoomed out; the
