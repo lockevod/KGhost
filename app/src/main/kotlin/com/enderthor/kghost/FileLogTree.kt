@@ -40,6 +40,7 @@ object FileLogTree : Timber.Tree() {
 
     private const val MAX_BUFFER = 4000               // bounded RAM (~ a few hundred KB of lines)
     private const val FLUSH_INTERVAL_MS = 5_000L      // append at most ~every 5 s (cheap, low loss on a kill)
+    private const val IDLE_POLL_MS = 60_000L          // slow poll while logging is OFF (default state)
     private const val MAX_BYTES = 3L * 1024 * 1024    // rotate the current file past 3 MB
     private const val FILE_NAME = "kghost.log"
 
@@ -66,7 +67,11 @@ object FileLogTree : Timber.Tree() {
         logFile = File(dir, FILE_NAME)
         scope.launch {
             while (true) {
-                delay(FLUSH_INTERVAL_MS)
+                // Park at a slow poll while logging is off: with the default-OFF feature, a 5 s
+                // wakeup for the whole process lifetime is pure battery waste (log() never buffers
+                // while disabled, so there is nothing to flush). Worst case after toggling ON, the
+                // first flush is one idle poll away; the 5 s cadence resumes from then on.
+                delay(if (enabled) FLUSH_INTERVAL_MS else IDLE_POLL_MS)
                 flush()
             }
         }

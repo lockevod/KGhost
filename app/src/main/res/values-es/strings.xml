@@ -70,10 +70,16 @@
     <string name="race_description">Compite contra tu yo del pasado en los tramos de la ruta que ya has recorrido antes.</string>
     <string name="race_enabled_label">Carrera contra ti mismo</string>
     <string name="race_enabled_description">Activa la carrera contra tu historial grabado cuando se cargue una ruta coincidente.</string>
+    <string name="race_mode_label">Cómo compites</string>
+    <string name="race_mode_description">Compite contra una velocidad constante, o contra tus recorridos grabados en la ruta. Al elegir «Ritmo fijo» se deshabilitan las opciones de «Tus recorridos» de abajo.</string>
+    <string name="race_mode_fixed">Ritmo fijo</string>
+    <string name="race_mode_yours">Tus recorridos</string>
     <string name="race_ghost_pick_label">Fantasma con el que competir</string>
     <string name="race_ghost_pick_description">Qué recorrido anterior usar cuando varias pistas cubren el mismo tramo.</string>
     <string name="race_ghost_best">Mejor (récord)</string>
     <string name="race_ghost_last">Último</string>
+    <string name="race_ghost_average">Media</string>
+    <string name="race_ghost_average_hint">«Media» compite contra la media (ponderada hacia las más recientes) de tus últimas vueltas a la ruta cargada (las paradas largas no cuentan). Necesita un par de vueltas empezadas en el inicio de la ruta; en los tramos sin vueltas suficientes compites contra «Mejor». Solo cuenta la primera vuelta de cada salida.</string>
     <string name="race_auto_record_label">Grabar historial de recorridos</string>
     <string name="race_auto_record_description">Guarda automáticamente cada recorrido como una pista GPS para futuras comparaciones con el fantasma.</string>
     <string name="race_recorded_tracks">Pistas grabadas: %1$d</string>

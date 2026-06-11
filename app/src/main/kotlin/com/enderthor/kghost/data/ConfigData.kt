@@ -4,7 +4,7 @@ import com.enderthor.kghost.engine.GhostPick
 import kotlinx.serialization.Serializable
 
 /** Current schema version. Bump this and add a branch in [migrateToLatest] when defaults change. */
-const val CONFIG_VERSION = 6
+const val CONFIG_VERSION = 7
 
 /** Default Ghost Pace target speed (12 km/h) used when the user hasn't set one. */
 val DEFAULT_TARGET_SPEED_MS: Double = kmhToMs(12.0)
@@ -41,6 +41,17 @@ data class ProfileSetting(
     val useGlobal: Boolean = true,
     val targetSpeedMs: Double = DEFAULT_TARGET_SPEED_MS,
     val enabled: Boolean = true,
+    /**
+     * This profile's racing MODE when it is custom ([useGlobal] = false): false = Fixed pace (race the
+     * constant Ghost-Pace target), true = Your rides (race your recorded history; Ghost Pace becomes the
+     * fill pace). Mirrors the global [KGhostConfig.raceEnabled]. Defaults to true so a profile turned
+     * custom keeps the global default behaviour until changed.
+     */
+    val raceEnabled: Boolean = true,
+    /** This profile's [GhostPick] (Best/Last/Average) when custom. Only meaningful in "Your rides" mode. */
+    val ghostPick: GhostPick = GhostPick.BEST,
+    /** This profile's on-map ghost [GhostIcon] when custom. Only meaningful in "Your rides" mode. */
+    val ghostIcon: GhostIcon = GhostIcon.GHOST,
 )
 
 /**
@@ -150,5 +161,8 @@ fun KGhostConfig.migrateToLatest(): KGhostConfig {
     // v5 → v6: auto-clean fields added; both take Kotlin defaults (autoTidy = true, tidySweepEpoch = 0),
     // so existing installs behave identically until the first sweep/ride-end tidy runs.
     if (c.version < 6) c = c.copy(version = 6)
+    // v6 → v7: per-profile raceEnabled/ghostPick/ghostIcon added; all take Kotlin defaults matching the
+    // global defaults, so existing profiles (and the global config) behave identically — just stamp.
+    if (c.version < 7) c = c.copy(version = 7)
     return c
 }

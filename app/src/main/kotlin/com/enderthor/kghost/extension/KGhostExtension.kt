@@ -12,6 +12,7 @@ import com.enderthor.kghost.engine.GapCalculator
 import com.enderthor.kghost.engine.GapState
 import com.enderthor.kghost.engine.GapStateHolder
 import com.enderthor.kghost.engine.GhostCurve
+import com.enderthor.kghost.engine.GhostPick
 import com.enderthor.kghost.engine.LiveSegment
 import com.enderthor.kghost.engine.RenderPrefs
 import com.enderthor.kghost.engine.RouteGhost
@@ -22,6 +23,11 @@ import com.enderthor.kghost.engine.learnProfile
 import com.enderthor.kghost.engine.StalenessLogic
 import com.enderthor.kghost.engine.GhostPaceSource
 import com.enderthor.kghost.engine.toInfo
+import com.enderthor.kghost.engine.AGG_MIN_LAPS
+import com.enderthor.kghost.engine.AGG_START_TOL_M
+import com.enderthor.kghost.engine.AGG_STEP_M
+import com.enderthor.kghost.engine.updateAggregate
+import com.enderthor.kghost.geo.AggregateStore
 import com.enderthor.kghost.geo.BBox
 import com.enderthor.kghost.geo.Polyline
 import com.enderthor.kghost.geo.PolylinePath
@@ -29,6 +35,7 @@ import com.enderthor.kghost.geo.SegmentMatcher
 import com.enderthor.kghost.geo.TrackRecorder
 import com.enderthor.kghost.geo.TrackStore
 import com.enderthor.kghost.geo.TrackStorage
+import com.enderthor.kghost.geo.routeKeyOf
 import com.enderthor.kghost.managers.ConfigurationManager
 import com.enderthor.kghost.map.GhostMapPresenter
 import com.enderthor.kghost.map.GhostMarker
@@ -272,7 +279,25 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // I close the app" bug.
     @Volatile private var trackStoreCache: TrackStore? = null
     @Volatile private var trackStoreDir: File? = null
+    @Volatile private var aggregateStoreCache: AggregateStore? = null
+    @Volatile private var aggregateStoreDir: File? = null
     private val recorder = TrackRecorder()
+
+    // ── Average-ghost lap capture ───────────────────────────────────────────────────────────────
+    // This ride's route progress as (routeDistM, riderTimeFromStartS) samples, decimated to one per
+    // ~25 m of route advance. Written by the tick COROUTINE (Dispatchers.Default), read once at ride-end
+    // by finishAndSaveRecording(). Safe because the Idle handler runs stopTickAndJoin() (cancelAndJoin)
+    // BEFORE finishAndSaveRecording(), so the join establishes a happens-before edge from the last tick
+    // write to the read — there is no concurrent access on that path. The synchronizedList only keeps
+    // the list internally consistent on the onDestroy teardown (non-joining cancel); it is not what
+    // makes the ride-end read correct. @Volatile on the target below is the cross-thread publish.
+    private val lapAggBuffer = java.util.Collections.synchronizedList(ArrayList<DoubleArray>())
+
+    /** The route this lap's samples fold into at ride-end — one immutable value so key/name/length can
+     *  never be observed out of sync. null ⇒ the lap does NOT contribute (no route, or the rider joined
+     *  mid-route so the time origin would be offset). */
+    private data class LapAggTarget(val key: String, val name: String, val lenM: Double)
+    @Volatile private var lapAggTarget: LapAggTarget? = null
 
     // Latest GPS fix from the location stream. Read by both the recorder and the route projector
     // on the tick. @Volatile because the location collector and the tick may run on different
@@ -323,6 +348,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
      */
     private data class RouteMode(
         val path: PolylinePath,
+        /** The loaded route's name (from NavigatingRoute) — used to key the average-ghost aggregate. */
+        val routeName: String,
         val segments: List<LiveSegment>,
         /**
          * The continuous whole-route ghost — recorded stretches stitched with VP-pace fills (see
@@ -368,6 +395,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private var matchJob: Job? = null
     @Volatile
     private var lastMatchedPolyline: String? = null
+    // The latest navigation event, kept so a mid-ride settings change can REPLAY it: the gate + match
+    // snapshot the resolved mode/pick and dedup re-emits on the polyline, so a config edit or a
+    // ride-profile switch would otherwise keep serving the old settings until the NEXT route load.
+    // lastMatchSig is the signature of the resolved settings the last gate/match decision used; see
+    // [rematchOnSettingsChange]. Both are touched only from collectors on [scope] (Main).
+    private var lastNavEvent: OnNavigationState? = null
+    private var lastMatchSig: MatchSig? = null
     // Last compact nav summary logged, to dedup the noisy NavigatingRoute re-emits (see onNavigationState).
     private var lastNavLog: String? = null
     // Last config summary logged, to dedup the per-emission config flow (log only on a real change).
@@ -474,6 +508,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 lastCfgLog = cfgSig
                 Timber.i("KVP config: $cfgSig")
             }
+            // A config edit can change the RESOLVED mode/pick/target mid-route → re-match if it did.
+            rematchOnSettingsChange()
         }.launchIn(scope)
         // Feed the render-prefs holder so the data fields don't each open their own DataStore
         // subscription just to read gapDisplay (single writer here; fields are readers).
@@ -485,6 +521,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // One-time backlog sweep: clean the EXISTING library once (off-Main), then stamp the epoch so it
         // never re-runs. Gated on autoTidy; sweep() has its own hard cap for a degenerate library.
         scope.launch(Dispatchers.IO) {
+            // Pay the index's lazy one-time costs (legacy rebuild) and repair index/file drift NOW,
+            // at service start off-Main — not under the indexLock on the FIRST route match of a ride.
+            runCatching { trackStore().prewarmAndReconcile() }
+                .onFailure { Timber.w(it, "KVP index prewarm failed") }
+            // Prune aggregate blobs for routes not ridden in ages (renamed/deleted routes pile up).
+            runCatching { aggregateStore().sweep() }
+                .onFailure { Timber.w(it, "KVP aggregate sweep failed") }
             val cfg = configManager.loadConfigFlow().first()
             if (cfg.autoTidy && cfg.tidySweepEpoch == 0L) {
                 val archived = runCatching { trackStore().sweep() }.getOrElse { e ->
@@ -604,6 +647,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             .distinctUntilChanged()
             .onEach { profile ->
                 activeProfileId = profile.id
+                // A profile switch can change the RESOLVED mode/pick/target mid-route (per-profile
+                // overrides) → re-match if it did, so the new profile's settings apply immediately.
+                rematchOnSettingsChange()
                 runCatching {
                     configManager.updateConfig { cfg ->
                         cfg.copy(profileSettings = learnProfile(cfg.profileSettings, profile.id, profile.name))
@@ -663,9 +709,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // Resolve the icon for the desired marker up front so an icon/size change can both force a
             // re-emit AND trigger a Hide+Show (a bare same-id re-emit only moves, doesn't swap drawable).
             val cfg = activeConfig.value
+            // The on-map ghost icon can be a per-profile override — resolve it against the active
+            // profile (a small roster scan + one short-lived allocation; trivial at ~5 Hz).
+            val ghostIcon = resolveProfile(cfg, activeProfileId).ghostIcon
             // Size follows the map zoom automatically (Symbol.Icon has no size field; we swap S/M/L).
             // A zoom change flips iconRes → iconChanged below → Hide+Show, so the icon rescales promptly.
-            val iconRes = if (next != null) ghostIconRes(cfg.ghostIcon, ghostSizeForZoom(currentMapZoom)) else 0
+            val iconRes = if (next != null) ghostIconRes(ghostIcon, ghostSizeForZoom(currentMapZoom)) else 0
             val iconChanged = next != null && lastIconRes != 0 && iconRes != lastIconRes
             // Heartbeat: if the current marker hasn't moved enough to re-show on its own, force a
             // re-assert once the heartbeat window elapses so a host map redraw can't drop it for good.
@@ -679,7 +728,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     if (iconChanged) em.onNext(HideSymbols(listOf(GHOST_SYMBOL_ID)))
                     // Rotate all directional icons (arrow, ghost, cyclist) to the route heading.
                     // DOT is rotationally symmetric so stays at 0°.
-                    val orientation = if (ghostIconRotates(cfg.ghostIcon)) m.bearingDeg else 0.0f
+                    val orientation = if (ghostIconRotates(ghostIcon)) m.bearingDeg else 0.0f
                     em.onNext(
                         ShowSymbols(
                             listOf(Symbol.Icon(GHOST_SYMBOL_ID, m.lat, m.lng, iconRes, orientation)),
@@ -727,11 +776,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         if (mapLoopJob?.isActive == true) return
         mapLoopJob = scope.launch(Dispatchers.Default) {
             while (isActive) {
-                // Back off to a slow poll when there is no ghost to show: saves ~4 wakeups/s in VP
-                // mode or before the first route match. When mapGhostState becomes non-null the next
-                // slow delay completes (≤ MAP_IDLE_REFRESH_MS) and the loop switches to the fast rate.
+                // Back off to a slow poll when there is no ghost to show (VP mode / before the first
+                // route match) OR while the ride is paused — a paused ghost is frozen in place
+                // (extrapMs = 0 below), so the ~5 Hz rate buys nothing during a café stop and just
+                // burns battery. The next slow delay (≤ MAP_IDLE_REFRESH_MS) restores the fast rate.
                 val s = mapGhostState
-                delay(if (s == null) MAP_IDLE_REFRESH_MS else mapRefreshMs)
+                delay(if (s == null || ridePaused) MAP_IDLE_REFRESH_MS else mapRefreshMs)
                 val s2 = mapGhostState
                 if (s2 == null || mapEmitter == null || !activeConfig.value.showGhostOnMap) {
                     publishGhostMarker(null) // hide (idempotent — no-op when already hidden)
@@ -759,6 +809,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
      */
     private fun onNavigationState(event: OnNavigationState) {
         val state = event.state
+        // Keep the latest event so rematchOnSettingsChange() can replay it after a mid-ride settings
+        // change, and stamp the resolved-settings signature this gate/match decision is based on.
+        lastNavEvent = event
+        val effNow = resolveProfile(activeConfig.value, activeProfileId)
+        lastMatchSig = matchSignature(effNow)
         // Compact + deduped: the host re-emits NavigatingRoute MANY times (computing climbs/progress);
         // logging the full object (polyline + climbs arrays) on every re-emit floods the log. Summarise,
         // and log only when the summary changes. The dedup key avoids String.format (which allocates a
@@ -779,7 +834,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             }
             Timber.d("nav=$logMsg")
         }
-        if (state is OnNavigationState.NavigationState.NavigatingRoute && activeConfig.value.raceEnabled) {
+        if (state is OnNavigationState.NavigationState.NavigatingRoute &&
+            // Gate on BOTH the mode (raceEnabled) AND eff.active (master kill-switch + per-profile
+            // enable). Without the eff.active check the heavy match (polyline decode + candidate file IO
+            // + O(n) SegmentMatcher) would run on a disabled profile or while the master switch is off —
+            // the tick would then just discard it. Honors the "master off ⇒ fully inert" contract.
+            effNow.active && effNow.raceEnabled
+        ) {
             // Track REJOIN state live (the host re-emits NavigatingRoute as it computes a rejoin, so this
             // updates even though the heavy match below dedups on the polyline). A non-null rejoin means
             // the rider is off-route being guided back → the route position is not trustworthy; the tick
@@ -847,24 +908,50 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // A superseding route should cancel this stale match promptly: bail before the
                     // expensive match if we've been cancelled.
                     currentCoroutineContext().ensureActive()
-                    val matched = SegmentMatcher.match(
-                        path,
-                        tracks,
-                        activeConfig.value.ghostPick,
-                        SegmentMatcher.Params(maxTracks = maxTracks),
-                    )
+                    // Resolve the active profile once: mode/pick/target may all be per-profile overrides.
+                    val eff = resolveProfile(activeConfig.value, activeProfileId)
+                    val pick = eff.ghostPick
+                    val matched = if (pick == GhostPick.AVERAGE) {
+                        // AVERAGE races the per-route EMA aggregate where it is raceable, and the rider's
+                        // BEST everywhere else. Keyed on the DECODED-POLYLINE length — deterministic for a
+                        // route file, unlike state.routeDistance which can be NaN on early emissions and
+                        // drift across recalcs; an unstable length would round to a different key on a
+                        // later ride and silently orphan the aggregate. The ride-end save keys on the same
+                        // rm.path.totalM.
+                        val avgSegs = aggregateStore().load(routeKeyOf(state.name, path.totalM))
+                            ?.toLiveSegments().orEmpty()
+                        // ALWAYS run the BEST match too: the aggregate covers only stretches with
+                        // ≥AGG_MIN_LAPS laps, and falling to the bare Ghost-Pace fill on stretches where
+                        // the rider HAS recorded history would throw that history away. Warmup (no
+                        // aggregate at all) is then just the all-BEST case of the same merge.
+                        val bestSegs = SegmentMatcher.match(path, tracks, GhostPick.BEST, SegmentMatcher.Params(maxTracks = maxTracks))
+                        if (avgSegs.isEmpty()) {
+                            Timber.i("KVP avg: no raceable aggregate for '${state.name}' yet (needs ≥$AGG_MIN_LAPS laps from the route start) — racing BEST while it warms up")
+                        } else {
+                            Timber.i("KVP avg: racing the aggregate on ${avgSegs.size} stretch(es), BEST on the rest")
+                        }
+                        // The aggregate wins where it is raceable; BEST pieces are TRIMMED around it (not
+                        // dropped whole) so partial overlap can't discard a long recorded stretch.
+                        RouteGhost.overlay(avgSegs, bestSegs)
+                    } else {
+                        SegmentMatcher.match(path, tracks, pick, SegmentMatcher.Params(maxTracks = maxTracks))
+                    }
                     // Build the ONE continuous whole-route ghost (recorded stretches + VP-pace fills).
                     // Fill pace = the always-present VP target (default 12 km/h), so the ghost always
                     // flows across gaps with no recorded history.
                     // NOTE: the per-profile target is snapshotted at match time; a mid-route profile
                     // change takes effect only after a re-match (nav state change). The live per-tick gap
                     // still uses the current target via eff.targetSpeedMs — only the VP-fill pace is snapshotted.
-                    val routeGhost = RouteGhost.build(path.totalM, matched, resolveProfile(activeConfig.value, activeProfileId).targetSpeedMs)
+                    val routeGhost = RouteGhost.build(path.totalM, matched, eff.targetSpeedMs)
                     // Single atomic publish: path + segments + ghost together so the tick never sees a
                     // NEW path paired with OLD segments. Guarded: only publish if a newer route has not
-                    // superseded us (lastMatchedPolyline still ours).
+                    // superseded us (lastMatchedPolyline still ours). The `mine` claim is the polyline
+                    // STRING, so a settings-change re-match of the SAME route re-claims an equal string —
+                    // the ensureActive() is what stops this (cancelled) match from publishing a result
+                    // built under the OLD settings over the replacement's.
+                    currentCoroutineContext().ensureActive()
                     if (lastMatchedPolyline == mine) {
-                        routeMode = RouteMode(path, matched, routeGhost, state.routeDistance)
+                        routeMode = RouteMode(path, state.name, matched, routeGhost, state.routeDistance)
                         // Diagnostic for the scale question: the Karoo's routeDistance (the scale that
                         // DISTANCE_TO_DESTINATION is measured against) vs the decoded-polyline length (the
                         // scale segments + the ghost curve live on). A large delta means routeDist needs
@@ -902,6 +989,40 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 }
             }
         }
+    }
+
+    /**
+     * The resolved settings the route gate + match depend on; a change makes the current match stale.
+     * A small value object (not a string) so the per-nav-emission stamp allocates next to nothing.
+     * targetSpeedMs is deliberately EXCLUDED: it only snapshots the VP-FILL pace (the live gap reads
+     * the current target every tick), and including it would clear + fully re-match the route on
+     * every keystroke while the rider edits the Ghost Pace mid-navigation — the stale fill pace until
+     * the next route load is the long-standing, documented trade (see the match NOTE above).
+     */
+    private data class MatchSig(val active: Boolean, val raceEnabled: Boolean, val pick: GhostPick)
+
+    private fun matchSignature(eff: EffectiveProfile): MatchSig =
+        MatchSig(eff.active, eff.raceEnabled, eff.ghostPick)
+
+    /**
+     * Re-evaluates the route gate/match when the RESOLVED settings change mid-ride (a config edit or a
+     * ride-profile switch). The match snapshots the mode/pick/fill-target and dedups re-emits on the
+     * polyline, so without this a mid-ride change keeps serving the OLD settings until the next route
+     * load: a switch to a Fixed-pace profile would keep racing the old segments, and a pick change
+     * (Best→Last→Average) would never apply. On a real change: drop the claim + route mode and replay
+     * the latest nav event so the gate and match re-run under the new settings (a now-closed gate means
+     * the clear simply stands and the tick falls back to ① VP). Runs on [scope] (Main), same as
+     * onNavigationState, so there is no race with the gate's own signature stamp.
+     */
+    private fun rematchOnSettingsChange() {
+        val sig = matchSignature(resolveProfile(activeConfig.value, activeProfileId))
+        if (sig == lastMatchSig) return
+        lastMatchSig = sig
+        // Nothing claimed/stashed ⇒ nothing the change could have staled; the next nav event resolves fresh.
+        if (routeMode == null && lastMatchedPolyline == null && pendingNavState == null) return
+        Timber.i("KVP settings changed mid-route → re-matching ($sig)")
+        clearRouteMode()
+        lastNavEvent?.let { onNavigationState(it) }
     }
 
     /** Clears ② route mode so the tick falls back to ① Ghost Pace behavior. */
@@ -1051,6 +1172,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // exceed physical distance ridden, so a jump far beyond it (a loop snap) is rejected. null until
         // the first good fix; both are updated together only on a trustworthy (non-spurious) tick.
         var distMAtLastGoodM: Double? = null
+        // Highest route distance (m) already captured into [lapAggBuffer] this route. We append one
+        // average-ghost sample per ~AGG_STEP_M of forward progress, so the buffer is bounded to
+        // routeLen/step entries regardless of ride duration. Reset (with the buffer) on a route change.
+        var lastBufferedRouteDist = Double.NEGATIVE_INFINITY
         // Throttle for the per-tick route-mode diagnostic log (≤ ~once per DIAG_LOG_MS). Kept local
         // to the tick so it resets per ride. Set to 0 to disable.
         var lastDiagLogMs = 0L
@@ -1058,6 +1183,17 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // One-shot guard for the "GPS lost" alert: set true when fired, re-armed to false when GPS
         // recovers (coast back to LIVE). Local to the tick so it resets per ride.
         var gpsAlertFired = false
+        // Previous tick's moving state (route mode). Drives the stationary→moving edge that re-stamps
+        // lastDestChangeMs: a stationary rider's remaining legitimately never changes, so without the
+        // re-stamp the first moving tick after a ≥GPS_ALERT_S stop would read the whole stop duration
+        // as route-position staleness and fire a spurious "GPS lost" alert on every resume.
+        var wasMoving = false
+        // First-fix confirmation candidate for the route position (pos, odometer at that pos). The
+        // odometric plausibility filter needs a trusted baseline and D0 is latched ONCE (invariant), so
+        // the very first on-route fix — which can be a wrong-pass snap on a self-intersecting route —
+        // must be confirmed by a second, odometrically-consistent fix before anything trusts it.
+        var d0CandPos: Double? = null
+        var d0CandOdo: Double? = null
         // Start-distance of the recorded stretch the rider was on at the previous tick — a stable
         // per-route key. Edge-triggers the "segment entry" alert exactly once on entry (and again on
         // crossing into a DIFFERENT stretch), never every tick while on it. null = between segments /
@@ -1303,7 +1439,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             firstMoveElapsedS = null
                             lastGoodRouteDistM = null
                             distMAtLastGoodM = null
+                            d0CandPos = null
+                            d0CandOdo = null
                             rideDistAtRouteStartM = distM
+                            // New route ⇒ start a fresh average-ghost lap capture (the old route's
+                            // partial samples must not fold into this one's aggregate).
+                            lapAggBuffer.clear()
+                            lapAggTarget = null
+                            lastBufferedRouteDist = Double.NEGATIVE_INFINITY
                             // Distrust the OLD route's remaining until destJob emits the NEW route's value:
                             // routeDistanceM flips with the path (atomic in RouteMode) but lastDistToDestM is
                             // a separate stream, so pairing new routeLen with old remaining for a tick would
@@ -1340,9 +1483,28 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // remaining-to-destination. This makes a LOOP unambiguous (the Karoo tracks which
                         // pass you're on) and means a cached/default pre-lock fix can never place us — when
                         // there is no real on-route position the Karoo reports ON_ROUTE=false / no
-                        // remaining, and we hold ---. routeDistance comes from the NavigatingRoute event
-                        // (falls back to the decoded polyline length).
-                        val routeLenM = rm.routeDistanceM.takeIf { it.isFinite() && it > 0.0 } ?: rm.path.totalM
+                        // remaining, and we hold ---.
+                        //
+                        // TWO SCALES. remaining-to-destination is measured against the Karoo's OWN
+                        // routeDistance (karooLenM), but the matched segments + the ghost curve live on the
+                        // DECODED-POLYLINE scale (rm.path.totalM) — the two can differ by a few percent
+                        // (different smoothing/snapping). Positions derived from `karooLen − remaining` are
+                        // therefore RESCALED to the polyline scale before they're compared to segment bounds
+                        // or fed to the ghost, so a 2 % skew can't shift segment boundaries by kilometres on
+                        // a long route. An absurd ratio (outside 0.5–2.0) means one length is garbage —
+                        // then we trust the values unscaled rather than amplify the error. All downstream
+                        // route positions (D0, the odometric filter, lap capture) are on the polyline scale,
+                        // which also matches the physical-odometer metres the filter compares against.
+                        val routeLenM = rm.path.totalM
+                        // Ratio guard: an absurd Karoo length (a garbage/stale value) must not be trusted
+                        // AT ALL — neither for the scale factor nor for the `karooLen − remaining`
+                        // subtraction (a 100 m karooLen on a 50 km route would pin routeDist at 0 and the
+                        // implausible-remaining guard below would hold D0 forever). Out of band ⇒ fall back
+                        // to the polyline length entirely (factor 1.0).
+                        val karooLenM = rm.routeDistanceM
+                            .takeIf { it.isFinite() && it > 0.0 && routeLenM / it in 0.5..2.0 }
+                            ?: routeLenM
+                        val karooToPoly = if (karooLenM > 0.0) routeLenM / karooLenM else 1.0
                         val remainingM = lastDistToDestM
                         // Trust the position only when on-route AND not mid-rejoin (a non-null rejoin means
                         // the Karoo is guiding the rider back; its remaining is then rejoin-relative, not a
@@ -1365,8 +1527,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             // best available estimate so the ghost and gap can start immediately.
                             val rejoinDistM = lastRejoinDistM
                             val estimatedRoutePos: Double? = if (lastRejoinActive && rejoinDistM.isFinite() && remainingM.isFinite()) {
-                                // Karoo has computed rejoin path: use rejoin-corrected formula.
-                                val est = routeLenM - (remainingM - rejoinDistM)
+                                // Karoo has computed rejoin path: rejoin-corrected formula (Karoo scale),
+                                // rescaled to the polyline scale like every route position.
+                                val est = (karooLenM - (remainingM - rejoinDistM)) * karooToPoly
                                 est.takeIf { it.isFinite() && it >= (lastGoodRouteDistM ?: 0.0) && it <= routeLenM }
                             } else null
 
@@ -1379,7 +1542,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             if (ghostStartElapsedS == null && frozenPos == null && lastRejoinActive &&
                                 !rejoinDistM.isFinite() && remainingM.isFinite()
                             ) {
-                                val provisional = (routeLenM - remainingM).coerceIn(0.0, routeLenM)
+                                val provisional = ((karooLenM - remainingM) * karooToPoly).coerceIn(0.0, routeLenM)
                                 if (provisional.isFinite()) frozenPos = provisional
                             }
 
@@ -1433,7 +1596,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             holdGap()
                             return@runCatching
                         }
-                        val routeDist = (routeLenM - remainingM).coerceIn(0.0, routeLenM)
+                        val routeDist = ((karooLenM - remainingM) * karooToPoly).coerceIn(0.0, routeLenM)
                         // Reject an IMPLAUSIBLE remaining before latching the one-shot D0 (a wrong D0 is
                         // invariant → wrong for the whole route). Two cases, both of which clamp routeDist to
                         // an extreme:
@@ -1443,14 +1606,40 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         //  - remaining > routeLen → routeDist clamps to 0 ("at the start"): a rejoin-relative
                         //    remaining the rejoin gate missed by a tick, or a transient scale skew at the start.
                         // Either way hold --- until a plausible value arrives; firstMove gates the race anyway.
-                        if (routeStartDistM == null && (remainingM < 1.0 || remainingM > routeLenM)) {
+                        if (routeStartDistM == null && (remainingM < 1.0 || remainingM > karooLenM)) {
                             val nowMs = System.currentTimeMillis()
                             if (nowMs - lastDiagLogMs >= diagLogMs) {
                                 lastDiagLogMs = nowMs
-                                Timber.d("KVP tick route: implausible remaining=${"%.0f".format(remainingM)} (routeLen=${"%.0f".format(routeLenM)}) — D0 held until it settles")
+                                Timber.d("KVP tick route: implausible remaining=${"%.0f".format(remainingM)} (karooLen=${"%.0f".format(karooLenM)}) — D0 held until it settles")
                             }
                             holdGap()
                             return@runCatching
+                        }
+                        // FIRST-FIX CONFIRMATION. The odometric filter below needs a trusted baseline, and
+                        // D0 is latched ONCE (invariant for the whole route) — but the very FIRST on-route
+                        // fix can be a wrong-pass snap on a self-intersecting route (the filter can't catch
+                        // it: there is no baseline yet). Require two consecutive fixes that agree
+                        // odometrically before trusting anything: tick 1 stores a candidate, tick 2 confirms
+                        // it (or replaces it and waits one more). Costs one tick of --- at route
+                        // acquisition; firstMove gates the race anyway, so a stationary start loses nothing.
+                        if (lastGoodRouteDistM == null && routeStartDistM == null) {
+                            val candPos = d0CandPos
+                            val candOdo = d0CandOdo
+                            val consistent = candPos != null && candOdo != null &&
+                                kotlin.math.abs(routeDist - candPos) <=
+                                (distM - candOdo).coerceAtLeast(0.0) + REROUTE_JUMP_SLACK_M
+                            if (!consistent) {
+                                d0CandPos = routeDist
+                                d0CandOdo = distM
+                                val nowMs = System.currentTimeMillis()
+                                if (nowMs - lastDiagLogMs >= diagLogMs) {
+                                    lastDiagLogMs = nowMs
+                                    Timber.d("KVP tick route: first fix at ${"%.0f".format(routeDist)}m — awaiting confirmation")
+                                }
+                                holdGap()
+                                return@runCatching
+                            }
+                            // Confirmed: fall through — this tick's routeDist becomes the baseline below.
                         }
                         // ODOMETRIC PLAUSIBILITY FILTER. Route progress can NEVER exceed the physical
                         // distance ridden (the route is ≤ the path travelled). On a self-intersecting loop
@@ -1478,6 +1667,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // versa). While MOVING, if the Karoo's remaining stops changing the route fix is
                         // lost; a stationary rider's unchanged remaining is legitimate, so gate on movement.
                         val moving = speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS
+                        // A long stop leaves lastDestChangeMs at its pre-stop value (a stationary rider's
+                        // remaining legitimately never changes), so without this the FIRST moving tick after
+                        // a ≥GPS_ALERT_S stop would read the whole stop as staleness → a spurious "GPS lost"
+                        // alert + a held gap on every resume. Re-stamp on the stationary→moving edge:
+                        // staleness then measures only time MOVING without a route-position change — the
+                        // actual loss signal.
+                        if (moving && !wasMoving) lastDestChangeMs = System.currentTimeMillis()
+                        wasMoving = moving
                         val routePosStaleS = if (moving && lastDestChangeMs > 0L) {
                             ((System.currentTimeMillis() - lastDestChangeMs) / 1000.0).coerceAtLeast(0.0)
                         } else {
@@ -1517,6 +1714,23 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 "KVP race anchored: firstMove=${"%.0f".format(moveStart)}s D0=${"%.0f".format(d0)}m " +
                                     "ghostStart=${"%.0f".format(ghostStartElapsedS!!)}s @ routeDist=${"%.0f".format(effRouteDist)}m elapsed=${"%.0f".format(elapsedS)}s",
                             )
+                            // Average-ghost contribution gate, decided ONCE at the anchor: only a lap that
+                            // started at the route start (D0 ≈ 0) folds into the aggregate, so its time
+                            // origin lines up with other laps'. A mid-route join leaves the target null
+                            // (skip). Key + grid axis use the DECODED-POLYLINE length — the same
+                            // deterministic length the match-time aggregate load keys on, so save and
+                            // load can never round to different keys.
+                            lapAggTarget = if (d0 <= AGG_START_TOL_M) {
+                                LapAggTarget(routeKeyOf(rm.routeName, rm.path.totalM), rm.routeName, rm.path.totalM)
+                            } else {
+                                // Logged prominently: "my average never builds" is otherwise undiagnosable —
+                                // a rider who always joins this far past the start NEVER feeds the average.
+                                Timber.i(
+                                    "KVP avg: this lap will NOT update the average — started ${"%.0f".format(d0)}m past " +
+                                        "the route start (tolerance ${AGG_START_TOL_M.toInt()}m)",
+                                )
+                                null
+                            }
                         }
                         // ghostElapsed = (elapsedS − firstMove) + rg.timeAt(D0): ghost at D0 at race start,
                         // then advances on real elapsed time (frozen only on pause — ELAPSED_TIME stops).
@@ -1538,6 +1752,17 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         if (!spurious) {
                             lastGoodRouteDistM = effRouteDist
                             distMAtLastGoodM = distM
+                        }
+                        // Average-ghost lap capture: one sample per ~AGG_STEP_M of forward route progress,
+                        // on the SAME fair-start clock as the live gap (riderTime = elapsedS − firstMove), so
+                        // the stored average lines up with how the live race is measured. Only on
+                        // trustworthy ticks and only when this lap qualifies (started at the route start, so
+                        // lapAggTarget != null). moveStart is non-null here — the race is anchored.
+                        if (!spurious && lapAggTarget != null &&
+                            effRouteDist > lastBufferedRouteDist + AGG_STEP_M
+                        ) {
+                            lapAggBuffer.add(doubleArrayOf(effRouteDist, elapsedS - moveStart!!))
+                            lastBufferedRouteDist = effRouteDist
                         }
                         run {
                             val nowMs = System.currentTimeMillis()
@@ -1704,6 +1929,22 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     }
 
     /**
+     * Returns the [AggregateStore] for the CURRENT resolved aggregates dir, rebuilt whenever the dir
+     * changes (all-files access granted since onCreate). Both call sites — the route-match aggregate
+     * read and the ride-end EMA update — run off the main thread, so the aggregatesDir() file IO is
+     * safe here.
+     */
+    @Synchronized
+    private fun aggregateStore(): AggregateStore {
+        val dir = TrackStorage.aggregatesDir(applicationContext)
+        if (aggregateStoreCache == null || aggregateStoreDir != dir) {
+            aggregateStoreCache = AggregateStore(dir)
+            aggregateStoreDir = dir
+        }
+        return aggregateStoreCache!!
+    }
+
+    /**
      * Called on [RideState.Idle]: persists the just-recorded ride (if it produced >= 2 decimated
      * points) to the [TrackStore] on IO, then resets the recorder for the next ride. The id and
      * startedAtEpoch are the wall-clock epoch captured at Recording start.
@@ -1711,6 +1952,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun finishAndSaveRecording() {
         val started = recordingStartedEpoch
         val track = recorder.build(id = started.toString(), startedAtEpoch = started)
+        // Snapshot + clear the average-ghost lap capture now. The tick is already stopped+joined (the
+        // Idle handler does stopTickAndJoin() before this), so there is no concurrent writer; the copy
+        // gives the IO update below a stable view and resets capture for the next ride.
+        val lapTarget = lapAggTarget
+        val lapSamples: List<DoubleArray> = synchronized(lapAggBuffer) { ArrayList(lapAggBuffer) }
+        lapAggBuffer.clear()
+        lapAggTarget = null
         if (track == null) {
             // Too few decimated points (a very short / stationary ride) → nothing recorded, so this ride
             // won't become a future ghost. Logged so "my ride didn't become a ghost" is diagnosable.
@@ -1737,6 +1985,23 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     } else {
                         Timber.i("KVP recording: track ${track.id} skipped (sourceKey ${track.sourceKey} already stored)")
                     }
+                }
+            }
+        }
+        // Fold this lap into the per-route average-ghost aggregate, INDEPENDENT of the track save (so it
+        // survives the track-library prune). Only a qualifying lap — key set at the anchor because the
+        // rider started at the route start — with enough samples updates it.
+        if (lapTarget != null && lapSamples.size >= 2) {
+            scope.launch(Dispatchers.IO) {
+                withContext(NonCancellable) {
+                    runCatching {
+                        val aggStore = aggregateStore()
+                        val updated = updateAggregate(
+                            aggStore.load(lapTarget.key), lapTarget.key, lapTarget.name, lapTarget.lenM, lapSamples,
+                        )
+                        aggStore.save(updated)
+                        Timber.i("KVP avg: updated aggregate ${lapTarget.key} (${lapSamples.size} samples)")
+                    }.onFailure { Timber.w(it, "KVP avg: aggregate update failed for ${lapTarget.key}") }
                 }
             }
         }

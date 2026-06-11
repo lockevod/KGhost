@@ -112,4 +112,59 @@ class RouteGhostTest {
     @Test fun `average segment speed is null with no segments`() {
         assertNull(RouteGhost.averageSegmentSpeedM(emptyList()))
     }
+
+    // ── overlay ──────────────────────────────────────────────────────────────
+
+    @Test fun `overlay with no primary returns secondary sorted`() {
+        val s1 = seg(500.0, 1000.0, ghost(0.0 to 0.0, 500.0 to 50.0))
+        val s2 = seg(0.0, 400.0, ghost(0.0 to 0.0, 400.0 to 40.0))
+        val out = RouteGhost.overlay(emptyList(), listOf(s1, s2))
+        assertEquals(listOf(s2, s1), out)
+    }
+
+    @Test fun `overlay trims a partially-overlapped secondary instead of dropping it`() {
+        // Primary (AVG) covers [0,500]; secondary (BEST) spans [450,5000] at a constant 10 m/s.
+        // The non-overlapped [500,5000] must survive as a trimmed piece — 4.5 km of history.
+        val avg = seg(0.0, 500.0, ghost(0.0 to 0.0, 500.0 to 100.0))
+        val best = seg(450.0, 5000.0, ghost(0.0 to 0.0, 4550.0 to 455.0))
+        val out = RouteGhost.overlay(listOf(avg), listOf(best))
+        assertEquals(2, out.size)
+        assertEquals(avg, out[0])
+        val piece = out[1]
+        assertEquals(500.0, piece.routeStartM, 1e-6)
+        assertEquals(5000.0, piece.routeEndM, 1e-6)
+        // The piece keeps the recorded pace: 4500 m at 10 m/s = 450 s, re-based to t=0.
+        assertEquals(450.0, piece.ghost.totalTimeS, 1e-6)
+        assertEquals(0.0, piece.ghost.samples.first().timeS, 1e-9)
+    }
+
+    @Test fun `overlay keeps the secondary tail when primary is contained inside it`() {
+        // Secondary [0,2000] fully contains primary [800,1200] → two pieces: [0,800] and [1200,2000].
+        val avg = seg(800.0, 1200.0, ghost(0.0 to 0.0, 400.0 to 80.0))
+        val best = seg(0.0, 2000.0, ghost(0.0 to 0.0, 2000.0 to 200.0))
+        val out = RouteGhost.overlay(listOf(avg), listOf(best))
+        assertEquals(3, out.size)
+        assertEquals(0.0, out[0].routeStartM, 1e-6)
+        assertEquals(800.0, out[0].routeEndM, 1e-6)
+        assertEquals(80.0, out[0].ghost.totalTimeS, 1e-6) // 800 m @ 10 m/s
+        assertEquals(avg, out[1])
+        assertEquals(1200.0, out[2].routeStartM, 1e-6)
+        assertEquals(2000.0, out[2].routeEndM, 1e-6)
+        assertEquals(80.0, out[2].ghost.totalTimeS, 1e-6) // 800 m @ 10 m/s
+    }
+
+    @Test fun `overlay drops sliver pieces`() {
+        // Secondary [450,650]: the non-overlapped piece [500,650] is 150 m < the 200 m minimum.
+        val avg = seg(0.0, 500.0, ghost(0.0 to 0.0, 500.0 to 100.0))
+        val best = seg(450.0, 650.0, ghost(0.0 to 0.0, 200.0 to 20.0))
+        val out = RouteGhost.overlay(listOf(avg), listOf(best))
+        assertEquals(listOf(avg), out)
+    }
+
+    @Test fun `overlay leaves a non-overlapping secondary untouched`() {
+        val avg = seg(0.0, 500.0, ghost(0.0 to 0.0, 500.0 to 100.0))
+        val best = seg(600.0, 1600.0, ghost(0.0 to 0.0, 1000.0 to 100.0))
+        val out = RouteGhost.overlay(listOf(avg), listOf(best))
+        assertEquals(listOf(avg, best), out)
+    }
 }

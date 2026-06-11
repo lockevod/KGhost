@@ -85,13 +85,18 @@ object RouteGhost {
                 continue
             }
 
-            // Emit each internal ghost sample, scaled onto the route span. Skip the first (it is the
-            // segment-relative origin and coincides with the cursor sample already added).
+            // Emit the INTERIOR ghost samples scaled onto the route span, then the segment end as an
+            // exact, authoritative sample. Skip the first (the segment-relative origin coincides with
+            // the cursor sample already added) and the last (replaced by the exact end sample) — the
+            // old clamp-into-span approach could land a float-dust interior sample ON endM, which made
+            // addSample silently drop the true end sample and left the boundary carrying an interior
+            // time while cumTimeS had already advanced past it (a small time cliff at the join).
             val gs = seg.ghost.samples
-            for (i in 1 until gs.size) {
-                val rd = (cursorM + gs[i].distanceM * scale).coerceAtMost(endM)
-                addSample(samples, rd, cumTimeS + gs[i].timeS)
+            for (i in 1 until gs.size - 1) {
+                val rd = cursorM + gs[i].distanceM * scale
+                if (rd < endM) addSample(samples, rd, cumTimeS + gs[i].timeS)
             }
+            addSample(samples, endM, cumTimeS + seg.ghost.totalTimeS)
             cumTimeS += seg.ghost.totalTimeS
             cursorM = endM
         }
@@ -124,6 +129,66 @@ object RouteGhost {
             time += s.ghost.totalTimeS
         }
         return if (time > 0.0 && dist > 0.0) dist / time else null
+    }
+
+    /**
+     * Shortest [overlay] piece worth racing: a sliver between two primary segments races badly (the
+     * gap jumps as the ghost crosses it in seconds) and is better left to the fill pace.
+     */
+    private const val MIN_OVERLAY_PIECE_M = 200.0
+
+    /**
+     * Overlays [primary] segments (they always win) on [secondary]: returns primary plus the pieces
+     * of each secondary segment that do NOT overlap any primary segment, TRIMMED via their ghost
+     * curves — so a secondary ride's history is never discarded whole just because a stretch of it
+     * is covered by a primary segment (e.g. the AVERAGE aggregate covers [0,500 m] of a BEST ride
+     * spanning [450,5000 m]: the rider keeps racing BEST on [500,5000 m]). Pieces shorter than
+     * [MIN_OVERLAY_PIECE_M] are dropped. Output sorted by route start, as [build] expects.
+     */
+    fun overlay(primary: List<LiveSegment>, secondary: List<LiveSegment>): List<LiveSegment> {
+        if (primary.isEmpty()) return secondary.sortedBy { it.routeStartM }
+        val out = ArrayList(primary)
+        val prim = primary.sortedBy { it.routeStartM }
+        for (sec in secondary) {
+            var cursor = sec.routeStartM
+            for (p in prim) {
+                if (p.routeEndM <= cursor) continue
+                if (p.routeStartM >= sec.routeEndM) break
+                if (p.routeStartM > cursor) trimSegment(sec, cursor, p.routeStartM)?.let(out::add)
+                cursor = maxOf(cursor, p.routeEndM)
+            }
+            if (cursor < sec.routeEndM) trimSegment(sec, cursor, sec.routeEndM)?.let(out::add)
+        }
+        return out.sortedBy { it.routeStartM }
+    }
+
+    /**
+     * Cuts [seg] down to route interval `[fromM, toM]`, re-basing its ghost curve to the cut (the
+     * piece starts at distance 0 / time 0, interior samples keep the recorded pace). Returns null
+     * when the piece is shorter than [MIN_OVERLAY_PIECE_M] or degenerate.
+     */
+    private fun trimSegment(seg: LiveSegment, fromM: Double, toM: Double): LiveSegment? {
+        val a = fromM.coerceAtLeast(seg.routeStartM)
+        val b = toM.coerceAtMost(seg.routeEndM)
+        if (b - a < MIN_OVERLAY_PIECE_M) return null
+        if (a <= seg.routeStartM && b >= seg.routeEndM) return seg
+        val routeSpan = seg.routeEndM - seg.routeStartM
+        if (routeSpan <= 0.0) return null
+        // Map route metres → the curve's own (track) distance axis.
+        val scale = seg.ghost.totalDistanceM / routeSpan
+        val d0 = (a - seg.routeStartM) * scale
+        val d1 = (b - seg.routeStartM) * scale
+        val t0 = seg.ghost.timeAt(d0)
+        val samples = ArrayList<GhostSample>()
+        samples.add(GhostSample(0.0, 0.0))
+        for (s in seg.ghost.samples) {
+            if (s.distanceM <= d0 || s.distanceM >= d1) continue
+            val t = (s.timeS - t0).coerceAtLeast(samples.last().timeS)
+            addSample(samples, s.distanceM - d0, t)
+        }
+        addSample(samples, d1 - d0, (seg.ghost.timeAt(d1) - t0).coerceAtLeast(samples.last().timeS))
+        if (samples.size < 2 || samples.last().timeS <= 0.0) return null
+        return LiveSegment(a, b, GhostCurve(samples), seg.ghostLabel)
     }
 
     /** Appends a sample only when it strictly advances distance ([GhostCurve] requires that). */

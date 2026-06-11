@@ -69,10 +69,16 @@
     <string name="race_description">Race against your past self on stretches of the route you have ridden before.</string>
     <string name="race_enabled_label">Race Your Own</string>
     <string name="race_enabled_description">Enable racing against recorded history when a matching route is loaded.</string>
+    <string name="race_mode_label">How you race</string>
+    <string name="race_mode_description">Race a constant target pace, or your own recorded rides on the route. Picking Fixed pace disables the Your-rides options below.</string>
+    <string name="race_mode_fixed">Fixed pace</string>
+    <string name="race_mode_yours">Your rides</string>
     <string name="race_ghost_pick_label">Ghost to race</string>
     <string name="race_ghost_pick_description">Which past ride to use when multiple tracks cover the same stretch.</string>
     <string name="race_ghost_best">Best (PR)</string>
     <string name="race_ghost_last">Last</string>
+    <string name="race_ghost_average">Average</string>
+    <string name="race_ghost_average_hint">Average races the recency-weighted mean of your recent laps of the loaded route (long stops don\'t count). It needs a couple of laps started at the route start before it kicks in; stretches without enough laps race your Best instead. Only the first lap of each ride counts.</string>
     <string name="race_auto_record_label">Record ride history</string>
     <string name="race_auto_record_description">Automatically save each ride as a GPS track for future ghost comparison.</string>
     <string name="race_recorded_tracks">Recorded tracks: %1$d</string>

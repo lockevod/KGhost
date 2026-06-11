@@ -72,6 +72,41 @@ class TrackStore(private val dir: File) {
     fun knownSourceKeys(): Set<String> = synchronized(indexLock) { readSourceKeys() }
 
     /**
+     * Pays the index's LAZY one-time costs up front and repairs index/file drift. Call from service
+     * startup (off Main) so neither cost lands on the first route match of a ride:
+     *  1. [readPathCellSnapshot] runs the one-time legacy bbox→path-cell rebuild if still pending —
+     *     on a freshly-imported library that rebuild parses every track and would otherwise block
+     *     the first match for seconds under [indexLock].
+     *  2. Any live `<id>.json` missing from the index — a crash between the track write and the
+     *     index write in [save], or an [archive] whose file move failed — is re-indexed, so a
+     *     recorded ride can never silently drop out of matching forever.
+     * Returns the number of orphan files re-indexed.
+     */
+    fun prewarmAndReconcile(): Int = synchronized(indexLock) {
+        val snapshot = readPathCellSnapshot()
+        val indexed = HashSet<String>().apply { snapshot.values.forEach { addAll(it) } }
+        val orphans = allTrackIds().filterNot { it in indexed }
+        if (orphans.isEmpty()) return@synchronized 0
+        // ONE index folds all orphans, snapshotted/written once — rebuilding the index per orphan
+        // (updatedSnapshot in a loop) would be quadratic and could hold indexLock for seconds on the
+        // first start after a split-brain heal brings hundreds of files across.
+        val index = SpatialIndex(INDEX_PRECISION, snapshot)
+        var repaired = 0
+        for (id in orphans) {
+            val track = loadTrack(id) ?: continue // unparseable → recovered by a future re-import
+            val cells = index.cellsForPath(track.points.map { LatLng(it.lat, it.lng) })
+            if (cells.isEmpty()) continue // < 2 points: legitimately unindexed (can't be a candidate)
+            index.add(id, cells)
+            repaired++
+        }
+        if (repaired > 0) {
+            writeSnapshot(index.snapshot())
+            Timber.i("KVP index: re-indexed %d orphan track file(s)", repaired)
+        }
+        repaired
+    }
+
+    /**
      * Ingests [track] with sourceKey-based de-duplication and returns whether it was stored.
      *
      * If [track] has a non-empty [RecordedTrack.sourceKey] that was already ingested, the track is
@@ -352,54 +387,6 @@ class TrackStore(private val dir: File) {
         atomicWriteText(File(dir, SOURCEKEYS_FILE), jsonForStorage.encodeToString(keys))
     }
 
-    /**
-     * Writes [text] to [target] atomically and durably: serialize to a temp file in the same
-     * directory, fsync the temp file's data to disk, then [File.renameTo] (an atomic move on the same
-     * filesystem) so a reader never observes a half-written file. If the rename fails (returns false —
-     * e.g. some exotic filesystem) we fall back to a direct truncate-then-write as best effort and log
-     * the degradation via Timber.
-     *
-     * The `fd.sync()` BEFORE the rename is the durability guarantee that matters on the Karoo: without
-     * it, the rename can be journaled while the temp file's data blocks are still only in the page
-     * cache, so an abrupt power-off (common at ride-end, exactly when `add()` writes) leaves a
-     * zero-length / torn `index.json` after reboot — which `readSnapshot` treats as "empty", silently
-     * dropping every recorded track from candidate pruning until something rewrites it.
-     */
-    private fun atomicWriteText(target: File, text: String, fsync: Boolean = true) {
-        val tmp = File(target.parentFile, target.name + TMP_SUFFIX)
-        val written = runCatching {
-            java.io.FileOutputStream(tmp).use { fos ->
-                fos.write(text.toByteArray(Charsets.UTF_8))
-                fos.flush()
-                // fsync forces data to stable storage before the rename exposes it. Skipped (fsync=false)
-                // for re-creatable per-track files during a bulk import to avoid an N-file fsync storm;
-                // always on for the durability-critical index/sourcekeys and the ride-end save.
-                if (fsync) fos.fd.sync()
-            }
-        }.recoverCatching {
-            // fsync unsupported/failed on this filesystem — fall back to a plain write so we still
-            // produce a complete temp file to rename (durability degrades, atomicity preserved).
-            Timber.w(it, "fsynced temp write failed for %s; falling back to plain write", target.name)
-            tmp.writeText(text)
-        }.isSuccess
-
-        // Only expose the temp via rename if it was actually written in full. If BOTH the fsynced
-        // write AND the plain fallback failed (e.g. disk full / IO error), tmp is empty or truncated —
-        // renaming it would atomically CLOBBER a previously-good target (e.g. index.json) with garbage,
-        // silently dropping every recorded track. Preserve the old target instead.
-        if (!written) {
-            Timber.w("temp write failed for %s; preserving the previous file", target.name)
-            tmp.delete()
-            return
-        }
-        if (!tmp.renameTo(target)) {
-            Timber.w("atomic rename failed for %s; falling back to direct write", target.name)
-            runCatching { target.writeText(text) }
-                .onFailure { Timber.w(it, "fallback direct write failed for %s", target.name) }
-            tmp.delete()
-        }
-    }
-
     companion object {
         /**
          * Process-wide locks keyed by canonical directory path so all [TrackStore] instances over
@@ -435,9 +422,6 @@ class TrackStore(private val dir: File) {
          * bbox-cell layout). Absent → [readPathCellSnapshot] performs the one-time rebuild.
          */
         const val INDEX_PATHCELLS_MARKER = ".pathcells"
-
-        /** Suffix for the same-dir temp file used by the atomic write-then-rename. */
-        private const val TMP_SUFFIX = ".tmp"
 
         /** Geohash precision for the on-disk index. Matches [SpatialIndex]'s default (≈ 1.2 km cells). */
         const val INDEX_PRECISION: Int = 6

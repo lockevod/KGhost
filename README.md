@@ -25,9 +25,11 @@ live on a data field and as a marker on the map.
 - **Uses the Karoo's own position on the route** — KGhost reads where you are along the loaded route
   from the Karoo itself, so it works correctly on loops and out-and-backs, and recovers cleanly if you
   go off-route and the Karoo recalculates.
-- **Per ride profile** — each Karoo ride profile can use its own Ghost Pace base (e.g. faster on the
-  road bike, slower on the MTB) and KGhost can be turned on or off for each profile independently. A
-  single **master switch** turns the whole extension off when you don't want it.
+- **Per ride profile** — each Karoo ride profile can have its own setup: how you race (**fixed pace**
+  vs **your rides**), its own Ghost Pace base (e.g. faster on the road bike, slower on the MTB), which
+  past ghost to use (**best / last / average**), the map icon, and whether KGhost is on at all. So your
+  road bike can race your past laps while your MTB just chases a fixed pace. A single **master switch**
+  turns the whole extension off when you don't want it.
 - **Self-tidying library** — when you ride the same route many times, KGhost automatically keeps your
   **fastest and two most recent** rides of that route and archives the rest, so the ghost you race
   stays meaningful and your storage doesn't pile up. Archived rides are moved (not deleted) and can be
@@ -88,14 +90,24 @@ Open the KGhost app on the Karoo. Settings are split across two tabs.
 
 The Ghost Pace and "race your own" are two halves of one ghost, so they are configured together here.
 
-- **Ghost Pace** — the target pace/speed (entered as km/h or min/km). This is also the pace the
-  whole-route ghost uses on stretches you have no recorded history for. This is the **global default**.
+- **How you race** — pick one: **Fixed pace** (race the constant Ghost-Pace target) or **Your rides**
+  (race your recorded history; the Ghost Pace becomes the fill pace where you have none). Choosing
+  *Fixed pace* greys out the *Your rides* options below, so the choice is always clear.
+- **Ghost Pace** — the target pace/speed (entered as km/h or min/km). This is the pace you race in
+  *Fixed pace* mode, and the fill pace the whole-route ghost uses on stretches with no recorded history
+  in *Your rides* mode. This is the **global default**.
 - **Per profile** — below the global pace, each Karoo ride profile you have used appears as a card. A
-  profile can follow the global pace, or set **its own Ghost Pace base** and be turned **on/off**
-  individually — so your road bike and your MTB can race at different paces (or one can have KGhost off
-  entirely). A profile shows up here after you have selected it on the Karoo at least once.
-- **Race your own** — which past ride to race (**best** / **last**) and optional alerts when you
-  **enter** and **leave** a stretch that has a recorded ghost (nearby stretches won't double-alert).
+  profile can **follow global**, or set its **own** mode, Ghost Pace base, past-ghost pick, map icon and
+  on/off — so your road bike can race your past laps while your MTB just chases a fixed pace. A profile
+  shows up here after you have selected it on the Karoo at least once.
+- **Race your own** — which past ride to race (**best** / **last** / **average**) and optional alerts
+  when you **enter** and **leave** a stretch that has a recorded ghost (nearby stretches won't
+  double-alert). **Average** races the recency-weighted mean of your recent laps of the loaded route
+  (so a typical effort, not a one-off PR or single recent ride). It needs a couple of laps **started at
+  the route start** before it kicks in; on stretches without enough laps you race your **best** there
+  instead. Long stops (a café, a photo) are compressed out so one stop never slows the average, and only
+  the **first lap of each ride** counts toward it. The average is kept per route and survives the
+  library auto-clean below.
 - **Ghost on map** — show/hide and the marker **icon** (ghost / cyclist / arrow / dot). The icon size
   is automatic (it scales with the map zoom), so there is no size setting.
 

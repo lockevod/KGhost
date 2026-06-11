@@ -30,7 +30,6 @@ class ConfigMigrationTest {
         val old = KGhostConfig(version = 5, targetSpeedMs = custom, masterEnabled = false)
         val migrated = old.migrateToLatest()
         assertEquals(CONFIG_VERSION, migrated.version)
-        assertEquals(6, CONFIG_VERSION)
         assertTrue(migrated.autoTidy)
         assertEquals(0L, migrated.tidySweepEpoch)
         assertEquals(custom, migrated.targetSpeedMs, 1e-9)

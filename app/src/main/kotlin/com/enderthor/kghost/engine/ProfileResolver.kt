@@ -1,5 +1,6 @@
 package com.enderthor.kghost.engine
 
+import com.enderthor.kghost.data.GhostIcon
 import com.enderthor.kghost.data.KGhostConfig
 import com.enderthor.kghost.data.ProfileSetting
 import com.enderthor.kghost.data.sanitizeTargetMs
@@ -7,18 +8,24 @@ import com.enderthor.kghost.data.sanitizeTargetMs
 /**
  * The settings that actually apply to the current ride after resolving the active ride profile
  * against the global config. [active] folds in BOTH the master kill-switch and the per-profile enable.
+ * [raceEnabled]/[ghostPick]/[ghostIcon] resolve the per-profile mode/pick/icon (or inherit the global
+ * defaults), so the engine reads ONE place instead of branching on the active profile everywhere.
  */
 data class EffectiveProfile(
     val active: Boolean,
     val targetSpeedMs: Double,
     val profileName: String,
+    val raceEnabled: Boolean,
+    val ghostPick: GhostPick,
+    val ghostIcon: GhostIcon,
 )
 
 /**
  * Resolve the effective ride settings for [activeProfileId] against [global], mirroring Kcrash's
  * CrashProfileResolver. A null/blank id, an unknown id, or a `useGlobal` entry inherits the global
- * Ghost-Pace target and is active (subject to the master switch). A custom entry supplies its own
- * target and enable. The master switch always ANDs (kill-switch semantics).
+ * Ghost-Pace target, mode, pick and icon and is active (subject to the master switch). A custom entry
+ * supplies its own target, enable, mode (race-your-own vs fixed pace), pick and icon. The master switch
+ * always ANDs (kill-switch semantics).
  */
 fun resolveProfile(global: KGhostConfig, activeProfileId: String?): EffectiveProfile {
     val setting = activeProfileId
@@ -29,6 +36,9 @@ fun resolveProfile(global: KGhostConfig, activeProfileId: String?): EffectivePro
         active = global.masterEnabled && (if (useGlobal) true else setting!!.enabled),
         targetSpeedMs = if (useGlobal) global.targetMs() else sanitizeTargetMs(setting!!.targetSpeedMs),
         profileName = setting?.profileName ?: "",
+        raceEnabled = if (useGlobal) global.raceEnabled else setting!!.raceEnabled,
+        ghostPick = if (useGlobal) global.ghostPick else setting!!.ghostPick,
+        ghostIcon = if (useGlobal) global.ghostIcon else setting!!.ghostIcon,
     )
 }
 

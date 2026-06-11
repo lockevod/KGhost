@@ -25,6 +25,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -79,21 +80,28 @@ fun RaceSection(
 
         HorizontalDivider()
 
-        // ── Master switch ─────────────────────────────────────────────────────
-        SwitchRow(
-            label = stringResource(R.string.race_enabled_label),
-            description = stringResource(R.string.race_enabled_description),
-            checked = config.raceEnabled,
-            onCheckedChange = { enabled ->
+        // ── Mode: Fixed pace vs Your rides ────────────────────────────────────
+        Text(
+            text = stringResource(R.string.race_mode_label),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Text(
+            text = stringResource(R.string.race_mode_description),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        GhostModeChips(
+            raceEnabled = config.raceEnabled,
+            onChange = { yours ->
                 scope.launch {
-                    saveFailed = !configManager.updateConfig { it.copy(raceEnabled = enabled) }
+                    saveFailed = !configManager.updateConfig { it.copy(raceEnabled = yours) }
                 }
             },
         )
 
         HorizontalDivider()
 
-        // ── Ghost selector ────────────────────────────────────────────────────
+        // ── Ghost selector (only in "Your rides" mode) ────────────────────────
         Text(
             text = stringResource(R.string.race_ghost_pick_label),
             style = MaterialTheme.typography.bodyMedium,
@@ -103,26 +111,21 @@ fun RaceSection(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                selected = config.ghostPick == GhostPick.BEST,
-                onClick = {
-                    scope.launch {
-                        saveFailed = !configManager.updateConfig { it.copy(ghostPick = GhostPick.BEST) }
-                    }
-                },
-                label = { Text(stringResource(R.string.race_ghost_best)) },
-                modifier = Modifier.heightIn(min = 48.dp),
-            )
-            FilterChip(
-                selected = config.ghostPick == GhostPick.LAST,
-                onClick = {
-                    scope.launch {
-                        saveFailed = !configManager.updateConfig { it.copy(ghostPick = GhostPick.LAST) }
-                    }
-                },
-                label = { Text(stringResource(R.string.race_ghost_last)) },
-                modifier = Modifier.heightIn(min = 48.dp),
+        GhostPickChips(
+            selected = config.ghostPick,
+            enabled = config.raceEnabled,
+            onPick = { pick ->
+                scope.launch {
+                    saveFailed = !configManager.updateConfig { it.copy(ghostPick = pick) }
+                }
+            },
+        )
+        // Average behaves differently from Best/Last (it needs a warmup), so explain it inline.
+        if (config.raceEnabled && config.ghostPick == GhostPick.AVERAGE) {
+            Text(
+                text = stringResource(R.string.race_ghost_average_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
@@ -133,6 +136,7 @@ fun RaceSection(
             label = stringResource(R.string.race_segment_alert_label),
             description = stringResource(R.string.race_segment_alert_description),
             checked = config.segmentEntryAlert,
+            enabled = config.raceEnabled,
             onCheckedChange = { alert ->
                 scope.launch {
                     saveFailed = !configManager.updateConfig { it.copy(segmentEntryAlert = alert) }
@@ -147,6 +151,7 @@ fun RaceSection(
             label = stringResource(R.string.race_segment_exit_label),
             description = stringResource(R.string.race_segment_exit_description),
             checked = config.segmentExitAlert,
+            enabled = config.raceEnabled,
             onCheckedChange = { alert ->
                 scope.launch {
                     saveFailed = !configManager.updateConfig { it.copy(segmentExitAlert = alert) }
@@ -161,6 +166,7 @@ fun RaceSection(
             label = stringResource(R.string.race_show_ghost_on_map),
             description = stringResource(R.string.race_show_ghost_on_map_desc),
             checked = config.showGhostOnMap,
+            enabled = config.raceEnabled,
             onCheckedChange = { show ->
                 scope.launch {
                     saveFailed = !configManager.updateConfig { it.copy(showGhostOnMap = show) }
@@ -168,39 +174,21 @@ fun RaceSection(
             },
         )
 
-        // ── Ghost icon picker ─────────────────────────────────────────────────
+        // ── Ghost icon picker (only in "Your rides" mode) ─────────────────────
         Text(
             text = stringResource(R.string.race_ghost_icon_label),
             style = MaterialTheme.typography.bodyMedium,
+            color = if (config.raceEnabled) Color.Unspecified else dimmedContentColor(),
         )
-        // Fixed 2-column grid: every chip gets equal width (weight) so the four boxes line up in a
-        // tidy 2×2 block instead of each sizing to its own label width. verticalArrangement keeps the
-        // wrapped second row from gluing to the first on the narrow Karoo screen.
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            maxItemsInEachRow = 2,
-        ) {
-            data class IconChoice(val icon: GhostIcon, val labelRes: Int)
-            listOf(
-                IconChoice(GhostIcon.GHOST, R.string.race_ghost_icon_ghost),
-                IconChoice(GhostIcon.CYCLIST, R.string.race_ghost_icon_cyclist),
-                IconChoice(GhostIcon.ARROW, R.string.race_ghost_icon_arrow),
-                IconChoice(GhostIcon.DOT, R.string.race_ghost_icon_dot),
-            ).forEach { choice ->
-                FilterChip(
-                    selected = config.ghostIcon == choice.icon,
-                    onClick = {
-                        scope.launch {
-                            saveFailed = !configManager.updateConfig { it.copy(ghostIcon = choice.icon) }
-                        }
-                    },
-                    label = { Text(stringResource(choice.labelRes)) },
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                )
-            }
-        }
+        GhostIconChips(
+            selected = config.ghostIcon,
+            enabled = config.raceEnabled,
+            onPick = { icon ->
+                scope.launch {
+                    saveFailed = !configManager.updateConfig { it.copy(ghostIcon = icon) }
+                }
+            },
+        )
 
         // Ghost icon SIZE is automatic — it follows the map zoom level (OnMapZoomLevel), so there is
         // no manual size picker.
@@ -209,6 +197,85 @@ fun RaceSection(
         if (saveFailed) {
             Text(text = stringResource(R.string.settings_save_failed))
         }
+}
+
+/** Two chips for the racing MODE: Fixed pace (Ghost Pace) vs Your rides (recorded history). */
+@Composable
+internal fun GhostModeChips(raceEnabled: Boolean, onChange: (Boolean) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = !raceEnabled,
+            onClick = { onChange(false) },
+            label = { Text(stringResource(R.string.race_mode_fixed)) },
+            modifier = Modifier.heightIn(min = 48.dp),
+        )
+        FilterChip(
+            selected = raceEnabled,
+            onClick = { onChange(true) },
+            label = { Text(stringResource(R.string.race_mode_yours)) },
+            modifier = Modifier.heightIn(min = 48.dp),
+        )
+    }
+}
+
+/**
+ * Best / Last / Average picker. [enabled] = false (Fixed-pace mode) dims the chips and makes them
+ * non-interactive — the current choice still shows so the rider sees what would apply in "Your rides".
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun GhostPickChips(selected: GhostPick, enabled: Boolean, onPick: (GhostPick) -> Unit) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            enabled = enabled,
+            selected = selected == GhostPick.BEST,
+            onClick = { onPick(GhostPick.BEST) },
+            label = { Text(stringResource(R.string.race_ghost_best)) },
+            modifier = Modifier.heightIn(min = 48.dp),
+        )
+        FilterChip(
+            enabled = enabled,
+            selected = selected == GhostPick.LAST,
+            onClick = { onPick(GhostPick.LAST) },
+            label = { Text(stringResource(R.string.race_ghost_last)) },
+            modifier = Modifier.heightIn(min = 48.dp),
+        )
+        FilterChip(
+            enabled = enabled,
+            selected = selected == GhostPick.AVERAGE,
+            onClick = { onPick(GhostPick.AVERAGE) },
+            label = { Text(stringResource(R.string.race_ghost_average)) },
+            modifier = Modifier.heightIn(min = 48.dp),
+        )
+    }
+}
+
+/** On-map ghost icon picker (ghost / cyclist / arrow / dot), as a tidy 2×2 grid. [enabled] dims it. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun GhostIconChips(selected: GhostIcon, enabled: Boolean, onPick: (GhostIcon) -> Unit) {
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        maxItemsInEachRow = 2,
+    ) {
+        data class IconChoice(val icon: GhostIcon, val labelRes: Int)
+        listOf(
+            IconChoice(GhostIcon.GHOST, R.string.race_ghost_icon_ghost),
+            IconChoice(GhostIcon.CYCLIST, R.string.race_ghost_icon_cyclist),
+            IconChoice(GhostIcon.ARROW, R.string.race_ghost_icon_arrow),
+            IconChoice(GhostIcon.DOT, R.string.race_ghost_icon_dot),
+        ).forEach { choice ->
+            FilterChip(
+                enabled = enabled,
+                selected = selected == choice.icon,
+                onClick = { onPick(choice.icon) },
+                label = { Text(stringResource(choice.labelRes)) },
+                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+            )
+        }
+    }
 }
 
 /**

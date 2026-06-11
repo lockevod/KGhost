@@ -23,13 +23,16 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.enderthor.kghost.R
+import com.enderthor.kghost.data.GhostIcon
 import com.enderthor.kghost.data.KGhostConfig
 import com.enderthor.kghost.data.MAX_TARGET_SPEED_MS
 import com.enderthor.kghost.data.ProfileSetting
+import com.enderthor.kghost.engine.GhostPick
 import com.enderthor.kghost.data.kmhToMs
 import com.enderthor.kghost.data.mphToMs
 import com.enderthor.kghost.data.msToKmh
@@ -265,6 +268,16 @@ private fun ProfileCard(
                     onCheckedChange = { onChange(setting.copy(enabled = it)) },
                 )
 
+                // Mode: Fixed pace vs Your rides (per profile).
+                Text(
+                    text = stringResource(R.string.race_mode_label),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                GhostModeChips(
+                    raceEnabled = setting.raceEnabled,
+                    onChange = { yours -> onChange(setting.copy(raceEnabled = yours)) },
+                )
+
                 var text by remember(setting.profileId, setting.useGlobal, imperial) {
                     mutableStateOf(
                         String.format(
@@ -292,6 +305,29 @@ private fun ProfileCard(
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.fillMaxWidth(),
+                )
+
+                val dimmed = dimmedContentColor()
+                // Best/Last/Average + icon apply only in "Your rides" mode → dim when Fixed pace.
+                Text(
+                    text = stringResource(R.string.race_ghost_pick_label),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (setting.raceEnabled) Color.Unspecified else dimmed,
+                )
+                GhostPickChips(
+                    selected = setting.ghostPick,
+                    enabled = setting.raceEnabled,
+                    onPick = { pick -> onChange(setting.copy(ghostPick = pick)) },
+                )
+                Text(
+                    text = stringResource(R.string.race_ghost_icon_label),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (setting.raceEnabled) Color.Unspecified else dimmed,
+                )
+                GhostIconChips(
+                    selected = setting.ghostIcon,
+                    enabled = setting.raceEnabled,
+                    onPick = { icon -> onChange(setting.copy(ghostIcon = icon)) },
                 )
             }
         }

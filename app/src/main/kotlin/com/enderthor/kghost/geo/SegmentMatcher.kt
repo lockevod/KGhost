@@ -3,8 +3,8 @@ package com.enderthor.kghost.geo
 import com.enderthor.kghost.engine.GhostPick
 import com.enderthor.kghost.engine.LiveSegment
 import com.enderthor.kghost.engine.RecordedGhostSource
+import com.enderthor.kghost.engine.mmss
 import timber.log.Timber
-import java.util.Locale
 
 /**
  * Turns the loaded route plus recorded history into raceable [LiveSegment]s.
@@ -169,7 +169,23 @@ object SegmentMatcher {
         val groups = groupOverlapping(candidates)
         val segments = groups.map { group ->
             val chosen = when (pick) {
-                GhostPick.BEST -> group.minByOrNull { it.totalTimeS }!!
+                // AVERAGE never reaches the matcher (the extension serves the per-route aggregate, or
+                // falls back here with BEST during warmup), but the enum `when` must stay exhaustive —
+                // treat it as BEST defensively so a stray AVERAGE can never crash the route match.
+                GhostPick.BEST, GhostPick.AVERAGE -> {
+                    // "Fastest" must not reward a SHORT partial overlap: raw total time scales with the
+                    // covered span, so a 300 m sliver always "beats" a full 5 km coverage on time alone —
+                    // and winning SHRINKS the raceable stretch to the sliver (the winner's own interval
+                    // is emitted below). Prefer the widest coverage: among candidates within
+                    // SPAN_PICK_TOL of the group's max span, pick the highest implied speed
+                    // (span / time — the length-fair "fastest").
+                    val maxSpan = group.maxOf { it.routeEndM - it.routeStartM }
+                    group.filter { it.routeEndM - it.routeStartM >= SPAN_PICK_TOL * maxSpan }
+                        .maxByOrNull { c ->
+                            val span = c.routeEndM - c.routeStartM
+                            if (c.totalTimeS > 0.0) span / c.totalTimeS else 0.0
+                        }!!
+                }
                 GhostPick.LAST -> group.maxByOrNull { it.startedAtEpoch }!!
             }
             // Use the winner's own interval so ghost.totalDistanceM ≈ routeEndM − routeStartM.
@@ -186,6 +202,13 @@ object SegmentMatcher {
         // Step 6: sort by route start.
         return segments.sortedBy { it.routeStartM }
     }
+
+    /**
+     * BEST-pick span tolerance: only candidates covering at least this fraction of the group's
+     * widest coverage compete on speed. Keeps the raceable stretch wide while still letting a
+     * near-full-coverage ride win on pace.
+     */
+    private const val SPAN_PICK_TOL = 0.9
 
     /**
      * Route sampling step (metres) for the coverage scan. A fraction of the smallest meaningful
@@ -570,17 +593,11 @@ object SegmentMatcher {
     /** `BEST` -> "PR m:ss"; `LAST` -> "Last m:ss". Deterministic for tests. */
     private fun labelFor(pick: GhostPick, totalTimeS: Double): String {
         val prefix = when (pick) {
-            GhostPick.BEST -> "PR "
+            // AVERAGE is served from the aggregate (labelled "AVG …" there), so the matcher only ever
+            // labels BEST/LAST; the AVERAGE arm exists solely to keep this `when` exhaustive.
+            GhostPick.BEST, GhostPick.AVERAGE -> "PR "
             GhostPick.LAST -> "Last "
         }
         return prefix + mmss(totalTimeS)
-    }
-
-    /** Formats seconds as `m:ss` (Locale.US). */
-    private fun mmss(seconds: Double): String {
-        val total = seconds.toInt().coerceAtLeast(0)
-        val m = total / 60
-        val s = total % 60
-        return String.format(Locale.US, "%d:%02d", m, s)
     }
 }

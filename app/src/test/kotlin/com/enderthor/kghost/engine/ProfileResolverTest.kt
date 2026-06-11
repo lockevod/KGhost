@@ -1,6 +1,7 @@
 package com.enderthor.kghost.engine
 
 import com.enderthor.kghost.data.DEFAULT_TARGET_SPEED_MS
+import com.enderthor.kghost.data.GhostIcon
 import com.enderthor.kghost.data.KGhostConfig
 import com.enderthor.kghost.data.ProfileSetting
 import com.enderthor.kghost.data.kmhToMs
@@ -54,6 +55,31 @@ class ProfileResolverTest {
         )
         assertFalse(r.active)
         assertEquals(DEFAULT_TARGET_SPEED_MS, r.targetSpeedMs, 1e-9)
+    }
+
+    @Test fun `useGlobal entry inherits global mode pick and icon`() {
+        val global = cfg(settings = listOf(ProfileSetting("p1", "Road", useGlobal = true)))
+            .copy(raceEnabled = false, ghostPick = GhostPick.LAST, ghostIcon = GhostIcon.ARROW)
+        val r = resolveProfile(global, "p1")
+        assertFalse(r.raceEnabled)
+        assertEquals(GhostPick.LAST, r.ghostPick)
+        assertEquals(GhostIcon.ARROW, r.ghostIcon)
+    }
+
+    @Test fun `custom entry uses its own mode pick and icon`() {
+        val r = resolveProfile(
+            cfg(settings = listOf(
+                ProfileSetting(
+                    "p2", "MTB", useGlobal = false, enabled = true,
+                    raceEnabled = false, ghostPick = GhostPick.AVERAGE, ghostIcon = GhostIcon.DOT,
+                ),
+            )),
+            "p2",
+        )
+        // Global defaults are race-on / BEST / GHOST; the custom override must win.
+        assertFalse(r.raceEnabled)
+        assertEquals(GhostPick.AVERAGE, r.ghostPick)
+        assertEquals(GhostIcon.DOT, r.ghostIcon)
     }
 
     @Test fun `master off forces inactive even for a useGlobal profile`() {
