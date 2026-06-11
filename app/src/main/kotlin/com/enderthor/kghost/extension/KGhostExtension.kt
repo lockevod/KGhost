@@ -1085,6 +1085,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // Idle still gets a fresh stamp.
         if (recordingStartedEpoch == 0L) {
             recordingStartedEpoch = System.currentTimeMillis()
+            // Rotate the diagnostic log to a fresh per-ride file so each ride's logs are
+            // self-contained and distinguishable. No-op when file logging is disabled.
+            FileLogTree.newRide(recordingStartedEpoch)
         }
         // GPS location consumer — subscribed only while Recording. Feeds the ride RECORDER (the route
         // position itself now comes from the Karoo, see destJob below). We stream the LOCATION DataType
@@ -1539,39 +1542,46 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val haveRoutePos = lastOnRoute && !lastRejoinActive && remainingM.isFinite() && routeLenM > 0.0
                         if (!haveRoutePos) {
                             // No trustworthy on-route position THIS tick (no lock, off route, or rejoining).
-                            // Fallback strategy (in priority order):
-                            //  1. Rejoin-corrected estimate: routeLen − (remaining − rejoinDist). The best
-                            //     available position when rejoin=true and the Karoo has computed its path.
-                            //  2. Plain remaining fallback: when rejoin=true but rejoinDist not computed yet
-                            //     (Karoo just flipped to rejoin mode), remaining is still route-relative so
-                            //     routeLen − remaining gives a usable provisional position for anchoring.
-                            //  3. Last known good position from before the off-route event.
                             //
-                            // Critically, if the ghost has not been anchored yet (ghostStartElapsedS=null)
-                            // and the Karoo enters rejoin=true BEFORE onRoute=true is ever seen (common when
-                            // the route is loaded while the rider is slightly off the path), the race would
-                            // never start via the normal haveRoutePos path. We allow anchoring here from the
-                            // best available estimate so the ghost and gap can start immediately.
-                            val rejoinDistM = lastRejoinDistM
-                            val estimatedRoutePos: Double? = if (lastRejoinActive && rejoinDistM.isFinite() && remainingM.isFinite()) {
-                                // Karoo has computed rejoin path: rejoin-corrected formula (Karoo scale),
-                                // rescaled to the polyline scale like every route position.
-                                val est = (karooLenM - (remainingM - rejoinDistM)) * karooToPoly
-                                est.takeIf { it.isFinite() && it >= (lastGoodRouteDistM ?: 0.0) && it <= routeLenM }
+                            // KEY INSIGHT: even mid-rejoin the Karoo's remaining-to-destination is KNOWN and
+                            // COMPLETE — it already INCLUDES the rejoin detour (remaining = rejoin_path +
+                            // remaining_from_the_rejoin_point). So `routeLen − remaining` (the SAME formula the
+                            // on-route path uses) is a valid position: the detour stays counted, so the rider's
+                            // effective progress dips slightly while off-route → they read a little BEHIND (the
+                            // truth — a detour costs distance), never a false AHEAD, and it self-corrects the
+                            // instant they rejoin. We deliberately do NOT add rejoinDist back (the old bug:
+                            // `remaining − rejoinDist` cancelled the detour and teleported progress forward to
+                            // the PLANNED rejoin point → a false AHEAD while off-route).
+                            //
+                            // ODOMETRIC CEILING — the one thing `remaining` CANNOT tell us is a wrong
+                            // map-match: on a self-intersecting loop the Karoo can snap to a LATER pass, making
+                            // remaining far too small and `routeLen − remaining` leap toward the route end.
+                            // Cap progress at the last trusted position plus the metres actually ridden since:
+                            // route progress can never exceed what was physically pedalled. NO
+                            // REROUTE_JUMP_SLACK_M (that slack absorbs scale skew on the TRUSTED on-route
+                            // comparison; here we cap an UNTRUSTED estimate tight). Null when there's no
+                            // odometer baseline yet (the never-anchored bootstrap), where the raw value is the
+                            // best we have.
+                            //
+                            // If the ghost has not been anchored yet (ghostStartElapsedS=null) and the Karoo
+                            // enters rejoin BEFORE onRoute is ever seen (route loaded slightly off the path),
+                            // the race would never start via the normal haveRoutePos path — so we allow
+                            // anchoring here from this estimate.
+                            val odoCeil: Double? = lastGoodRouteDistM?.let { lg ->
+                                distMAtLastGoodM?.let { lg + (distM - it).coerceAtLeast(0.0) }
+                            }
+                            val estimatedRoutePos: Double? = if (lastRejoinActive && remainingM.isFinite()) {
+                                // Same formula as on-route (detour stays counted), capped by the odometric
+                                // ceiling so a later-loop-pass snap can't teleport us forward, floored at 0 so
+                                // the detour penalty can pull progress back below the last good fix.
+                                ((karooLenM - remainingM) * karooToPoly)
+                                    .let { if (odoCeil != null) it.coerceAtMost(odoCeil) else it }
+                                    .coerceIn(0.0, routeLenM)
+                                    .takeIf { it.isFinite() }
                             } else null
 
-                            // Best available position: prefer corrected estimate, then last good pos.
-                            var frozenPos = estimatedRoutePos ?: lastGoodRouteDistM
-
-                            // Provisional fallback: when anchor not yet set AND rejoin=true AND rejoinDist
-                            // not computed yet (NaN), the Karoo just flipped to rejoin but hasn't finished
-                            // the path calculation — remaining is still route-relative. Use it directly.
-                            if (ghostStartElapsedS == null && frozenPos == null && lastRejoinActive &&
-                                !rejoinDistM.isFinite() && remainingM.isFinite()
-                            ) {
-                                val provisional = ((karooLenM - remainingM) * karooToPoly).coerceIn(0.0, routeLenM)
-                                if (provisional.isFinite()) frozenPos = provisional
-                            }
+                            // Best available position: prefer the estimate, then the last good pos.
+                            val frozenPos = estimatedRoutePos ?: lastGoodRouteDistM
 
                             // Anchor the race from the estimated position if not yet anchored.
                             // This is the same math as the haveRoutePos path but using the estimate.
