@@ -56,11 +56,11 @@ Add these from the Karoo's data-field picker (Extensions):
 | Gap (graphic) | `kghost-gap` | Two-dot track: you vs the ghost, with the gap (time/distance) below, tagged SEG (racing your past self on a recorded stretch) or GP (fixed-pace Ghost Pace) |
 | Gap (numeric) | `kghost-gap-num` | Numeric gap (time / distance, per your preference) |
 
-Ahead is green, behind is red, on-pace is neutral. While your position is briefly uncertain (a GPS
-gap) the value is shown in **amber** as an estimate. `---` appears only when there is nothing to show —
-no target set, not recording, you haven't started riding yet, you're off-route, or after a sustained
-GPS loss (see below). Fields are designed for sunlight readability and respect the Karoo's day/night
-theme.
+Ahead is green, behind is red, on-pace is neutral. While your position is briefly uncertain — a GPS
+gap, or while you're **off-route** — the value is shown in **amber** as an estimate rather than
+blanking. `---` appears only when there is nothing to show — no target set, not recording, you haven't
+started riding yet, or after a sustained GPS loss (see below). Fields are designed for sunlight
+readability and respect the Karoo's day/night theme.
 
 ### Stops and GPS dropouts
 
@@ -82,6 +82,26 @@ up after a sustained loss:
 When the signal returns, your position corrects and the gap catches up. The map ghost runs on time
 alone, so it stays visible and gliding throughout a dropout — it isn't hidden just because *your*
 position is briefly unknown.
+
+### Detours, reroutes, and shortcuts (when the gap can look odd)
+
+KGhost races you along the **loaded route**, so when you leave it the gap does its best with what the
+Karoo reports — and a few situations can look strange for a moment:
+
+- **A detour that rejoins the route** (you miss a turn and take a longer way back): the extra distance
+  counts against you, so the gap drifts a little further **behind** while you're off-route, then
+  settles when you rejoin. That's real — the detour genuinely cost you distance.
+- **A shortcut that skips part of the route**: KGhost does **not** credit distance you didn't ride. You
+  are compared on the route the ghost actually rode, so cutting a corner won't suddenly show you
+  winning — it simply doesn't count the skipped stretch.
+- **Routes that cross themselves (loops, out-and-backs)**: once in a while the Karoo can momentarily
+  place you on a *later* pass through the same streets. KGhost caps your progress to the distance
+  you've actually pedalled, so such a glitch can't teleport the gap to a wild value — at worst it's
+  briefly off by the length of your detour, and corrects once you're cleanly back on the route.
+
+In all of these the gap is shown as an **amber estimate** while you're off the route, and corrects the
+moment you rejoin. A genuinely big reroute (the Karoo sends you several km a different way) is the one
+case nothing can fully reconcile — you and the ghost simply rode different distances.
 
 ## Settings
 
@@ -131,7 +151,13 @@ Device-level switches and recorded-track-library management (not per profile):
   stays bounded. Archived rides are moved to `/sdcard/KGhost/tracks/archive` and can be restored. On by
   default.
 - **Diagnostic log** — write KGhost's diagnostics to a file so a ride can be studied later without a
-  computer. Off by default; leave it off for normal use.
+  computer. Each ride gets its own file (`kghost-YYYY-MM-dd-HHmmss.log`) and the oldest are purged
+  automatically once there are more than six. Off by default; leave it off for normal use (logging
+  costs a little battery and performance). **When it is on, the log is also sent to the developer**
+  (periodically and at ride end) to help diagnose problems — but **GPS coordinates are stripped before
+  sending, so no location data leaves your Karoo**, and the upload is tagged only with a random
+  **Anon tag** (no personal or device identifier), shown in this screen so you can quote it in a bug
+  report. Turn the diagnostic log off and nothing is ever sent.
 
 > **How it works under the hood:** the position/ghost/alert model (route position, the "fair start"
 > ghost clock, GPS-loss handling, reroutes) is documented for developers in
@@ -164,7 +190,10 @@ stretches with little recorded history.
 **KGhost is provided "as is", without warranty of any kind, express or implied.** The developer
 (EnderThor) accepts no responsibility or liability for any harm, injury, loss, or damage arising from
 the use or inability to use this application. All configuration and recorded tracks are stored locally
-on your Karoo; KGhost does not collect or transmit any personal data.
+on your Karoo. KGhost transmits no personal data in normal use; the **only** thing ever sent off the
+device is the optional **diagnostic log** (off by default) — and only with GPS coordinates removed and
+tagged by a random Anon tag, sent to the developer purely to fix problems. Disable the diagnostic log
+and nothing is transmitted at all.
 
 > [!WARNING]
 > Do not let chasing the ghost distract you from traffic, road conditions, or your own limits. Keep
