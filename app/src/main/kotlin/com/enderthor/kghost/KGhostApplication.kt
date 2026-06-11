@@ -14,7 +14,7 @@ class KGhostApplication : Application() {
         // until the rider flips the settings toggle, which captures everything to the file.
         FileLogTree.start(this)
         Timber.plant(FileLogTree)
-        val debugmode = true
+        val debugmode = false
         if (BuildConfig.DEBUG || debugmode) Timber.plant(Timber.DebugTree())
         else Timber.plant(object : Timber.Tree() {
             override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
