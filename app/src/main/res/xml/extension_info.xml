@@ -2,4 +2,8 @@
 <ExtensionInfo displayName="@string/extension_name" icon="@drawable/ic_kghost" id="kghost" scansDevices="false" mapLayer="true" fitFile="false">
     <DataType description="@string/gap_graphic_description" displayName="@string/gap_graphic_name" graphical="true" icon="@drawable/ic_kghost" typeId="kghost-gap" />
     <DataType description="@string/gap_numeric_description" displayName="@string/gap_numeric_name" graphical="true" icon="@drawable/ic_kghost" typeId="kghost-gap-num" />
+    <!-- Stream-only (non-graphical) gap values: rendered natively by the Karoo as plain numeric
+         fields, and consumable by other extensions via TYPE_EXT::kghost::<typeId>. -->
+    <DataType description="@string/gap_time_stream_description" displayName="@string/gap_time_stream_name" graphical="false" icon="@drawable/ic_kghost" typeId="kghost-gap-time" />
+    <DataType description="@string/gap_dist_stream_description" displayName="@string/gap_dist_stream_name" graphical="false" icon="@drawable/ic_kghost" typeId="kghost-gap-dist" />
 </ExtensionInfo>

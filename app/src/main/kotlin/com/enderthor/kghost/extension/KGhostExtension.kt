@@ -6,6 +6,7 @@ import com.enderthor.kghost.R
 import com.enderthor.kghost.data.KGhostConfig
 import com.enderthor.kghost.datatype.GapGraphicDataType
 import com.enderthor.kghost.datatype.GapNumericDataType
+import com.enderthor.kghost.datatype.GapStreamDataType
 import com.enderthor.kghost.engine.CoastQuality
 import com.enderthor.kghost.engine.CoastingEstimator
 import com.enderthor.kghost.engine.GapCalculator
@@ -519,13 +520,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     @Volatile
     private var currentMapZoom = 15.0
 
-    // The on-screen data fields rendering the GapState. typeIds must match extension_info.xml
-    // exactly ("kghost-gap" and "kghost-gap-num").
+    // The on-screen data fields rendering the GapState, plus the stream-only gap publishers other
+    // extensions can consume (TYPE_EXT::kghost::kghost-gap-time / ::kghost-gap-dist). typeIds must
+    // match extension_info.xml exactly.
     override val types by lazy {
         listOf(
             GapGraphicDataType(applicationContext),
             GapNumericDataType(applicationContext),
-        )
+        ) + GapStreamDataType.all()
     }
 
     override fun onCreate() {

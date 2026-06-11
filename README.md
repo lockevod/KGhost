@@ -55,6 +55,28 @@ Add these from the Karoo's data-field picker (Extensions):
 |---|---|---|
 | Gap (graphic) | `kghost-gap` | Two-dot track: you vs the ghost, with the gap (time/distance) below, tagged SEG (racing your past self on a recorded stretch) or GP (fixed-pace Ghost Pace) |
 | Gap (numeric) | `kghost-gap-num` | Numeric gap (time / distance, per your preference) |
+| Ghost Gap (s) | `kghost-gap-time` | Plain number: gap in seconds, positive = ahead (Karoo-native rendering) |
+| Ghost Gap (m) | `kghost-gap-dist` | Plain number: gap in metres, positive = ahead (Karoo-native rendering) |
+
+### For developers: the gap is a public stream
+
+The two plain-number fields are also published as Karoo data streams, so **any other extension can
+consume the live gap** (the same inter-extension mechanism karoo-headwind uses for weather):
+
+```kotlin
+karooSystem.streamDataFlow("TYPE_EXT::kghost::kghost-gap-time").collect { state ->
+    val gapSeconds = (state as? StreamState.Streaming)?.dataPoint?.singleValue ?: return@collect
+    // gapSeconds > 0 → rider is ahead of the ghost; < 0 → behind
+}
+```
+
+- `TYPE_EXT::kghost::kghost-gap-time` — gap in **seconds**, positive = ahead.
+- `TYPE_EXT::kghost::kghost-gap-dist` — gap in **metres**, positive = ahead.
+- Each DataPoint also carries an `estimated` field (`1.0` while the value is an **estimate** — a
+  GPS dropout being dead-reckoned, or the rider off-route — else `0.0`):
+  `dataPoint.values["estimated"]`.
+- While there is nothing to show (not recording, no data yet, sustained GPS loss) the stream sits in
+  `StreamState.Searching`. If KGhost isn't installed the stream is simply silent — no error.
 
 Ahead is green, behind is red, on-pace is neutral. While your position is briefly uncertain — a GPS
 gap, or while you're **off-route** — the value is shown in **amber** as an estimate rather than
