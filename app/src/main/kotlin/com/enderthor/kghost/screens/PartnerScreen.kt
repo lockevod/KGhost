@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Card
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -172,10 +171,22 @@ fun PartnerSection(
     if (status == "saveFailed") {
         Text(text = stringResource(R.string.settings_save_failed))
     }
+}
 
+/**
+ * Per-profile speed overrides section. Lists each Karoo profile and lets the rider customise the
+ * ghost settings per profile (or inherit from global). Rendered after the general settings so the
+ * global defaults are visible before the per-profile overrides.
+ */
+@Composable
+fun ProfileSection(
+    config: KGhostConfig,
+    configManager: ConfigurationManager,
+    imperial: Boolean = false,
+    activeProfileId: String? = null,
+) {
     val pScope = rememberCoroutineScope()
 
-    HorizontalDivider()
     Text(text = stringResource(R.string.profile_section_title), style = MaterialTheme.typography.titleMedium)
     Text(
         text = stringResource(R.string.profile_section_description),

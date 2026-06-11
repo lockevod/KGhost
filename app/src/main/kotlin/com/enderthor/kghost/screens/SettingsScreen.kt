@@ -67,5 +67,15 @@ fun SettingsScreen(
             config = config,
             configManager = configManager,
         )
+
+        HorizontalDivider()
+
+        // Per-profile overrides — always after the global defaults so the rider sees the globals first.
+        ProfileSection(
+            config = config,
+            configManager = configManager,
+            imperial = imperial,
+            activeProfileId = activeProfileId,
+        )
     }
 }

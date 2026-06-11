@@ -221,31 +221,34 @@ internal fun GhostModeChips(raceEnabled: Boolean, onChange: (Boolean) -> Unit) {
 /**
  * Best / Last / Average picker. [enabled] = false (Fixed-pace mode) dims the chips and makes them
  * non-interactive — the current choice still shows so the rider sees what would apply in "Your rides".
+ * All three chips share equal width so Average never looks smaller or closer than Best/Last.
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun GhostPickChips(selected: GhostPick, enabled: Boolean, onPick: (GhostPick) -> Unit) {
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         FilterChip(
             enabled = enabled,
             selected = selected == GhostPick.BEST,
             onClick = { onPick(GhostPick.BEST) },
             label = { Text(stringResource(R.string.race_ghost_best)) },
-            modifier = Modifier.heightIn(min = 48.dp),
+            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
         )
         FilterChip(
             enabled = enabled,
             selected = selected == GhostPick.LAST,
             onClick = { onPick(GhostPick.LAST) },
             label = { Text(stringResource(R.string.race_ghost_last)) },
-            modifier = Modifier.heightIn(min = 48.dp),
+            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
         )
         FilterChip(
             enabled = enabled,
             selected = selected == GhostPick.AVERAGE,
             onClick = { onPick(GhostPick.AVERAGE) },
             label = { Text(stringResource(R.string.race_ghost_average)) },
-            modifier = Modifier.heightIn(min = 48.dp),
+            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
         )
     }
 }
