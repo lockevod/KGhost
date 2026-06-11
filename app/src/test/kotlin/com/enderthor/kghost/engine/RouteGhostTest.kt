@@ -136,6 +136,8 @@ class RouteGhostTest {
         // The piece keeps the recorded pace: 4500 m at 10 m/s = 450 s, re-based to t=0.
         assertEquals(450.0, piece.ghost.totalTimeS, 1e-6)
         assertEquals(0.0, piece.ghost.samples.first().timeS, 1e-9)
+        // The label's time is re-stamped with the PIECE's time, not the full ride's.
+        assertEquals("t 7:30", piece.ghostLabel)
     }
 
     @Test fun `overlay keeps the secondary tail when primary is contained inside it`() {

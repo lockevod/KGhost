@@ -65,8 +65,9 @@ theme.
 ### Stops and GPS dropouts
 
 A normal **stop** (a red light) is not a problem: the ghost keeps to its pace, so if you stop and it
-doesn't, you fall behind — exactly like a real race. (If you use the Karoo's auto-pause, the ride
-clock and the ghost both pause with you.)
+doesn't, you fall behind — exactly like a real race. **Pausing the ride** (the pause button, or the
+Karoo's auto-pause) freezes the ghost with you: the ride clock stops, so a coffee stop while paused
+costs you nothing against the ghost.
 
 A **GPS dropout** never blanks the gap straight away — KGhost keeps showing an estimate and only gives
 up after a sustained loss:
@@ -84,7 +85,9 @@ position is briefly unknown.
 
 ## Settings
 
-Open the KGhost app on the Karoo. Settings are split across two tabs.
+Open the KGhost app on the Karoo. Settings are split across two tabs. Changes apply **immediately,
+even mid-ride** — switching how you race, the ghost pick, or the active ride profile re-builds the
+ghost on the spot without restarting your race (your start anchor and progress are kept).
 
 ### Ghost Pace tab
 
@@ -106,8 +109,9 @@ The Ghost Pace and "race your own" are two halves of one ghost, so they are conf
   (so a typical effort, not a one-off PR or single recent ride). It needs a couple of laps **started at
   the route start** before it kicks in; on stretches without enough laps you race your **best** there
   instead. Long stops (a café, a photo) are compressed out so one stop never slows the average, and only
-  the **first lap of each ride** counts toward it. The average is kept per route and survives the
-  library auto-clean below.
+  the **first lap of each ride** counts toward it. The average is kept per route (under
+  `/sdcard/KGhost/aggregates` when all-files access is granted) and survives the library auto-clean
+  below.
 - **Ghost on map** — show/hide and the marker **icon** (ghost / cyclist / arrow / dot). The icon size
   is automatic (it scales with the map zoom), so there is no size setting.
 

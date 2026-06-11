@@ -188,7 +188,11 @@ object RouteGhost {
         }
         addSample(samples, d1 - d0, (seg.ghost.timeAt(d1) - t0).coerceAtLeast(samples.last().timeS))
         if (samples.size < 2 || samples.last().timeS <= 0.0) return null
-        return LiveSegment(a, b, GhostCurve(samples), seg.ghostLabel)
+        val curve = GhostCurve(samples)
+        // Re-stamp the label's time with the PIECE's time — keeping the original would show the FULL
+        // ride's m:ss ("PR 7:35") on a piece that races only part of it. Labels are "<prefix> m:ss".
+        val label = seg.ghostLabel.substringBeforeLast(' ') + " " + mmss(curve.totalTimeS)
+        return LiveSegment(a, b, curve, label)
     }
 
     /** Appends a sample only when it strictly advances distance ([GhostCurve] requires that). */

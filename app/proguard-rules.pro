@@ -14,6 +14,14 @@
 -keep class com.enderthor.kghost.geo.** { *; }
 -keepclasseswithmembers class com.enderthor.kghost.geo.**$$serializer { *; }
 
+# Keep the engine @Serializable models (PerRouteAggregate/AggregateNode — the average-ghost store)
+# and GhostPick (serialized BY NAME inside KGhostConfig/ProfileSetting; renamed/stripped constants
+# would break config decode on a release build).
+-keep class com.enderthor.kghost.engine.PerRouteAggregate { *; }
+-keep class com.enderthor.kghost.engine.AggregateNode { *; }
+-keep class com.enderthor.kghost.engine.GhostPick { *; }
+-keepclasseswithmembers class com.enderthor.kghost.engine.**$$serializer { *; }
+
 # Standard kotlinx.serialization keeps.
 -keepclassmembers @kotlinx.serialization.Serializable class ** {
     *** Companion;

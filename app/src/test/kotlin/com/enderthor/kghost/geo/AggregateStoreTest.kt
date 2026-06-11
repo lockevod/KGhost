@@ -40,4 +40,43 @@ class AggregateStoreTest {
         File(dir, "bad_1.json").writeText("{ this is not valid json")
         assertNull(AggregateStore(dir).load("bad_1"))
     }
+
+    @Test fun `sweep deletes blobs older than maxAge and stale tmp files, keeps fresh`() {
+        val dir = tempDir()
+        val store = AggregateStore(dir)
+        store.save(sample("fresh_100"))
+        store.save(sample("stale_100"))
+        val now = System.currentTimeMillis()
+        File(dir, "stale_100.json").setLastModified(now - AggregateStore.SWEEP_MAX_AGE_MS - 1_000L)
+        File(dir, "leftover.json.tmp").apply { writeText("x"); setLastModified(now - 25 * 3600_000L) }
+
+        val deleted = store.sweep(nowMs = now)
+
+        assertEquals(2, deleted) // the stale blob + the day-old tmp
+        assertEquals(sample("fresh_100"), store.load("fresh_100"))
+        assertNull(store.load("stale_100"))
+    }
+
+    @Test fun `sweep prunes least-recently-updated beyond maxFiles`() {
+        val dir = tempDir()
+        val store = AggregateStore(dir)
+        val now = System.currentTimeMillis()
+        for (i in 1..4) {
+            store.save(sample("r${i}_100"))
+            // Distinct ascending mtimes: r1 oldest … r4 newest.
+            File(dir, "r${i}_100.json").setLastModified(now - (10L - i) * 60_000L)
+        }
+
+        val deleted = store.sweep(maxFiles = 2, nowMs = now)
+
+        assertEquals(2, deleted)
+        assertNull(store.load("r1_100"))
+        assertNull(store.load("r2_100"))
+        assertEquals(sample("r3_100"), store.load("r3_100"))
+        assertEquals(sample("r4_100"), store.load("r4_100"))
+    }
+
+    @Test fun `sweep on a missing dir returns 0`() {
+        assertEquals(0, AggregateStore(File(tempDir(), "absent")).sweep())
+    }
 }

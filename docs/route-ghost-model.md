@@ -66,12 +66,26 @@ a transient scale skew at the start. Either way hold `---` until a plausible val
 
 ### Scale note
 
-`routeDist` is on the Karoo's `routeDistance` scale; the segments and ghost curve are on the decoded
-polyline (`path.totalM`) scale. These are the **same geometry** and differ only marginally — RouteGraph
-mixes them identically (it feeds `routeDistance − remaining` straight into `TurfMeasurement.along(decodedPolyline, …)`)
-and trusts the equivalence. The `route mode ON` log prints `karooLen`/`polyLen`/`delta` so the real
-difference is visible; if it ever proved large, `routeDist` would need rescaling, but in practice it's
-metres.
+`remaining` is measured against the Karoo's own `routeDistance` (`karooLenM`); the segments and the
+ghost curve live on the decoded-polyline scale (`path.totalM`). These are the same geometry but can
+differ by a few percent (different smoothing/snapping), which on a long route would shift segment
+boundaries by real distance. The tick therefore **rescales every derived position to the polyline
+scale**: `routeDist = (karooLenM − remaining) × (path.totalM / karooLenM)`, clamped into
+`[0, path.totalM]`. All downstream consumers (D0, the odometric filter, the lap capture, segment
+lookup, the ghost curve) are on the polyline scale, which also matches the physical odometer metres
+the plausibility filter compares against. If the ratio is absurd (outside `0.5–2.0`) the Karoo length
+is treated as garbage and the polyline length is used outright — otherwise a bogus `karooLen` would
+pin the position at 0 and deadlock D0. The `route mode ON` log prints `karooLen`/`polyLen`/`delta`
+so the real difference stays visible.
+
+### First-fix confirmation
+
+The odometric plausibility filter needs a trusted baseline, and D0 is latched once (invariant), but
+the very first on-route fix can be a wrong-pass snap on a self-intersecting route — and the filter
+cannot catch it (there is no baseline yet). So the first fix is only a **candidate**: a second,
+odometrically-consistent fix (`|Δpos| ≤ odoΔ + slack`) confirms it; an inconsistent second fix
+replaces the candidate and waits one more tick. Costs one tick of `---` at route acquisition; the
+race waits for first movement anyway, so a stationary start loses nothing.
 
 ## 2. The ghost clock — `D0` and "race starts when you move"
 

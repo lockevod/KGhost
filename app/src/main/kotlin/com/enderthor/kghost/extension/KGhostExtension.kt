@@ -348,6 +348,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
      */
     private data class RouteMode(
         val path: PolylinePath,
+        /**
+         * The encoded polyline this mode was matched from — the route's IDENTITY. The tick compares
+         * it (not the [path] object reference) to tell a genuinely NEW route from a same-route
+         * re-match (a mid-ride settings change), which must NOT reset the race anchor.
+         */
+        val polyline: String,
         /** The loaded route's name (from NavigatingRoute) — used to key the average-ghost aggregate. */
         val routeName: String,
         val segments: List<LiveSegment>,
@@ -526,8 +532,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             runCatching { trackStore().prewarmAndReconcile() }
                 .onFailure { Timber.w(it, "KVP index prewarm failed") }
             // Prune aggregate blobs for routes not ridden in ages (renamed/deleted routes pile up).
-            runCatching { aggregateStore().sweep() }
-                .onFailure { Timber.w(it, "KVP aggregate sweep failed") }
+            // Sweep the INTERNAL fallback dir too: aggregatesDir()'s heal copies internal-only blobs
+            // into the canonical external dir, so a stale blob deleted only there would zombie back
+            // from internal on the next resolution — with a fresh mtime, never aging out again.
+            runCatching {
+                aggregateStore().sweep()
+                AggregateStore(File(applicationContext.filesDir, AggregateStore.DIR_NAME)).sweep()
+            }.onFailure { Timber.w(it, "KVP aggregate sweep failed") }
             val cfg = configManager.loadConfigFlow().first()
             if (cfg.autoTidy && cfg.tidySweepEpoch == 0L) {
                 val archived = runCatching { trackStore().sweep() }.getOrElse { e ->
@@ -810,10 +821,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun onNavigationState(event: OnNavigationState) {
         val state = event.state
         // Keep the latest event so rematchOnSettingsChange() can replay it after a mid-ride settings
-        // change, and stamp the resolved-settings signature this gate/match decision is based on.
+        // change. Resolve + stamp the settings signature only for ROUTE events (the only ones whose
+        // gate/match read the resolved settings) — the host re-emits nav states constantly, and a
+        // roster scan + EffectiveProfile alloc per non-route emission would be pure waste.
         lastNavEvent = event
-        val effNow = resolveProfile(activeConfig.value, activeProfileId)
-        lastMatchSig = matchSignature(effNow)
+        val effNow = if (state is OnNavigationState.NavigationState.NavigatingRoute) {
+            resolveProfile(activeConfig.value, activeProfileId).also { lastMatchSig = matchSignature(it) }
+        } else {
+            null
+        }
         // Compact + deduped: the host re-emits NavigatingRoute MANY times (computing climbs/progress);
         // logging the full object (polyline + climbs arrays) on every re-emit floods the log. Summarise,
         // and log only when the summary changes. The dedup key avoids String.format (which allocates a
@@ -839,7 +855,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // enable). Without the eff.active check the heavy match (polyline decode + candidate file IO
             // + O(n) SegmentMatcher) would run on a disabled profile or while the master switch is off —
             // the tick would then just discard it. Honors the "master off ⇒ fully inert" contract.
-            effNow.active && effNow.raceEnabled
+            effNow != null && effNow.active && effNow.raceEnabled
         ) {
             // Track REJOIN state live (the host re-emits NavigatingRoute as it computes a rejoin, so this
             // updates even though the heavy match below dedups on the polyline). A non-null rejoin means
@@ -951,7 +967,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // built under the OLD settings over the replacement's.
                     currentCoroutineContext().ensureActive()
                     if (lastMatchedPolyline == mine) {
-                        routeMode = RouteMode(path, state.name, matched, routeGhost, state.routeDistance)
+                        routeMode = RouteMode(path, mine, state.name, matched, routeGhost, state.routeDistance)
                         // Diagnostic for the scale question: the Karoo's routeDistance (the scale that
                         // DISTANCE_TO_DESTINATION is measured against) vs the decoded-polyline length (the
                         // scale segments + the ghost curve live on). A large delta means routeDist needs
@@ -1143,6 +1159,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // the old one's. Null when no route is loaded. ② route position now comes from the Karoo's own
         // map-matched DISTANCE_TO_DESTINATION (see the tick), not a local GPS projection.
         var projectorRoute: PolylinePath? = null
+        // The route IDENTITY (encoded polyline) the anchor state belongs to. Compared by VALUE so a
+        // same-route re-match (mid-ride settings change → fresh RouteMode, new path object) keeps the
+        // anchor; only a genuinely different polyline (new route / reroute) resets it.
+        var projectorPolyline: String? = null
         // The rider's route distance (m) at the START OF THE CURRENT ROUTE — "D0". Computed ONCE on the
         // first trustworthy on-route fix as (distanceAlongRoute − distanceRiddenSinceThisRouteBegan):
         // invariant while on-route, so it back-figures any head start ridden BLIND before GPS locked and
@@ -1428,36 +1448,43 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     val rm = routeMode
                     if (rm != null && rm.segments.isNotEmpty()) {
                         // Reset the per-route anchor (D0, ghost clock, first-move, odometer baseline) when
-                        // the route identity changes — including a Karoo REROUTE, which arrives as a new
-                        // polyline and re-matches into a fresh RouteMode. Capturing the odometer here keeps
-                        // D0 correct on a reroute: the new route's distance restarts at 0 while the ride
-                        // odometer keeps climbing, so D0 must subtract only distance ridden SINCE this route.
+                        // the ROUTE IDENTITY changes — including a Karoo REROUTE, which arrives as a new
+                        // polyline and re-matches into a fresh RouteMode. Identity is the POLYLINE STRING,
+                        // not the path object: a mid-ride settings change re-matches the SAME route into a
+                        // fresh RouteMode (new path instance), and resetting the anchor there would restart
+                        // the race + wipe the lap capture just because the rider toggled a setting. For a
+                        // same-route re-match only the ghost CURVE changed → re-anchor just the ghost clock
+                        // (next tick recomputes it from the preserved firstMove + D0 on the new curve).
                         if (projectorRoute !== rm.path) {
+                            val sameRoute = projectorPolyline == rm.polyline
                             projectorRoute = rm.path
+                            projectorPolyline = rm.polyline
                             ghostStartElapsedS = null
-                            routeStartDistM = null
-                            firstMoveElapsedS = null
-                            lastGoodRouteDistM = null
-                            distMAtLastGoodM = null
-                            d0CandPos = null
-                            d0CandOdo = null
-                            rideDistAtRouteStartM = distM
-                            // New route ⇒ start a fresh average-ghost lap capture (the old route's
-                            // partial samples must not fold into this one's aggregate).
-                            lapAggBuffer.clear()
-                            lapAggTarget = null
-                            lastBufferedRouteDist = Double.NEGATIVE_INFINITY
-                            // Distrust the OLD route's remaining until destJob emits the NEW route's value:
-                            // routeDistanceM flips with the path (atomic in RouteMode) but lastDistToDestM is
-                            // a separate stream, so pairing new routeLen with old remaining for a tick would
-                            // compute a bogus routeDist and latch a wrong D0 (which is invariant → wrong for
-                            // the whole new route). Holding --- one extra tick is the safe trade.
-                            lastDistToDestM = Double.NaN
-                            lastOnRoute = false
-                            // New route ⇒ the segment-alert edge belongs to the old route; clear it so the
-                            // first stretch on the new route is a fresh entry (and a preserved off-route
-                            // prevSegStartM from the old route can't suppress it).
-                            prevSegStartM = null
+                            if (!sameRoute) {
+                                routeStartDistM = null
+                                firstMoveElapsedS = null
+                                lastGoodRouteDistM = null
+                                distMAtLastGoodM = null
+                                d0CandPos = null
+                                d0CandOdo = null
+                                rideDistAtRouteStartM = distM
+                                // New route ⇒ start a fresh average-ghost lap capture (the old route's
+                                // partial samples must not fold into this one's aggregate).
+                                lapAggBuffer.clear()
+                                lapAggTarget = null
+                                lastBufferedRouteDist = Double.NEGATIVE_INFINITY
+                                // Distrust the OLD route's remaining until destJob emits the NEW route's value:
+                                // routeDistanceM flips with the path (atomic in RouteMode) but lastDistToDestM is
+                                // a separate stream, so pairing new routeLen with old remaining for a tick would
+                                // compute a bogus routeDist and latch a wrong D0 (which is invariant → wrong for
+                                // the whole new route). Holding --- one extra tick is the safe trade.
+                                lastDistToDestM = Double.NaN
+                                lastOnRoute = false
+                                // New route ⇒ the segment-alert edge belongs to the old route; clear it so the
+                                // first stretch on the new route is a fresh entry (and a preserved off-route
+                                // prevSegStartM from the old route can't suppress it).
+                                prevSegStartM = null
+                            }
                         }
                         val rg = rm.routeGhost
                         if (rg == null) {
