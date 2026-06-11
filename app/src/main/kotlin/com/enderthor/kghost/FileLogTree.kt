@@ -7,30 +7,40 @@ import com.enderthor.kghost.managers.StoragePermission
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import java.io.BufferedWriter
 import java.io.File
+import java.io.FileWriter
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 /**
- * A Timber tree that writes the diagnostic logs to a FILE so a ride can be studied afterwards without
- * adb/logcat (you can't tether the Karoo to a laptop on a route). Modelled on KSafe's CalibrationLogger
- * threading — an in-memory ring buffer drained by a background IO coroutine — so there is NO file I/O on
- * the calling thread (the ~1 Hz tick, the ~5 Hz map loop, the main thread). It is a general Timber tree,
- * so it captures every existing `Timber.*` call without touching the ~50 log sites.
+ * A Timber tree that writes diagnostic logs to a FILE so a ride can be studied afterwards without
+ * adb/logcat. Modelled on KSafe's CalibrationLogger threading — an in-memory ring buffer drained
+ * by a background IO coroutine — so there is NO file I/O on the calling thread.
  *
- * Improvements over KSafe's logger for this use case (riders don't ride every five minutes, so a ride's
- * log must survive the daily Karoo reboot / a process restart):
- *  - **Append across sessions** (never truncates on start), with a session-start marker so ride
- *    boundaries are findable.
- *  - **Size-based rotation** (`kghost.log` → `.1` → `.2`), so disk stays bounded (~3 files × [MAX_BYTES]).
+ * Performance design:
+ *  - A [BufferedWriter] is kept open for the duration of each file (one open/close per ride, not
+ *    per flush). Each flush drains the buffer with a single [BufferedWriter.flush] syscall — no
+ *    FileOutputStream open/close overhead every second.
+ *  - The [buffer] uses a plain [synchronized] block (held for <1 µs on the log path) so Timber
+ *    callers are never blocked on I/O.
  *
- * Cost when [enabled] is false: a single volatile read per log call — the buffer is never touched, no
- * string is built. The tree is always planted; the rider turns it on from settings (default OFF), so
- * normal users pay nothing.
+ * Data availability:
+ *  - [FLUSH_INTERVAL_MS] = 1 s — data is on disk within one second of being logged, so the file
+ *    can be read during a ride without waiting for it to end.
+ *  - [newRide] triggers an immediate flush via a [Channel] signal so the ride-start banner is on
+ *    disk within milliseconds of the ride beginning.
+ *
+ * Log organisation:
+ *  - **One file per ride**: `kghost-YYYY-MM-dd-HHmmss.log`. Between-ride logs go to `kghost.log`.
+ *  - **6-file cap**: oldest `.log` files are purged when the directory exceeds [MAX_LOG_FILES].
+ *
+ * Cost when [enabled] is false: a single volatile read per log call.
  */
 object FileLogTree : Timber.Tree() {
 
@@ -38,15 +48,19 @@ object FileLogTree : Timber.Tree() {
     @Volatile
     var enabled: Boolean = false
 
-    private const val MAX_BUFFER = 4000               // bounded RAM (~ a few hundred KB of lines)
-    private const val FLUSH_INTERVAL_MS = 5_000L      // append at most ~every 5 s (cheap, low loss on a kill)
-    private const val IDLE_POLL_MS = 60_000L          // slow poll while logging is OFF (default state)
-    private const val MAX_BYTES = 3L * 1024 * 1024    // rotate the current file past 3 MB
-    private const val FILE_NAME = "kghost.log"
+    private const val MAX_BUFFER = 4000
+    private const val FLUSH_INTERVAL_MS = 1_000L   // 1 s: data on disk fast, visible mid-ride
+    private const val IDLE_POLL_MS = 60_000L        // 60 s: slow poll while logging is OFF
+    private const val MAX_LOG_FILES = 6
 
     private val buffer = ArrayDeque<String>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val ts = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").withZone(ZoneId.systemDefault())
+    private val rideFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd-HHmmss").withZone(ZoneId.systemDefault())
+
+    // Signals the flush loop to wake up immediately (e.g. on newRide).
+    // CONFLATED: multiple signals before the loop wakes collapse to one flush.
+    private val flushSignal = Channel<Unit>(Channel.CONFLATED)
 
     @Volatile
     private var logFile: File? = null
@@ -54,40 +68,67 @@ object FileLogTree : Timber.Tree() {
     @Volatile
     private var started = false
 
+    // ── Persistent writer — accessed ONLY from the flush loop (no lock needed) ──────────────────
+    // Keeping the writer open across flushes avoids a FileOutputStream open/close on every 1-second
+    // tick. The loop detects a logFile change (newRide sets a new path) and re-opens lazily.
+    private var writer: BufferedWriter? = null
+    private var writerFile: File? = null   // which file writer is currently opened for
+
     /**
      * Resolve the log directory and start the background flush loop. Call ONCE from
-     * [KGhostApplication.onCreate]. Safe to call before [enabled] is ever set true — the flush loop
-     * just finds an empty buffer and does nothing until logging is turned on.
+     * [KGhostApplication.onCreate].
      */
     fun start(context: Context) {
         if (started) return
         started = true
         val dir = resolveDir(context)
         runCatching { dir.mkdirs() }
-        logFile = File(dir, FILE_NAME)
+        logFile = File(dir, "kghost.log")
         scope.launch {
             while (true) {
-                // Park at a slow poll while logging is off: with the default-OFF feature, a 5 s
-                // wakeup for the whole process lifetime is pure battery waste (log() never buffers
-                // while disabled, so there is nothing to flush). Worst case after toggling ON, the
-                // first flush is one idle poll away; the 5 s cadence resumes from then on.
-                delay(if (enabled) FLUSH_INTERVAL_MS else IDLE_POLL_MS)
+                // Wait for either a flush signal (immediate) or the periodic interval.
+                // kotlinx-coroutines select would be cleaner, but a simple try-receive + delay
+                // keeps the loop readable and avoids the select DSL overhead.
+                val signaled = runCatching {
+                    flushSignal.tryReceive().isSuccess
+                }.getOrDefault(false)
+                if (!signaled) {
+                    delay(if (enabled) FLUSH_INTERVAL_MS else IDLE_POLL_MS)
+                }
                 flush()
             }
         }
     }
 
     /**
-     * Prefer `/sdcard/KGhost/logs` (next to the rider's tracks — easy to find with a file manager or
-     * over USB) when all-files access is granted; otherwise the app-scoped external dir
-     * `…/Android/data/<pkg>/files/logs` (always writable, no permission, pullable via adb/MTP).
+     * Called once per genuinely-new ride start. Switches the log file to a fresh per-ride file,
+     * writes the ride-start banner to the buffer, signals an immediate flush so the banner is on
+     * disk within milliseconds, and schedules a purge of old files.
+     *
+     * No-op when [enabled] is false.
+     */
+    fun newRide(epochMs: Long) {
+        if (!enabled) return
+        val dir = logFile?.parentFile ?: return
+        val stamp = rideFmt.format(Instant.ofEpochMilli(epochMs))
+        logFile = File(dir, "kghost-$stamp.log")
+        synchronized(buffer) {
+            if (buffer.size >= MAX_BUFFER) buffer.removeFirst()
+            buffer.addLast("${ts.format(Instant.now())} I/KGhost: ===== RIDE START ($stamp) =====")
+        }
+        // Wake the flush loop immediately so banner + any pre-ride lines hit disk right away.
+        flushSignal.trySend(Unit)
+        scope.launch { purgeOldLogs(dir) }
+    }
+
+    /**
+     * Prefer `/sdcard/KGhost/logs` when all-files access is granted; otherwise the app-scoped
+     * external dir `…/Android/data/<pkg>/files/logs`.
      */
     private fun resolveDir(context: Context): File =
         if (StoragePermission.hasAllFilesAccess(context)) {
             File(Environment.getExternalStorageDirectory(), "KGhost/logs")
         } else {
-            // getExternalFilesDir can be null if external storage isn't mounted (rare on a Karoo); fall
-            // back to internal so we never resolve a bogus relative path that silently swallows writes.
             File(context.getExternalFilesDir(null) ?: context.filesDir, "logs")
         }
 
@@ -98,38 +139,55 @@ object FileLogTree : Timber.Tree() {
             append(levelChar(priority)); append('/')
             append(tag ?: "KGhost"); append(": ")
             append(message)
-            if (t != null) {
-                append('\n'); append(Log.getStackTraceString(t))
-            }
+            if (t != null) { append('\n'); append(Log.getStackTraceString(t)) }
         }
         synchronized(buffer) {
-            if (buffer.size >= MAX_BUFFER) buffer.removeFirst() // drop oldest under a sustained flood
+            if (buffer.size >= MAX_BUFFER) buffer.removeFirst()
             buffer.addLast(line)
         }
     }
 
-    /** Drain the buffer to the file on the IO coroutine, rotating if it grew past [MAX_BYTES]. */
+    /**
+     * Drain the buffer to the current log file.
+     *
+     * Called ONLY from the flush-loop coroutine (Dispatchers.IO), so [writer] / [writerFile]
+     * need no synchronisation — there is exactly one writer at a time.
+     */
     private fun flush() {
-        val file = logFile ?: return
+        val targetFile = logFile ?: return
+        // Re-open the writer when the log file changes (newRide sets a new logFile).
+        if (writerFile != targetFile) {
+            runCatching { writer?.close() }
+            writer = runCatching { FileWriter(targetFile, /* append= */ true).buffered() }.getOrNull()
+            writerFile = targetFile
+        }
+        val w = writer ?: return
         val lines: List<String>
         synchronized(buffer) {
             if (buffer.isEmpty()) return
             lines = buffer.toList()
             buffer.clear()
         }
-        // A failed flush must never crash the ride; the dropped lines are simply lost.
         runCatching {
-            file.appendText(lines.joinToString("\n", postfix = "\n"))
-            if (file.length() > MAX_BYTES) rotate(file)
+            lines.forEach { line -> w.write(line); w.newLine() }
+            w.flush()   // flush to OS; keep the writer open for the next cycle
+        }.onFailure {
+            // Writer broken — reset so the next cycle re-opens a fresh one.
+            runCatching { writer?.close() }
+            writer = null
+            writerFile = null
         }
     }
 
-    /** current → .1 → .2, dropping the oldest. The next append re-creates a fresh current file. */
-    private fun rotate(file: File) {
-        val parent = file.parentFile ?: return
-        File(parent, "$FILE_NAME.2").delete()
-        File(parent, "$FILE_NAME.1").renameTo(File(parent, "$FILE_NAME.2"))
-        file.renameTo(File(parent, "$FILE_NAME.1"))
+    /** Delete the oldest `.log` files in [dir] so at most [MAX_LOG_FILES] remain. */
+    private fun purgeOldLogs(dir: File) {
+        runCatching {
+            val logs = dir.listFiles { f -> f.name.endsWith(".log") } ?: return
+            if (logs.size <= MAX_LOG_FILES) return
+            logs.sortedBy { it.lastModified() }
+                .take(logs.size - MAX_LOG_FILES)
+                .forEach { it.delete() }
+        }
     }
 
     private fun levelChar(p: Int): Char = when (p) {

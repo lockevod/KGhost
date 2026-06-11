@@ -87,7 +87,7 @@
     <string name="race_segment_exit_label">Segment exit alert</string>
     <string name="race_segment_exit_description">Show an alert when leaving a stretch with a recorded ghost. When the next stretch is close, the exit is skipped so nearby stretches don\'t double-alert.</string>
     <string name="race_filelog_label">Write a diagnostic log</string>
-    <string name="race_filelog_description">Save KGhost\'s diagnostics to a file so a ride can be studied afterwards without a computer. Leave off for normal use.</string>
+    <string name="race_filelog_description">Save KGhost\'s diagnostics to a file so a ride can be studied afterwards without a computer. Each ride gets its own file (kghost-YYYY-MM-dd-HHmmss.log); older files are purged automatically once there are more than 6. Leave off for normal use, debug increase battery usage and general performance.</string>
     <string name="race_filelog_path">Log file: %1$s</string>
     <string name="race_show_ghost_on_map">Show ghost on map</string>
     <string name="race_show_ghost_on_map_desc">Draw the ghost\'s live position on the map during a segment race</string>
