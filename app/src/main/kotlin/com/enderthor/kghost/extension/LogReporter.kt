@@ -34,6 +34,14 @@ object LogReporter {
 
     /** A coordinate token anywhere in the log (`lat=41.4863`, `lng=-2.31`) → redacted to `lat=•`. */
     private val COORD = Regex("(lat|lng)=-?\\d+(\\.\\d+)?")
+    // Rider-chosen NAMES (route / Karoo ride profile). Not coordinates, but a route named after a place
+    // ("Casa-Trabajo") is still identifying, so they're stripped from the uploaded copy too. Anchored on
+    // the stable surrounding tokens of each log line that prints a name (see KGhostExtension nav/profile
+    // /avg/route-mode logs): `name=<X> routeLen=`, the active-profile line (name to EOL), and the
+    // single-quoted `on '<X>' karooLen=` / `for '<X>' yet` forms.
+    private val ROUTE_NAME = Regex("name=.*?(?= routeLen=)")
+    private val PROFILE_NAME = Regex("(KVP active profile: id=\\S+ name=).*")
+    private val QUOTED_NAME = Regex("\\b(on|for) '[^']*'")
 
     sealed class SendResult(val message: String) {
         class Success(message: String) : SendResult(message)
@@ -41,8 +49,12 @@ object LogReporter {
         val ok: Boolean get() = this is Success
     }
 
-    /** Removes absolute GPS coordinates from [content] so no location data is ever uploaded. */
-    fun redactForUpload(content: String): String = content.replace(COORD, "$1=•")
+    /** Removes GPS coordinates AND rider-chosen route/profile names so no location/identity is uploaded. */
+    fun redactForUpload(content: String): String = content
+        .replace(COORD, "$1=•")
+        .replace(ROUTE_NAME, "name=•")
+        .replace(PROFILE_NAME, "$1•")
+        .replace(QUOTED_NAME, "$1 '•'")
 
     /**
      * Sends [content] (redacted) as a Telegram document named [fileName], with [caption] as the

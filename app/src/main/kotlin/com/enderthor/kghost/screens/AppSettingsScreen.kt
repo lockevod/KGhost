@@ -106,6 +106,13 @@ fun AppSettingsScreen(
                 scope.launch { saveFailed = !configManager.updateConfig { it.copy(fileLogging = on) } }
             },
         )
+        // Shown ALWAYS (before enabling) so turning the log on is an informed opt-in: it discloses that
+        // the log is uploaded to the developer (anonymised, GPS + names stripped).
+        Text(
+            text = stringResource(R.string.race_filelog_upload_note),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         if (config.fileLogging) {
             Text(
                 text = stringResource(R.string.race_filelog_path, FileLogTree.pathHint()),
@@ -119,11 +126,6 @@ fun AppSettingsScreen(
                     color = MaterialTheme.colorScheme.onSurface,
                 )
             }
-            Text(
-                text = stringResource(R.string.race_filelog_upload_note),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
 
         if (saveFailed) {
