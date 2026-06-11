@@ -2,6 +2,8 @@ package com.enderthor.kghost.extension
 
 import io.hammerhead.karooext.KarooSystemService
 import io.hammerhead.karooext.models.ActiveRideProfile
+import io.hammerhead.karooext.models.HttpResponseState
+import io.hammerhead.karooext.models.OnHttpResponse
 import io.hammerhead.karooext.models.OnMapZoomLevel
 import io.hammerhead.karooext.models.OnNavigationState
 import io.hammerhead.karooext.models.OnStreamState
@@ -12,6 +14,7 @@ import io.hammerhead.karooext.models.UserProfile
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 
 /**
@@ -95,3 +98,24 @@ fun KarooSystemService.streamRideProfile(): Flow<RideProfile> = callbackFlow {
     val id = addConsumer<ActiveRideProfile>(onEvent = { trySend(it.profile) })
     awaitClose { removeConsumer(id) }
 }
+
+/**
+ * Makes an HTTP request through the Karoo's own connectivity (phone tether / Wi-Fi) and suspends
+ * until the response completes. Used by [com.enderthor.kghost.extension.LogReporter] to POST the
+ * diagnostic log to the developer's Telegram bot. Mirrors the karoo-ext request/response consumer
+ * pattern used for the data streams above.
+ */
+suspend fun KarooSystemService.httpRequest(
+    method: String,
+    url: String,
+    headers: Map<String, String> = emptyMap(),
+    body: ByteArray? = null,
+): HttpResponseState.Complete = callbackFlow {
+    val listenerId = addConsumer<OnHttpResponse>(
+        params = OnHttpResponse.MakeHttpRequest(method, url, headers, body),
+        onEvent = { response ->
+            (response.state as? HttpResponseState.Complete)?.let { trySend(it); close() }
+        },
+    )
+    awaitClose { removeConsumer(listenerId) }
+}.first()

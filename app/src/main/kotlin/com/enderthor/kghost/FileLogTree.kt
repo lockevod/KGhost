@@ -48,6 +48,15 @@ object FileLogTree : Timber.Tree() {
     @Volatile
     var enabled: Boolean = false
 
+    /**
+     * Random 6-hex id for the CURRENT ride's log, refreshed on each [newRide]. Lets the developer
+     * tell one ride's uploaded log from another in the same Telegram inbox. Random (derived from the
+     * ride-start epoch bits), not the time itself — no personal data. "000000" before the first ride.
+     */
+    @Volatile
+    var sessionId: String = "000000"
+        private set
+
     private const val MAX_BUFFER = 4000
     private const val FLUSH_INTERVAL_MS = 1_000L   // 1 s: data on disk fast, visible mid-ride
     private const val IDLE_POLL_MS = 60_000L        // 60 s: slow poll while logging is OFF
@@ -111,6 +120,7 @@ object FileLogTree : Timber.Tree() {
         if (!enabled) return
         val dir = logFile?.parentFile ?: return
         val stamp = rideFmt.format(Instant.ofEpochMilli(epochMs))
+        sessionId = "%06x".format((epochMs xor (epochMs ushr 16)) and 0xFFFFFFL)
         logFile = File(dir, "kghost-$stamp.log")
         synchronized(buffer) {
             if (buffer.size >= MAX_BUFFER) buffer.removeFirst()
@@ -202,4 +212,12 @@ object FileLogTree : Timber.Tree() {
 
     /** Absolute path of the current log file, for the settings hint. */
     fun pathHint(): String = logFile?.absolutePath ?: "(not started yet)"
+
+    /** The current ride's log file (or the between-ride file), for the diagnostic-log uploader. */
+    fun currentLogFile(): File? = logFile
+
+    /** Ask the flush loop to drain the buffer to disk now (e.g. just before an upload at ride end). */
+    fun requestFlush() {
+        flushSignal.trySend(Unit)
+    }
 }

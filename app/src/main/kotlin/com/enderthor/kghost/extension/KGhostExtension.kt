@@ -240,6 +240,29 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          * absorbs GPS noise in the two measurements; the real signal (a loop snap) is kilometres.
          */
         private const val REROUTE_JUMP_SLACK_M = 500.0
+
+        /** How often the diagnostic-log uploader sends the new tail of the current ride's log. */
+        private const val LOG_SEND_INTERVAL_MS = 20 * 60_000L
+
+        /**
+         * Max characters per uploaded chunk. The Karoo `httpRequest` body crosses the host Binder
+         * transaction at ~80 KB (KSafe's empirical CALIBRATION_MAX_CHUNK_BYTES = 72 000), so each POST
+         * must stay well under it — 60 000 chars ≈ 60 KB of ASCII log + multipart overhead. A bigger
+         * body fails with TransactionTooLargeException, so the WHOLE feature silently never delivers.
+         */
+        private const val LOG_CHUNK_CHARS = 60_000
+
+        /** Chunks per PERIODIC cycle, so one window can't monopolise the link draining a huge backlog. */
+        private const val LOG_PERIODIC_MAX_CHUNKS = 6
+
+        /** Device model sanitised for the upload filename/caption (e.g. "Karoo 3" → "Karoo-3"). */
+        private val DEVICE_LABEL: String by lazy {
+            android.os.Build.MODEL.trim()
+                .replace(' ', '-')
+                .replace(Regex("[^A-Za-z0-9._-]"), "")
+                .take(20)
+                .ifEmpty { "device" }
+        }
     }
 
     lateinit var karooSystem: KarooSystemService
@@ -415,6 +438,25 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // Previous fileLogging value, so the "file logging ON" banner fires on the config off→on transition
     // independent of who set FileLogTree.enabled (the settings UI sets it immediately too).
     private var prevFileLogging = false
+
+    // ── Diagnostic-log upload (only when file logging is ON) ─────────────────────────────────────
+    // Periodically (and at ride end) uploads the NEW tail of the current ride's log to the developer's
+    // Telegram, with GPS coordinates redacted by LogReporter. Off entirely unless the rider enabled the
+    // diagnostic log AND the build carries credentials (local.properties).
+    private var logSendJob: kotlinx.coroutines.Job? = null
+    // The Anon tag (stable opaque install id) — fetched once, shown in the UI and the upload caption.
+    @Volatile
+    private var installId: String? = null
+    // Chars of the current ride's log already uploaded, so each cycle sends only what's new. Reset to 0
+    // (with [logChunkSeq]) on each new ride file.
+    @Volatile
+    private var sentLogChars: Int = 0
+    @Volatile
+    private var logChunkSeq: Int = 0
+    // Guards against a periodic drain and the ride-end drain running concurrently (both advance
+    // sentLogChars), which could skip or duplicate a chunk.
+    @Volatile
+    private var logSendInFlight = false
 
     // Debounce for non-route nav-state teardown. The host emits transient Idle/NavigatingToDestination
     // blips between NavigatingRoute re-emits; this delayed job clears route mode only if no route comes
@@ -624,6 +666,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     GapStateHolder.clear()
                     SegmentInfoHolder.clear()
                     publishGhostMarker(null)
+                    // Upload the ride's final log tail (GPS redacted) before the file rotates next ride.
+                    // maxChunks high so the remaining backlog drains; periodic normally kept it small.
+                    scope.launch { runCatching { sendLogTail("ride-end", maxChunks = 200) } }
                     recordingStartedEpoch = 0L // backstop; finish() already cleared it
                 }
                 else -> {}
@@ -672,6 +717,85 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 Timber.i("KVP active profile: id=${profile.id} name=${profile.name}")
             }
             .launchIn(scope)
+
+        startLogSendLoop()
+    }
+
+    /**
+     * Periodically uploads the NEW tail of the current ride's diagnostic log to the developer's
+     * Telegram (GPS coordinates redacted), and the ride-end tail is sent from the Idle handler. Runs
+     * only while a ride is active AND file logging is on; otherwise each cycle is a cheap no-op. The
+     * whole feature is dormant unless the rider turned the diagnostic log on and the build carries
+     * Telegram credentials.
+     */
+    private fun startLogSendLoop() {
+        // Start ONCE. onConnected re-fires on every host rebind, but this loop holds no host consumer
+        // (it just calls karooSystem.httpRequest, and karooSystem is the same instance across
+        // reconnects), so restarting it would only reset the periodic timer on every reconnect —
+        // starving the periodic send on a flaky link. Survives reconnects untouched.
+        if (logSendJob?.isActive == true) return
+        logSendJob = scope.launch {
+            while (true) {
+                delay(LOG_SEND_INTERVAL_MS)
+                if (!FileLogTree.enabled) continue
+                if (tickJob?.isActive != true) continue // only during an active ride
+                sendLogTail("periodic", LOG_PERIODIC_MAX_CHUNKS)
+            }
+        }
+    }
+
+    /**
+     * Uploads the part of the current ride's log not yet sent ([sentLogChars]) to the developer's
+     * Telegram via [LogReporter] (which redacts every GPS coordinate first, so no location data leaves
+     * the device), in chunks of [LOG_CHUNK_CHARS] — each `httpRequest` body MUST stay under the host
+     * Binder transaction limit (~80 KB) or the whole POST fails. Sends at most [maxChunks] per call.
+     *
+     * Runs entirely on [Dispatchers.IO] — the owning [scope] is Main, and reading a multi-MB file +
+     * the multipart build must never touch the Main thread (ANR). Advances [sentLogChars] only per
+     * SUCCESSFUL chunk, so a failure just retries from the same point next cycle; an in-flight guard
+     * stops the periodic and ride-end drains overlapping.
+     */
+    private suspend fun sendLogTail(prefix: String, maxChunks: Int) = withContext(Dispatchers.IO) {
+        if (!FileLogTree.enabled || !::karooSystem.isInitialized) return@withContext
+        if (logSendInFlight) return@withContext
+        val file = FileLogTree.currentLogFile() ?: return@withContext
+        logSendInFlight = true
+        try {
+            // Make sure the last second of buffered lines is on disk before we read.
+            FileLogTree.requestFlush()
+            delay(400)
+            val full = runCatching { file.readText() }.getOrNull() ?: return@withContext
+            if (full.length <= sentLogChars) return@withContext
+            val id = installId ?: runCatching { configManager.getOrCreateInstallId() }.getOrNull()
+                ?.also { installId = it } ?: return@withContext
+            val sid = FileLogTree.sessionId
+            val ver = BuildConfig.VERSION_NAME
+            var sent = 0
+            while (sentLogChars < full.length && sent < maxChunks) {
+                val hardEnd = minOf(sentLogChars + LOG_CHUNK_CHARS, full.length)
+                // Cut on a line boundary within the window so chunks stay readable; fall back to a
+                // hard cut if a single line somehow exceeds the window.
+                val nl = full.lastIndexOf('\n', hardEnd - 1)
+                val end = if (nl > sentLogChars) nl + 1 else hardEnd
+                val chunk = full.substring(sentLogChars, end)
+                if (chunk.isBlank()) break
+                val lines = chunk.count { it == '\n' }
+                val fileName = "kghost_v${ver}_${id}_${sid}_p${"%03d".format(logChunkSeq)}_$DEVICE_LABEL.log"
+                val caption = "KGhost log ($prefix)\nAnon tag: $id\nSession: $sid | $DEVICE_LABEL | v$ver | $lines lines"
+                val res = LogReporter.sendLogFile(chunk, fileName, caption, karooSystem)
+                if (res.ok) {
+                    sentLogChars = end
+                    logChunkSeq += 1
+                    sent++
+                } else {
+                    Timber.w("KVP log upload ($prefix) chunk failed: ${res.message}")
+                    break
+                }
+            }
+            if (sent > 0) Timber.i("KVP log upload ($prefix) ✓ — $sent chunk(s), through char $sentLogChars")
+        } finally {
+            logSendInFlight = false
+        }
     }
 
     /**
@@ -1088,6 +1212,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // Rotate the diagnostic log to a fresh per-ride file so each ride's logs are
             // self-contained and distinguishable. No-op when file logging is disabled.
             FileLogTree.newRide(recordingStartedEpoch)
+            // Fresh ride file ⇒ nothing uploaded yet from it.
+            sentLogChars = 0
+            logChunkSeq = 0
         }
         // GPS location consumer — subscribed only while Recording. Feeds the ride RECORDER (the route
         // position itself now comes from the Karoo, see destJob below). We stream the LOCATION DataType
@@ -1325,7 +1452,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 )
                                 Timber.w("KVP GPS lost > ${GPS_ALERT_S}s — alert dispatched")
                             }
-                        } else if (coastingS == 0.0) {
+                        } else if (coastingS < GPS_ALERT_S * 0.5) {
+                            // Re-arm with HYSTERESIS once the loss is comfortably over — NOT on an exact
+                            // `coastingS == 0.0`. In route mode coastingS is time-since-last-dest-change
+                            // while moving, which after recovery sits at ~0–1 s but is essentially never
+                            // bit-exactly 0.0 (only a full stop forces the 0.0 `!moving` branch). With the
+                            // old `== 0.0` the alert re-armed only if the rider STOPPED, so a second GPS
+                            // loss later in a non-stop ride never alerted. Half the fire threshold gives a
+                            // clean gap (fire ≥60 s, re-arm <30 s) with no flapping at the boundary.
                             gpsAlertFired = false
                         }
                         return coastingS >= GPS_GIVEUP_S

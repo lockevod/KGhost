@@ -90,6 +90,8 @@
     <string name="race_filelog_label">Guardar un registro de diagnóstico</string>
     <string name="race_filelog_description">Guarda los diagnósticos de KGhost en un fichero para poder estudiar una salida después sin ordenador. Cada salida genera su propio fichero (kghost-AAAA-MM-dd-HHmmss.log); los más antiguos se purgan automáticamente cuando hay más de 6. Déjalo apagado para el uso normal.</string>
     <string name="race_filelog_path">Fichero de log: %1$s</string>
+    <string name="race_filelog_anontag">Anon tag: %1$s</string>
+    <string name="race_filelog_upload_note">Cuando está activo, el registro de diagnóstico también se envía al desarrollador para ayudar a corregir problemas. Las coordenadas GPS se eliminan antes de enviar — ninguna ubicación sale de tu Karoo. El Anon tag de arriba es un id aleatorio (sin datos personales) para poder agrupar los registros; indícalo si reportas un problema.</string>
     <string name="race_show_ghost_on_map">Mostrar fantasma en el mapa</string>
     <string name="race_show_ghost_on_map_desc">Dibuja la posición en directo del fantasma en el mapa durante una carrera por tramos</string>
     <string name="race_ghost_icon_label">Icono del fantasma</string>

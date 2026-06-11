@@ -13,9 +13,11 @@ import com.enderthor.kghost.extension.jsonWithUnknownKeys
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.encodeToString
 import timber.log.Timber
+import kotlin.random.Random
 
 /**
  * Process-wide DataStore instance for KGhost settings.
@@ -32,6 +34,20 @@ val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "kg
 class ConfigurationManager(private val context: Context) {
 
     private val configKey = stringPreferencesKey("kghostconfig")
+    private val installIdKey = stringPreferencesKey("install_id")
+
+    /**
+     * Returns a stable, opaque 6-hex "Anon tag" for this install — created once and persisted, so a
+     * developer who receives diagnostic logs can group a device's logs across rides WITHOUT any
+     * personal or device identifier. It is purely random (no time, no hardware id); shown to the
+     * rider as the "Anon tag" in the upload caption. Stable across rides, restarts and config resets.
+     */
+    suspend fun getOrCreateInstallId(): String {
+        context.dataStore.data.first()[installIdKey]?.let { return it }
+        val id = "%06x".format(Random.nextInt(0x1000000))
+        runCatching { context.dataStore.edit { it[installIdKey] = id } }
+        return id
+    }
 
     /**
      * Emits the current [KGhostConfig] and re-emits whenever it changes in DataStore.

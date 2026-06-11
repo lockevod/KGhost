@@ -10,6 +10,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,6 +39,9 @@ fun AppSettingsScreen(
 ) {
     val scope = rememberCoroutineScope()
     var saveFailed by remember { mutableStateOf(false) }
+    // The stable "Anon tag" (install id) — fetched once so the rider can read/quote it when reporting.
+    var anonTag by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) { anonTag = runCatching { configManager.getOrCreateInstallId() }.getOrNull() }
 
     Column(
         modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -105,6 +109,18 @@ fun AppSettingsScreen(
         if (config.fileLogging) {
             Text(
                 text = stringResource(R.string.race_filelog_path, FileLogTree.pathHint()),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            anonTag?.let { tag ->
+                Text(
+                    text = stringResource(R.string.race_filelog_anontag, tag),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            Text(
+                text = stringResource(R.string.race_filelog_upload_note),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
