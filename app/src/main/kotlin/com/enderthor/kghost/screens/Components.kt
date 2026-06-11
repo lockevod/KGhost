@@ -1,10 +1,12 @@
 package com.enderthor.kghost.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -21,6 +23,24 @@ import androidx.compose.ui.unit.dp
  */
 @Composable
 fun dimmedContentColor(): Color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+
+/**
+ * Border for a [androidx.compose.material3.FilterChip] that makes the SELECTED state read on ANY
+ * background. The default selected container ([secondaryContainer], a tonal grey) is fine on the page
+ * [surface] but blends into a [Card]'s greyer [surfaceVariant] — so a selected chip inside a profile
+ * card looks identical to an unselected one. A 2dp primary outline on the selected chip (the
+ * unselected chips keep their default thin outline) pops regardless of the container behind it, with
+ * no layout cost. Shared so every FilterChip across the Race / per-profile / partner screens marks
+ * selection identically.
+ */
+@Composable
+fun selectedChipBorder(selected: Boolean, enabled: Boolean = true): BorderStroke? =
+    FilterChipDefaults.filterChipBorder(
+        enabled = enabled,
+        selected = selected,
+        selectedBorderColor = MaterialTheme.colorScheme.primary,
+        selectedBorderWidth = 2.dp,
+    )
 
 /**
  * A label (+ optional description) on the left and a [Switch] on the right. Shared by the Race,

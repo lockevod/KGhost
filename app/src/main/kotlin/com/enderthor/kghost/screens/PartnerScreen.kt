@@ -142,12 +142,14 @@ fun PartnerSection(
             selected = mode == TargetMode.SPEED,
             onClick = { mode = TargetMode.SPEED },
             label = { Text(stringResource(R.string.partner_mode_speed)) },
+            border = selectedChipBorder(selected = mode == TargetMode.SPEED),
             modifier = Modifier.heightIn(min = 48.dp),
         )
         FilterChip(
             selected = mode == TargetMode.PACE,
             onClick = { mode = TargetMode.PACE },
             label = { Text(stringResource(R.string.partner_mode_pace)) },
+            border = selectedChipBorder(selected = mode == TargetMode.PACE),
             modifier = Modifier.heightIn(min = 48.dp),
         )
     }

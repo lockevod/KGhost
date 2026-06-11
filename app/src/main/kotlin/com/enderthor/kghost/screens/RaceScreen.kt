@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -207,47 +208,55 @@ internal fun GhostModeChips(raceEnabled: Boolean, onChange: (Boolean) -> Unit) {
             selected = !raceEnabled,
             onClick = { onChange(false) },
             label = { Text(stringResource(R.string.race_mode_fixed)) },
+            border = selectedChipBorder(selected = !raceEnabled),
             modifier = Modifier.heightIn(min = 48.dp),
         )
         FilterChip(
             selected = raceEnabled,
             onClick = { onChange(true) },
             label = { Text(stringResource(R.string.race_mode_yours)) },
+            border = selectedChipBorder(selected = raceEnabled),
             modifier = Modifier.heightIn(min = 48.dp),
         )
     }
 }
 
 /**
- * Best / Last / Average picker. [enabled] = false (Fixed-pace mode) dims the chips and makes them
- * non-interactive — the current choice still shows so the rider sees what would apply in "Your rides".
- * All three chips share equal width so Average never looks smaller or closer than Best/Last.
+ * Best / Last / Average picker. [enabled] = false dims the chips. All three share equal width via
+ * [weight(1f)] within the FlowRow row (maxItemsInEachRow=3 keeps them all on one line). Labels use
+ * maxLines=1 so text never wraps inside a chip regardless of available width.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun GhostPickChips(selected: GhostPick, enabled: Boolean, onPick: (GhostPick) -> Unit) {
-    Row(
+    FlowRow(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        maxItemsInEachRow = 3,
     ) {
         FilterChip(
             enabled = enabled,
             selected = selected == GhostPick.BEST,
             onClick = { onPick(GhostPick.BEST) },
-            label = { Text(stringResource(R.string.race_ghost_best)) },
+            label = { Text(stringResource(R.string.race_ghost_best), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            border = selectedChipBorder(selected = selected == GhostPick.BEST, enabled = enabled),
             modifier = Modifier.weight(1f).heightIn(min = 48.dp),
         )
         FilterChip(
             enabled = enabled,
             selected = selected == GhostPick.LAST,
             onClick = { onPick(GhostPick.LAST) },
-            label = { Text(stringResource(R.string.race_ghost_last)) },
+            label = { Text(stringResource(R.string.race_ghost_last), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            border = selectedChipBorder(selected = selected == GhostPick.LAST, enabled = enabled),
             modifier = Modifier.weight(1f).heightIn(min = 48.dp),
         )
         FilterChip(
             enabled = enabled,
             selected = selected == GhostPick.AVERAGE,
             onClick = { onPick(GhostPick.AVERAGE) },
-            label = { Text(stringResource(R.string.race_ghost_average)) },
+            label = { Text(stringResource(R.string.race_ghost_average), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            border = selectedChipBorder(selected = selected == GhostPick.AVERAGE, enabled = enabled),
             modifier = Modifier.weight(1f).heightIn(min = 48.dp),
         )
     }
@@ -275,6 +284,7 @@ internal fun GhostIconChips(selected: GhostIcon, enabled: Boolean, onPick: (Ghos
                 selected = selected == choice.icon,
                 onClick = { onPick(choice.icon) },
                 label = { Text(stringResource(choice.labelRes)) },
+                border = selectedChipBorder(selected = selected == choice.icon, enabled = enabled),
                 modifier = Modifier.weight(1f).heightIn(min = 48.dp),
             )
         }
