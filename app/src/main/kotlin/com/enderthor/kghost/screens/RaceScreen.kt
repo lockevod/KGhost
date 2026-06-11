@@ -69,6 +69,7 @@ import java.io.File
 fun RaceSection(
     config: KGhostConfig,
     configManager: ConfigurationManager,
+    recordedCount: Int? = null,
 ) {
     val scope = rememberCoroutineScope()
     var saveFailed by remember { mutableStateOf(false) }
@@ -78,6 +79,17 @@ fun RaceSection(
         style = MaterialTheme.typography.titleMedium,
     )
     Text(text = stringResource(R.string.race_description))
+
+        // Recorded-track count — the same shared figure shown on the Settings tab next to Import, so
+        // "Race Your Own" makes clear how many rides it has to race against and it reflects an import
+        // (the count is recomputed on the host's refreshKey) without leaving this tab.
+        if (recordedCount != null) {
+            Text(
+                text = stringResource(R.string.race_recorded_tracks, recordedCount),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
 
         HorizontalDivider()
 

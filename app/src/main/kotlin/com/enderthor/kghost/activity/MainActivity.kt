@@ -154,6 +154,7 @@ fun TabLayout() {
                 configManager = configManager,
                 imperial = imperial,
                 activeProfileId = activeProfileId,
+                recordedCount = trackCount,
             )
             else -> AppSettingsScreen(
                 config = config,

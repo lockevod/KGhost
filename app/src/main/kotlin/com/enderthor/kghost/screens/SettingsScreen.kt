@@ -36,6 +36,7 @@ fun SettingsScreen(
     configManager: ConfigurationManager,
     imperial: Boolean = false,
     activeProfileId: String? = null,
+    recordedCount: Int? = null,
 ) {
     Column(
         modifier = Modifier
@@ -66,6 +67,7 @@ fun SettingsScreen(
         RaceSection(
             config = config,
             configManager = configManager,
+            recordedCount = recordedCount,
         )
 
         HorizontalDivider()
