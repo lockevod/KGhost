@@ -23,8 +23,8 @@ android {
         applicationId = "com.enderthor.kghost"
         minSdk = 23
         targetSdk = 34
-        versionCode = 202606081
-        versionName = "0.4.0"
+        versionCode = 202606121
+        versionName = "0.5.0"
 
         buildConfigField("String", "CALIB_BOT_TOKEN", "\"${localProps.getProperty("calib.bot_token", "")}\"")
         buildConfigField("String", "CALIB_CHAT_ID", "\"${localProps.getProperty("calib.chat_id", "")}\"")

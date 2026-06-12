@@ -242,6 +242,23 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          */
         private const val REROUTE_JUMP_SLACK_M = 500.0
 
+        /**
+         * Remaining-to-destination (m) at/under which the rider is treated as having REACHED the route
+         * end. At the finish we (A) trust the Karoo's snap to the route end — bypassing the odometric
+         * plausibility filter, which would otherwise reject the legitimate end-snap forever when GPS
+         * dropped the final metres (the odometer ridden since the last good fix is then SMALLER than the
+         * remaining route distance, so the snap looks "spurious") and pin the rider short of the line —
+         * and (B) FREEZE the gap so it stops inflating against the still-advancing ghost clock.
+         */
+        private const val ROUTE_END_EPS_M = 8.0
+
+        /**
+         * remaining < [ROUTE_END_EPS_M] must PERSIST this long before it counts as a genuine finish, so a
+         * transient DISTANCE_TO_DESTINATION glitch mid-route can't false-freeze the race. Pure debounce —
+         * the frozen gap value is captured live once confirmed.
+         */
+        private const val ROUTE_END_CONFIRM_MS = 4_000L
+
         /** How often the diagnostic-log uploader sends the new tail of the current ride's log. */
         private const val LOG_SEND_INTERVAL_MS = 20 * 60_000L
 
@@ -1351,6 +1368,17 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // crossing into a DIFFERENT stretch), never every tick while on it. null = between segments /
         // off-route last tick. Local to the tick so it resets per ride.
         var prevSegStartM: Double? = null
+        // Wall-clock (ms) when remaining-to-destination FIRST fell below [ROUTE_END_EPS_M], or 0 while
+        // it's above. Debounces the finish: only a remaining that STAYS sub-EPS for ≥ROUTE_END_CONFIRM_MS
+        // is a real arrival at the destination, so a one-tick remaining glitch mid-route can't freeze the
+        // race. Reset on a route change.
+        var routeEndSinceMs = 0L
+        // The final gap, captured ONCE when the rider reaches the route end, then re-published every tick
+        // so it stops inflating — the ghost clock keeps advancing past a stationary finisher (ghostElapsed
+        // climbs while the route position is pinned at the end), which would otherwise read an ever-growing
+        // BEHIND. Cleared if remaining climbs back out of the finish band (a pass-through destination) or on
+        // a route change. null until the finish is confirmed.
+        var finishedGap: GapState? = null
 
         tickJob = scope.launch(Dispatchers.Default) {
             val distance = karooSystem.streamDataFlow(DataType.Type.DISTANCE)
@@ -1623,6 +1651,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 // first stretch on the new route is a fresh entry (and a preserved off-route
                                 // prevSegStartM from the old route can't suppress it).
                                 prevSegStartM = null
+                                // New route ⇒ the previous route's finish no longer applies; race again.
+                                routeEndSinceMs = 0L
+                                finishedGap = null
                             }
                         }
                         val rg = rm.routeGhost
@@ -1813,6 +1844,68 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 return@runCatching
                             }
                             // Confirmed: fall through — this tick's routeDist becomes the baseline below.
+                        }
+                        // END OF ROUTE — the rider has reached the destination (remaining≈0). Gated on
+                        // routeStartDistM != null so this is the genuine FINISH, not the host's pre-position
+                        // default-0 at the START (the implausible-remaining guard above catches that while
+                        // routeStartDistM == null), and on ghostStartElapsedS != null so the race is anchored.
+                        // Two things happen here, and ONLY here:
+                        //   (A) TRUST the snap to the route end, bypassing the odometric filter below. At the
+                        //       genuine finish the odometer ridden since the last good fix can be SMALLER than
+                        //       the remaining route distance (GPS dropped the final stretch, so distM never
+                        //       accrued it), so the filter would flag the end-snap "spurious" every tick and
+                        //       pin the rider short of the line forever (raw=routeLen rejected → effRouteDist
+                        //       = lastGood + odoΔ, frozen).
+                        //   (B) FREEZE the gap — the race is over. Capture the final gap ONCE and re-publish
+                        //       it; otherwise the ghost clock keeps advancing past a stationary finisher and
+                        //       the BEHIND gap inflates indefinitely until the ride is stopped.
+                        // Debounced (ROUTE_END_CONFIRM_MS) so a transient remaining glitch mid-route can't
+                        // false-finish; if remaining climbs back out of the band (a pass-through destination)
+                        // we un-freeze and race on.
+                        if (routeStartDistM != null && ghostStartElapsedS != null && remainingM < ROUTE_END_EPS_M) {
+                            val nowMs = System.currentTimeMillis()
+                            if (routeEndSinceMs == 0L) routeEndSinceMs = nowMs
+                            if (nowMs - routeEndSinceMs >= ROUTE_END_CONFIRM_MS) {
+                                val endPos = routeLenM
+                                // Captured ONCE: the rider's final result on the ghost clock. fresh=true —
+                                // the destination IS the known position, not a dead-reckoned estimate.
+                                val gap = finishedGap ?: GapCalculator.compute(
+                                    endPos, elapsedS - ghostStartElapsedS!!, rg, fresh = true,
+                                ).also { finishedGap = it }
+                                GapStateHolder.update(gap)
+                                val seg = rm.segments.firstOrNull { endPos in it.routeStartM..it.routeEndM }
+                                publishSegment(seg, rm.segments)
+                                // Keep the map ghost live: its curve saturates at routeLen, so a ghost that
+                                // already finished sits at the line, while a ghost the rider BEAT keeps gliding
+                                // to the line (the frozen number is the rider's result; the marker can still
+                                // move). Re-anchoring each tick is harmless either way.
+                                mapGhostState = if (cfg.showGhostOnMap) {
+                                    MapGhostState(
+                                        rg = rg,
+                                        path = rm.path,
+                                        ghostStartElapsedS = ghostStartElapsedS!!,
+                                        anchorElapsedS = elapsedS,
+                                        anchorWallMs = nowMs,
+                                    )
+                                } else {
+                                    null
+                                }
+                                if (nowMs - lastDiagLogMs >= diagLogMs) {
+                                    lastDiagLogMs = nowMs
+                                    Timber.d(
+                                        "KVP tick route: FINISHED at routeEnd=${"%.0f".format(endPos)}m — gap FROZEN " +
+                                            "gapT=${"%.0f".format(gap.gapTimeS)}s gapD=${"%.0f".format(gap.gapDistanceM)}m " +
+                                            "${if (gap.ahead) "AHEAD" else "BEHIND"} remaining=${"%.0f".format(remainingM)} " +
+                                            "rideDist=${"%.0f".format(distM)}",
+                                    )
+                                }
+                                return@runCatching
+                            }
+                        } else {
+                            // Not at the finish band (or no longer): clear the debounce + any frozen result so
+                            // a pass-through destination resumes normal racing.
+                            routeEndSinceMs = 0L
+                            finishedGap = null
                         }
                         // ODOMETRIC PLAUSIBILITY FILTER. Route progress can NEVER exceed the physical
                         // distance ridden (the route is ≤ the path travelled). On a self-intersecting loop
