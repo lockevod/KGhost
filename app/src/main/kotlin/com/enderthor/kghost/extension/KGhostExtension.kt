@@ -531,6 +531,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // so a paused ghost holds position instead of drifting forward. Set from the RideState collector.
     @Volatile
     private var ridePaused = false
+    // True once a ride has actually entered Recording, until the matching Idle handles its end. Gates the
+    // ride-end log upload so it fires ONLY after a real ride: streamRide() replays the current state on
+    // subscribe and onConnected re-subscribes on every host rebind, so a no-ride device emits Idle
+    // repeatedly — without this guard each of those would upload the between-ride log. Set in Recording,
+    // checked-and-cleared in Idle.
+    @Volatile
+    private var wasRecording = false
     // Latest map zoom level [8,18] from OnMapZoomLevel (15.0 mid-range until the first event). Drives
     // the ghost icon's automatic size (the drawable is swapped S/M/L by zoom so it stays proportionate
     // to the map). @Volatile: written by the zoom collector, read in publishGhostMarker.
@@ -660,6 +667,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             when (state) {
                 is RideState.Recording -> {
                     ridePaused = false
+                    wasRecording = true
                     // Re-stamp the map anchor's wall-clock to now so the loop doesn't lurch the ghost
                     // forward (by up to MAX_GHOST_EXTRAP_MS) on resume before the next tick re-anchors:
                     // ELAPSED_TIME was frozen during pause, but anchorWallMs would otherwise be stale.
@@ -685,9 +693,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     GapStateHolder.clear()
                     SegmentInfoHolder.clear()
                     publishGhostMarker(null)
-                    // Upload the ride's final log tail (GPS redacted) before the file rotates next ride.
+                    // Upload the ride's final log tail (GPS redacted) before the file rotates next ride,
+                    // but ONLY if a ride was actually recording. streamRide() replays the current state on
+                    // subscribe and onConnected re-subscribes on every host rebind, so an idle device emits
+                    // Idle repeatedly — without this guard each emission would re-upload the between-ride log.
                     // maxChunks high so the remaining backlog drains; periodic normally kept it small.
-                    scope.launch { runCatching { sendLogTail("ride-end", maxChunks = 200) } }
+                    if (wasRecording) {
+                        wasRecording = false
+                        scope.launch { runCatching { sendLogTail("ride-end", maxChunks = 200) } }
+                    }
                     recordingStartedEpoch = 0L // backstop; finish() already cleared it
                 }
                 else -> {}
