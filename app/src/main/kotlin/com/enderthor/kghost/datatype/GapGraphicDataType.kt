@@ -68,14 +68,6 @@ class GapGraphicDataType(
     private val context: Context,
 ) : DataTypeImpl("kghost", "kghost-gap") {
 
-    /**
-     * Tracks the coroutine scope of the currently active view so a re-entrant [startView]
-     * (the Karoo host can call it again for the same field) cancels the previous scope first,
-     * avoiding two render loops fighting over the same emitter.
-     */
-    @Volatile
-    private var activeScopeJob: Job? = null
-
     private companion object {
         const val PLACEHOLDER = "---"
 
@@ -121,11 +113,12 @@ class GapGraphicDataType(
 
     override fun startView(context: Context, config: ViewConfig, emitter: ViewEmitter) {
         Timber.d("KVP gap-graphic startView preview=${config.preview}")
-        // Re-entry guard: cancel any previous render scope before starting a new one.
-        activeScopeJob?.cancel()
-
+        // Each placement gets its OWN independent scope, cancelled ONLY by its own setCancellable
+        // below — never a shared "cancel the previous scope" guard. The rider can put this field on
+        // TWO pages, which the host serves from this ONE DataTypeImpl instance via separate startView
+        // calls; cancelling a sibling scope here would FREEZE the other page's field. Each startView
+        // already builds its own FrameRenderer, so concurrent render loops never share buffers.
         val scopeJob = Job()
-        activeScopeJob = scopeJob
         val scope = CoroutineScope(Dispatchers.Default + scopeJob)
 
         val configJob = scope.launch {
@@ -173,6 +166,10 @@ class GapGraphicDataType(
                 // "ignoring updateView, too soon") while still guaranteeing a post-throttle frame when
                 // the state is static (anti-stuck).
                 var lastEmitMs = 0L
+                // One-shot diagnostic: log the FIRST frame this view actually emits with an ACTIVE gap
+                // (the `--- → number` transition). Confirms from the ride log whether the field started
+                // rendering numbers as soon as the gap went active, or appeared stuck. Drop once verified.
+                var loggedFirstActive = false
                 // Cheap render-key dedup: the gap doubles jitter every ~1 Hz tick but the dots/text
                 // change far less often, so skip the bitmap redraw + updateView IPC when the key is
                 // unchanged. lastRv caches the last view so the heartbeat re-asserts it without redraw.
@@ -239,6 +236,10 @@ class GapGraphicDataType(
                         val rv = RemoteViews(context.packageName, R.layout.field_gap)
                         rv.setImageViewBitmap(R.id.field_gap_image, bmp)
                         emitter.updateView(rv)
+                        if (!config.preview && !loggedFirstActive && state.active) {
+                            loggedFirstActive = true
+                            Timber.d("KVP gap-graphic: first ACTIVE frame emitted (gap now rendering)")
+                        }
                         lastKey = key
                         lastRv = rv
                         lastEmitMs = now

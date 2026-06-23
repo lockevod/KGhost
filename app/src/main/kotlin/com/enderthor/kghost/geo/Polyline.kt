@@ -55,6 +55,12 @@ object Polyline {
         val deg = Math.toDegrees(atan2(y, x))
         return (deg + 360.0) % 360.0
     }
+
+    /** Smallest absolute circular difference between two compass bearings (deg), in [0, 180]. */
+    fun bearingDiffDeg(a: Double, b: Double): Double {
+        val raw = ((a - b) % 360.0 + 360.0) % 360.0
+        return if (raw > 180.0) 360.0 - raw else raw
+    }
 }
 
 /** A sampled point along a [PolylinePath]: its coordinate and the heading (deg, 0..360) there. */
@@ -164,6 +170,24 @@ class PolylinePath(val points: List<LatLng>) {
     }
 
     /**
+     * Like [nearestProjectionNear] but returns null when NO route segment intersects the window, instead
+     * of silently falling back to a GLOBAL nearest scan. The global fallback can return a far point on
+     * ANOTHER pass of a self-overlapping route; a caller that must stay on the current pass wants
+     * "no projection in the window" to mean "don't trust GPS this tick" (use its fallback), NOT "here's
+     * a point from somewhere else on the route". Only the projection that genuinely lies in the window
+     * is ever returned.
+     */
+    fun nearestProjectionInWindowOrNull(
+        p: LatLng,
+        aroundDistanceM: Double,
+        backWindowM: Double,
+        fwdWindowM: Double,
+    ): Projection? {
+        val windowed = nearestProjectionInRange(p, aroundDistanceM - backWindowM, aroundDistanceM + fwdWindowM)
+        return if (windowed.perpDistM == Double.MAX_VALUE) null else windowed
+    }
+
+    /**
      * Core projection scan restricted to segments whose `[cumulativeM[i], cumulativeM[i + 1]]`
      * range intersects `[windowLoM, windowHiM]`. With an infinite window this is the plain global
      * nearest projection.
@@ -186,6 +210,53 @@ class PolylinePath(val points: List<LatLng>) {
         }
         // lo is the smallest far-end index with cumulativeM[lo] >= windowLoM, or size if none.
         return (lo - 1).coerceAtMost(points.size - 1)
+    }
+
+    /**
+     * Bootstrap pass-disambiguation by HEADING. On a self-overlapping route two passes share the same
+     * road, so a GPS point projects equally onto BOTH — the nearest-by-perp pick is then a coin-flip
+     * and, latched into the invariant D0, offsets the gap for the whole ride. The rider's heading
+     * resolves it: the two passes run in OPPOSITE directions, so only the pass whose route bearing
+     * matches the rider's travel direction is real. Scans the window `[around−back, around+fwd]` and
+     * returns the SMALLEST-perp segment with perp ≤ [maxPerpM] AND bearing within [maxHeadingDiffDeg] of
+     * [headingDeg]; null if none qualifies (caller falls back to the plain nearest). Only meaningful
+     * while moving with a valid heading.
+     */
+    fun nearestProjectionByHeadingInWindowOrNull(
+        p: LatLng,
+        headingDeg: Double,
+        aroundDistanceM: Double,
+        backWindowM: Double,
+        fwdWindowM: Double,
+        maxPerpM: Double,
+        maxHeadingDiffDeg: Double,
+    ): Projection? {
+        val windowLoM = aroundDistanceM - backWindowM
+        val windowHiM = aroundDistanceM + fwdWindowM
+        var best: Projection? = null
+        val start = firstSegmentFrom(windowLoM)
+        for (i in start until points.size - 1) {
+            val segLoM = cumulativeM[i]; val segHiM = cumulativeM[i + 1]
+            if (segLoM > windowHiM) break
+            if (segHiM < windowLoM) continue
+            val a = points[i]; val b = points[i + 1]
+            // Direction filter: skip a segment whose bearing doesn't match the rider's heading (the
+            // opposite pass of an overlap is ~180° off). Cheap reject before the perp math.
+            if (Polyline.bearingDiffDeg(Polyline.bearingDeg(a, b), headingDeg) > maxHeadingDiffDeg) continue
+            val mPerDegLat = 111_320.0
+            val mPerDegLng = 111_320.0 * cos(Math.toRadians(a.lat))
+            val bx = (b.lng - a.lng) * mPerDegLng; val by = (b.lat - a.lat) * mPerDegLat
+            val px = (p.lng - a.lng) * mPerDegLng; val py = (p.lat - a.lat) * mPerDegLat
+            val segLen2 = bx * bx + by * by
+            val t = if (segLen2 == 0.0) 0.0 else ((px * bx + py * by) / segLen2).coerceIn(0.0, 1.0)
+            val fx = t * bx; val fy = t * by
+            val perp = sqrt((px - fx) * (px - fx) + (py - fy) * (py - fy))
+            if (perp <= maxPerpM && (best == null || perp < best.perpDistM)) {
+                val along = cumulativeM[i] + t * (cumulativeM[i + 1] - cumulativeM[i])
+                best = Projection(along, perp, i)
+            }
+        }
+        return best
     }
 
     private fun nearestProjectionInRange(p: LatLng, windowLoM: Double, windowHiM: Double): Projection {

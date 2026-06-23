@@ -50,14 +50,6 @@ class GapNumericDataType(
     private val context: Context,
 ) : DataTypeImpl("kghost", "kghost-gap-num") {
 
-    /**
-     * Tracks the coroutine scope of the currently active view so a re-entrant [startView]
-     * (the Karoo host can call it again for the same field) cancels the previous scope first,
-     * avoiding two render loops fighting over the same emitter.
-     */
-    @Volatile
-    private var activeScopeJob: Job? = null
-
     private companion object {
         const val PLACEHOLDER = "---"
 
@@ -89,11 +81,11 @@ class GapNumericDataType(
 
     override fun startView(context: Context, config: ViewConfig, emitter: ViewEmitter) {
         Timber.d("KVP gap-numeric startView preview=${config.preview}")
-        // Re-entry guard: cancel any previous render scope before starting a new one.
-        activeScopeJob?.cancel()
-
+        // Each placement gets its OWN independent scope, cancelled ONLY by its own setCancellable
+        // below — never a shared "cancel the previous scope" guard. The rider can put this field on
+        // TWO pages, which the host serves from this ONE DataTypeImpl instance via separate startView
+        // calls; cancelling a sibling scope here would FREEZE the other page's field.
         val scopeJob = Job()
-        activeScopeJob = scopeJob
         val scope = CoroutineScope(Dispatchers.Default + scopeJob)
 
         // Seed one frame synchronously with the night-aware neutral text colour, so the field is
