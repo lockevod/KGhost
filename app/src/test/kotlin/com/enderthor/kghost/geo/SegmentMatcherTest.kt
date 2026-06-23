@@ -374,4 +374,18 @@ class SegmentMatcherTest {
             assertEquals(0.0, s.ghost.timeAt(0.0), 1e-6)
         }
     }
+
+    @Test fun `routeLaps returns each track's route-distance time series`() {
+        val track = RecordedTrack(
+            id = "t1", startedAtEpoch = 1_000L,
+            points = (0..18).map { i -> pt(0.004 + i * 0.0005, i * 55.0, i * 11.0).toDto() },
+        )
+        val laps = SegmentMatcher.routeLaps(route, listOf(track), params)
+        assertEquals(1, laps.size)                 // one track → one lap (single covered interval)
+        val lap = laps.first()
+        assertTrue(lap.size >= 2)
+        // Ascending in routeDist; each sample is [routeDistM, timeS].
+        assertTrue(lap.zipWithNext().all { (a, b) -> b[0] >= a[0] })
+        assertTrue(lap.first()[1] <= lap.last()[1]) // time non-decreasing
+    }
 }

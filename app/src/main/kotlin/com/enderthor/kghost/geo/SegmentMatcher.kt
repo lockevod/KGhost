@@ -175,6 +175,7 @@ object SegmentMatcher {
                 // Skip the O(n²) slice for an interval already fully covered by the caller (aggregate).
                 if (coveredRanges.any { interval.first >= it.first && interval.second <= it.second }) continue
                 val slice = extractTrackSlice(route, modelPoints, trackLL, interval, params.toleranceM)
+                    ?.map { it.first } // (TrackPoint, routeM) → just the points for the ghost
                     ?: continue // < 2 usable points after extraction/dedup
                 val label0 = "" // filled below once we know the ghost time
                 val ghost = RecordedGhostSource.fromTrackSlice(slice, label0).curve()
@@ -226,6 +227,46 @@ object SegmentMatcher {
 
         // Step 6: sort by route start.
         return segments.sortedBy { it.routeStartM }
+    }
+
+    /**
+     * Per-track route-distance laps for the AVERAGE aggregate seed: for each candidate track, its
+     * `(routeDistM, trackTimeS)` series over each route interval it covers (one DoubleArray[2] per kept
+     * point, ascending in routeDist). Reuses the same coverage + slice extraction as [match]; the seed
+     * folds each returned lap via updateAggregate (origin-invariant, so the track's start point is moot).
+     *
+     * Path A: the routeM of each kept point is the EXACT value [extractTrackSlice] computed for the
+     * match path — the slice returns `(TrackPoint, routeM)` pairs and this just re-bases time to 0 at
+     * the slice start, so the lap's routeDist series is identical to what match() races on.
+     */
+    fun routeLaps(
+        route: PolylinePath,
+        tracks: List<RecordedTrack>,
+        params: Params = Params(),
+    ): List<List<DoubleArray>> {
+        val out = ArrayList<List<DoubleArray>>()
+        val selected = if (tracks.size > params.maxTracks) {
+            tracks.sortedByDescending { it.startedAtEpoch }.take(params.maxTracks)
+        } else {
+            tracks
+        }
+        for (track in selected) {
+            val modelPoints = track.points.map { it.toModel() }
+            if (modelPoints.size < 2) continue
+            val trackLL = modelPoints.map { LatLng(it.lat, it.lng) }
+            val trackPath = PolylinePath(trackLL)
+            val intervals = coveredRunsToIntervals(route, trackPath, params)
+            for (interval in intervals) {
+                val slice = extractTrackSlice(route, modelPoints, trackLL, interval, params.toleranceM)
+                    ?: continue
+                // time = the track point's own timeS, re-based to 0 at the slice start so the lap
+                // series is a clean (routeDist, elapsed) pair.
+                val t0 = slice.first().first.timeS
+                val lap = slice.map { (tp, routeM) -> doubleArrayOf(routeM, tp.timeS - t0) }
+                if (lap.size >= 2) out.add(lap)
+            }
+        }
+        return out
     }
 
     /**
@@ -424,7 +465,7 @@ object SegmentMatcher {
         trackLL: List<LatLng>,
         interval: Pair<Double, Double>,
         toleranceM: Double,
-    ): List<TrackPoint>? {
+    ): List<Pair<TrackPoint, Double>>? {
         val (startM, endM) = interval
 
         // Seed projection for a chain's first point: constrained to the interval so an ambiguous
@@ -550,16 +591,17 @@ object SegmentMatcher {
 
         if (best.size < 2) return null
 
-        val inside = best.map { it.first }
-
+        // Keep the (TrackPoint, routeM) pairs through orientation + dedup so callers (routeLaps) can
+        // reuse the SAME routeM the chain walk computed, guaranteeing the lap's routeDist matches the
+        // match path exactly. match() maps these back to .first for the ghost.
         // Reverse detection: if track distance decreases as route distance increases, the track
         // was ridden opposite to the route -> reverse so the slice ascends in track distance.
-        val oriented = if (inside.last().distanceM < inside.first().distanceM) inside.reversed() else inside
+        val oriented = if (best.last().first.distanceM < best.first().first.distanceM) best.reversed() else best
 
         // GhostCurve requires strictly increasing distance: collapse equal consecutive distances.
-        val deduped = ArrayList<TrackPoint>(oriented.size)
+        val deduped = ArrayList<Pair<TrackPoint, Double>>(oriented.size)
         for (p in oriented) {
-            if (deduped.isEmpty() || p.distanceM > deduped.last().distanceM) deduped += p
+            if (deduped.isEmpty() || p.first.distanceM > deduped.last().first.distanceM) deduped += p
         }
         if (deduped.size < 2) return null
 
@@ -567,7 +609,7 @@ object SegmentMatcher {
         // route span — a smeared/multi-lap chain that slipped past the per-point guards. The engine
         // assumes ghost.totalDistanceM ≈ routeEndM − routeStartM; emitting an inflated ghost breaks
         // gap-distance and ghost-progress, so we drop the interval (no segment) instead.
-        val odometerSpanM = deduped.last().distanceM - deduped.first().distanceM
+        val odometerSpanM = deduped.last().first.distanceM - deduped.first().first.distanceM
         val routeSpanM = endM - startM
         if (odometerSpanM > (routeSpanM + 2.0 * toleranceM) * routeSpanInflationLimit) return null
 
