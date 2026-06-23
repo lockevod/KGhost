@@ -90,7 +90,6 @@ fun AppSettingsScreen(
         ImportSection(
             config = config,
             configManager = configManager,
-            scope = scope,
             onTracksChanged = onTracksChanged,
         )
 

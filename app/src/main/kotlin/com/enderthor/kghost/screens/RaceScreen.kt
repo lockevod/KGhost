@@ -18,11 +18,11 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -37,20 +37,13 @@ import com.enderthor.kghost.R
 import com.enderthor.kghost.data.GhostIcon
 import com.enderthor.kghost.data.KGhostConfig
 import com.enderthor.kghost.engine.GhostPick
-import com.enderthor.kghost.geo.TrackStore
-import com.enderthor.kghost.geo.TrackStorage
-import com.enderthor.kghost.import_.HistoryImporter
+import com.enderthor.kghost.import_.HistoryImportRunner
 import com.enderthor.kghost.import_.ImportProgress
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.enderthor.kghost.managers.ConfigurationManager
 import com.enderthor.kghost.managers.StoragePermission
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import timber.log.Timber
-import java.io.File
 
 /**
  * Race tab: settings for the "Race Your Own" feature.
@@ -314,13 +307,14 @@ internal fun GhostIconChips(selected: GhostIcon, enabled: Boolean, onPick: (Ghos
  *   - sources are scanned from `/sdcard/FitFiles` and `/sdcard/KGhost`.
  *
  * The last-scan epoch (for "new only") is persisted in [KGhostConfig.lastScanEpoch] via
- * [ConfigurationManager]. The importer's synchronous `lastScanSetter` launches a save on [scope].
+ * [ConfigurationManager]. Execution and progress live in the process-scoped [HistoryImportRunner], so
+ * leaving and returning to this screen never cancels the scan or loses its progress — this Composable
+ * only observes the runner's StateFlows and triggers start/cancel.
  */
 @Composable
 internal fun ImportSection(
     config: KGhostConfig,
     configManager: ConfigurationManager,
-    scope: CoroutineScope,
     onTracksChanged: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -339,16 +333,22 @@ internal fun ImportSection(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    var progress by remember { mutableStateOf<ImportProgress?>(null) }
-    var canceled by remember { mutableStateOf(false) }
-    var importJob by remember { mutableStateOf<Job?>(null) }
-    // Observable running flag. `importJob?.isActive` is NOT Compose state, so when the import
-    // coroutine finishes on its own the buttons would not re-enable until some unrelated
-    // recomposition happened to fire. Drive it explicitly: true at launch, false on completion.
-    var running by remember { mutableStateOf(false) }
+    // Import state lives in the process-scoped [HistoryImportRunner], NOT in this Composable, so leaving
+    // and returning to this screen never cancels the scan or loses its progress — we only OBSERVE it.
+    val progress by HistoryImportRunner.progress.collectAsStateWithLifecycle()
+    val running by HistoryImportRunner.running.collectAsStateWithLifecycle()
+    val canceled by HistoryImportRunner.canceled.collectAsStateWithLifecycle()
+    val pendingCompletion by HistoryImportRunner.pendingCompletion.collectAsStateWithLifecycle()
 
-    // Keep the importer reading the latest persisted lastScanEpoch without rebuilding it per change.
-    val currentConfig by rememberUpdatedState(config)
+    // Refresh the recorded-track count once per completion — even one that finished while we were on
+    // another screen. We key on the runner's consumable [pendingCompletion] flag (NOT progress.phase,
+    // which stays DONE forever and would re-fire onTracksChanged on every re-entry) and clear it after.
+    LaunchedEffect(pendingCompletion) {
+        if (pendingCompletion) {
+            onTracksChanged()
+            HistoryImportRunner.consumeCompletion()
+        }
+    }
 
     Text(
         text = stringResource(R.string.import_title),
@@ -404,38 +404,14 @@ internal fun ImportSection(
 
     // ── Import controls (permission granted) ──────────────────────────────────
     fun startImport(onlyNew: Boolean) {
-        progress = null
-        canceled = false
-        running = true
-        val job = scope.launch {
-            // TrackStorage.tracksDir() does file IO (mkdirs + one-time migration), so build the
-            // store on Dispatchers.IO rather than on the Main-thread button click.
-            val importer = withContext(Dispatchers.IO) {
-                HistoryImporter(
-                    fitFilesDir = File("/sdcard/FitFiles"),
-                    importDir = File("/sdcard/KGhost"),
-                    trackStore = TrackStore(TrackStorage.tracksDir(context)),
-                    decimate = HistoryImporter::defaultDecimate,
-                    lastScanProvider = { currentConfig.lastScanEpoch },
-                    lastScanSetter = { epoch ->
-                        scope.launch { configManager.updateConfig { it.copy(lastScanEpoch = epoch) } }
-                    },
-                )
-            }
-            importer.import(onlyNew = onlyNew)
-                .flowOn(Dispatchers.IO)
-                .collect {
-                    progress = it
-                    // On completion, ask the host to refresh the recorded-track count so the
-                    // "recorded tracks: N" line reflects the just-imported tracks immediately.
-                    if (it.phase == ImportProgress.Phase.DONE) onTracksChanged()
-                }
-        }
-        // Re-enable the controls when the import ends (normal completion OR cancel). invokeOnCompletion
-        // fires on whatever thread finishes the job; a Compose MutableState write is thread-safe and
-        // schedules recomposition on Main.
-        job.invokeOnCompletion { running = false }
-        importJob = job
+        // Run in the process-scoped runner (uses the APPLICATION context so the work outlives this
+        // Activity). It builds the importer on IO and is a no-op if a scan is already in flight.
+        HistoryImportRunner.start(
+            appContext = context.applicationContext,
+            configManager = configManager,
+            onlyNew = onlyNew,
+            lastScanEpoch = config.lastScanEpoch,
+        )
     }
 
     Row(
@@ -460,10 +436,7 @@ internal fun ImportSection(
 
     if (running) {
         OutlinedButton(
-            onClick = {
-                importJob?.cancel()
-                canceled = true
-            },
+            onClick = { HistoryImportRunner.cancel() },
             modifier = Modifier.heightIn(min = 48.dp),
         ) {
             Text(stringResource(R.string.import_cancel))
@@ -489,6 +462,11 @@ internal fun ImportSection(
         p.phase == ImportProgress.Phase.PARSING -> Text(
             text = stringResource(R.string.import_parsing, p.current, p.total),
             style = MaterialTheme.typography.bodyMedium,
+        )
+        p.phase == ImportProgress.Phase.ERROR -> Text(
+            text = stringResource(R.string.import_error),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
         )
         else -> Unit
     }
