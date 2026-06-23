@@ -171,6 +171,23 @@ class RouteAggregateTest {
         assertEquals(20.0, s.ghost.timeAt(100.0), 1e-6)
     }
 
+    @Test fun `toLiveSegments emits one segment per disjoint raceable run`() {
+        // Two separate covered stretches with an uncovered gap between them: [0,50] and [100,150].
+        val key = "loop"
+        val a = lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0)        // folds nodes 1,2
+        val b = lap(100.0 to 0.0, 125.0 to 5.0, 150.0 to 10.0)    // folds nodes 5,6 (node 4 re-baselines)
+        var agg = updateAggregate(null, key, "Loop", 1000.0, a)
+        agg = updateAggregate(agg, key, "Loop", 1000.0, a)
+        agg = updateAggregate(agg, key, "Loop", 1000.0, b)
+        agg = updateAggregate(agg, key, "Loop", 1000.0, b)
+        val segs = agg.toLiveSegments().sortedBy { it.routeStartM }
+        assertEquals(2, segs.size)
+        assertEquals(0.0, segs[0].routeStartM, 1e-9)
+        assertEquals(50.0, segs[0].routeEndM, 1e-9)
+        assertEquals(100.0, segs[1].routeStartM, 1e-9)
+        assertEquals(150.0, segs[1].routeEndM, 1e-9)
+    }
+
     @Test fun `schemaVersion is stamped on the result`() {
         val agg = updateAggregate(null, "k", "K", 100.0, lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0))
         assertEquals(AGG_SCHEMA_VERSION, agg.schemaVersion)

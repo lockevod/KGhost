@@ -2356,8 +2356,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // Average-ghost lap capture: one sample per ~AGG_STEP_M of forward route progress,
                         // on the SAME fair-start clock as the live gap (riderTime = elapsedS − firstMove), so
                         // the stored average lines up with how the live race is measured. Only on
-                        // trustworthy ticks and only when this lap qualifies (started at the route start, so
-                        // lapAggTarget != null). moveStart is non-null here — the race is anchored.
+                        // trustworthy ticks and only when a race is anchored (lapAggTarget != null — set on
+                        // EVERY anchored lap now; the aggregate is origin-invariant so any start contributes).
+                        // moveStart is non-null here — the race is anchored.
                         if (!spurious && lapAggTarget != null &&
                             effRouteDist > lastBufferedRouteDist + AGG_STEP_M
                         ) {
@@ -2594,8 +2595,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             }
         }
         // Fold this lap into the per-route average-ghost aggregate, INDEPENDENT of the track save (so it
-        // survives the track-library prune). Only a qualifying lap — key set at the anchor because the
-        // rider started at the route start — with enough samples updates it.
+        // survives the track-library prune). Any anchored lap with enough samples updates it (the key is
+        // set at the anchor for every lap; the aggregate is origin-invariant, so any start contributes).
         if (lapTarget != null && lapSamples.size >= 2) {
             scope.launch(Dispatchers.IO) {
                 withContext(NonCancellable) {

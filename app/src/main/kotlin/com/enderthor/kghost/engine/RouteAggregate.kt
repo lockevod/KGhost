@@ -97,7 +97,7 @@ data class PerRouteAggregate(
             val dist = (k - from) * stepM
             cum += nodes[k].dtS
             // Independent per-segment EMAs could, rarely, produce a non-positive step; clamp so the curve
-            // stays strictly non-decreasing in time (GhostCurve.init requires that).
+            // stays non-decreasing in time (GhostCurve.init requires time >= the previous sample).
             val t = cum.coerceAtLeast(prevTime)
             samples.add(GhostSample(dist, t))
             prevTime = t
