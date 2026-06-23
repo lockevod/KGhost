@@ -1,7 +1,6 @@
 package com.enderthor.kghost
 
 import android.content.Context
-import android.os.Environment
 import android.util.Log
 import com.enderthor.kghost.managers.StoragePermission
 import kotlinx.coroutines.CoroutineScope
@@ -74,6 +73,11 @@ object FileLogTree : Timber.Tree() {
     @Volatile
     private var logFile: File? = null
 
+    // Application context kept so [newRide] can RE-RESOLVE the log dir each ride (all-files access is
+    // often granted after the process started). Application context → no Activity leak.
+    @Volatile
+    private var appContext: Context? = null
+
     @Volatile
     private var started = false
 
@@ -90,6 +94,7 @@ object FileLogTree : Timber.Tree() {
     fun start(context: Context) {
         if (started) return
         started = true
+        appContext = context.applicationContext
         val dir = resolveDir(context)
         runCatching { dir.mkdirs() }
         logFile = File(dir, "kghost.log")
@@ -118,7 +123,13 @@ object FileLogTree : Timber.Tree() {
      */
     fun newRide(epochMs: Long) {
         if (!enabled) return
-        val dir = logFile?.parentFile ?: return
+        // RE-RESOLVE the dir each ride (don't reuse the parent fixed at start()): all-files access is
+        // commonly granted AFTER the extension process already started (a fresh install revokes it),
+        // and resolveDir() picks /sdcard/KGhost/logs only once access exists. Without this the whole
+        // process keeps logging to the app-scoped fallback dir until it restarts, even after the rider
+        // grants access. mkdirs() in case the now-preferred dir doesn't exist yet.
+        val dir = appContext?.let { resolveDir(it).also { d -> runCatching { d.mkdirs() } } }
+            ?: logFile?.parentFile ?: return
         val stamp = rideFmt.format(Instant.ofEpochMilli(epochMs))
         sessionId = "%06x".format((epochMs xor (epochMs ushr 16)) and 0xFFFFFFL)
         logFile = File(dir, "kghost-$stamp.log")
@@ -137,8 +148,12 @@ object FileLogTree : Timber.Tree() {
      */
     private fun resolveDir(context: Context): File =
         if (StoragePermission.hasAllFilesAccess(context)) {
-            File(Environment.getExternalStorageDirectory(), "KGhost/logs")
+            // Use the /sdcard path literally (the convention across KGhost: /sdcard/KGhost,
+            // /sdcard/FitFiles) — NOT Environment.getExternalStorageDirectory(), which yields the
+            // canonical /storage/emulated/0 mount. With all-files access this is ALWAYS the dir.
+            File("/sdcard/KGhost/logs")
         } else {
+            // Only when access is missing: the app-scoped external dir (shown as /sdcard/... too).
             File(context.getExternalFilesDir(null) ?: context.filesDir, "logs")
         }
 
@@ -220,8 +235,17 @@ object FileLogTree : Timber.Tree() {
         else -> '?'
     }
 
-    /** Absolute path of the current log file, for the settings hint. */
-    fun pathHint(): String = logFile?.absolutePath ?: "(not started yet)"
+    /**
+     * Path shown in settings. RE-RESOLVED from the current permission (not the dir fixed at start),
+     * so once the rider grants all-files access it immediately reads `/sdcard/KGhost/logs` rather
+     * than the stale app-scoped fallback. Always displayed in `/sdcard/...` form, never the canonical
+     * `/storage/emulated/0` mount.
+     */
+    fun pathHint(): String {
+        val dir = appContext?.let { resolveDir(it) } ?: logFile?.parentFile
+        return dir?.absolutePath?.replaceFirst("/storage/emulated/0", "/sdcard")
+            ?: "(not started yet)"
+    }
 
     /** The current ride's log file (or the between-ride file), for the diagnostic-log uploader. */
     fun currentLogFile(): File? = logFile
