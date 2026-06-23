@@ -1310,14 +1310,18 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // later ride and silently orphan the aggregate. The ride-end save keys on the same
                         // rm.path.totalM.
                         val key = routeKeyOf(state.name, path.totalM)
-                        var agg = aggregateStore().load(key)
+                        // load/save are blocking filesystem IO (the save fsyncs+renames); run them on
+                        // Dispatchers.IO, not this match coroutine's Default (CPU) pool. The seed COMPUTE
+                        // (routeLaps + seedAggregateFromLaps) stays on Default.
+                        var agg = withContext(Dispatchers.IO) { aggregateStore().load(key) }
                         if (agg == null) {
                             // No (valid) aggregate yet → SEED from recorded history so AVERAGE races from ride 1 and the
                             // expensive match becomes a one-time seed. Fold the candidate tracks' route laps, oldest first.
                             val laps = SegmentMatcher.routeLaps(path, tracks.sortedBy { it.startedAtEpoch }, SegmentMatcher.Params(maxTracks = maxTracks))
                             if (laps.isNotEmpty()) {
-                                agg = seedAggregateFromLaps(key, state.name, path.totalM, laps)
-                                aggregateStore().save(agg)
+                                val seeded = seedAggregateFromLaps(key, state.name, path.totalM, laps)
+                                withContext(Dispatchers.IO) { aggregateStore().save(seeded) }
+                                agg = seeded
                                 Timber.i("KVP avg: seeded aggregate $key from ${laps.size} history lap(s)")
                             }
                         }
