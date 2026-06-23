@@ -49,6 +49,10 @@ const val AGG_START_TOL_M = 300.0
 /** Max plausible cyclist speed (m/s) between two nodes; a faster jump is a GPS spike and is rejected. */
 const val AGG_MAX_SPEED_MS = 30.0
 
+/** Persisted-aggregate schema version. Bump when the node/aggregate layout changes so old blobs are
+ *  discarded (and re-seeded) instead of mis-read. */
+const val AGG_SCHEMA_VERSION = 1
+
 /** One grid node of the per-route average: the EMA mean rider-time to reach it, and the lap count. */
 @Serializable
 data class AggregateNode(
@@ -74,6 +78,8 @@ data class PerRouteAggregate(
     val routeName: String,
     val routeLenM: Double,
     val stepM: Double = AGG_STEP_M,
+    /** Schema version; 0 = legacy/absent (old blobs lack the field). Checked on load; stale → discard. */
+    val schemaVersion: Int = 0,
     /** Node `k` (index) represents route distance `k * stepM`. Size = floor(routeLenM/stepM) + 1. */
     val nodes: List<AggregateNode>,
 ) {

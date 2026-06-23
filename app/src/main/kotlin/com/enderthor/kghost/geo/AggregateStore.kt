@@ -24,6 +24,11 @@ class AggregateStore(private val dir: File) {
         if (!f.isFile) return null
         return runCatching {
             jsonWithUnknownKeys.decodeFromString<PerRouteAggregate>(f.readText())
+                .takeIf { it.schemaVersion == com.enderthor.kghost.engine.AGG_SCHEMA_VERSION }
+                ?: run {
+                    Timber.i("aggregate %s is a stale schema; discarding (will re-seed)", routeKey)
+                    null
+                }
         }.getOrElse { e ->
             Timber.w(e, "aggregate %s present but failed to parse; ignoring (corrupt?)", routeKey)
             null

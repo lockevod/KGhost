@@ -1,5 +1,6 @@
 package com.enderthor.kghost.geo
 
+import com.enderthor.kghost.engine.AGG_SCHEMA_VERSION
 import com.enderthor.kghost.engine.AggregateNode
 import com.enderthor.kghost.engine.PerRouteAggregate
 import org.junit.Assert.assertEquals
@@ -17,6 +18,7 @@ class AggregateStoreTest {
         routeName = "Loop",
         routeLenM = 100.0,
         stepM = 25.0,
+        schemaVersion = AGG_SCHEMA_VERSION,
         nodes = listOf(
             AggregateNode(0.0, 2),
             AggregateNode(5.0, 2),
@@ -78,5 +80,15 @@ class AggregateStoreTest {
 
     @Test fun `sweep on a missing dir returns 0`() {
         assertEquals(0, AggregateStore(File(tempDir(), "absent")).sweep())
+    }
+
+    @Test fun `load rejects an aggregate from a stale schema version`() {
+        val dir = tempDir()
+        val store = AggregateStore(dir)
+        File(dir, "route-x.json").writeText(
+            """{"routeKey":"route-x","routeName":"X","routeLenM":100.0,"stepM":25.0,
+               "nodes":[{"timeS":0.0,"count":0},{"timeS":5.0,"count":3}]}""".trimIndent(),
+        )
+        assertNull("stale-schema blob must be discarded (will re-seed)", store.load("route-x"))
     }
 }
