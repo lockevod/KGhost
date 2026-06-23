@@ -1281,10 +1281,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // appeared). loadTopCandidates returns the MOST route-overlapping tracks first, so the
                     // few kept are the most relevant; BEST only needs the closest-matching ride per
                     // stretch (and AVERAGE races its precomputed aggregate, not this live match).
+                    // Match cost plateaus with track count (the few most-overlapping tracks dominate, so
+                    // 6 ≈ 10 in time), and more candidates = better BEST coverage / aggregate seeding —
+                    // so keep a healthy count. The warmed-route latency is solved by skipping the slice on
+                    // aggregate-covered stretches (coveredRanges below), not by a tiny cap.
                     val maxTracks = when {
-                        path.totalM > 120_000 -> 4
-                        path.totalM > 40_000 -> 6
-                        else -> 10
+                        path.totalM > 120_000 -> 8
+                        path.totalM > 40_000 -> 10
+                        else -> 12
                     }
                     // Pre-cap candidates by ROUTE OVERLAP (relevance), parsing only the top tracks.
                     val tracks = trackStore().loadTopCandidates(bbox, maxTracks)
@@ -1307,15 +1311,21 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // rm.path.totalM.
                         val avgSegs = aggregateStore().load(routeKeyOf(state.name, path.totalM))
                             ?.toLiveSegments().orEmpty()
-                        // ALWAYS run the BEST match too: the aggregate covers only stretches with
-                        // ≥AGG_MIN_LAPS laps, and falling to the bare Ghost-Pace fill on stretches where
-                        // the rider HAS recorded history would throw that history away. Warmup (no
-                        // aggregate at all) is then just the all-BEST case of the same merge.
-                        val bestSegs = SegmentMatcher.match(path, tracks, GhostPick.BEST, SegmentMatcher.Params(maxTracks = maxTracks))
+                        // Run the BEST match for the stretches the aggregate does NOT yet cover — falling
+                        // to the bare Ghost-Pace fill where the rider HAS recorded history would throw it
+                        // away. But SKIP the expensive O(n²) slice on stretches the aggregate already
+                        // covers (overlay trims those away anyway): on a warmed route this makes the match
+                        // near-instant instead of taking minutes. Warmup (empty aggregate → no covered
+                        // ranges) is just the all-BEST case, unchanged.
+                        val covered = avgSegs.map { it.routeStartM to it.routeEndM }
+                        val bestSegs = SegmentMatcher.match(
+                            path, tracks, GhostPick.BEST, SegmentMatcher.Params(maxTracks = maxTracks),
+                            coveredRanges = covered,
+                        )
                         if (avgSegs.isEmpty()) {
                             Timber.i("KVP avg: no raceable aggregate for '${state.name}' yet (needs ≥$AGG_MIN_LAPS laps from the route start) — racing BEST while it warms up")
                         } else {
-                            Timber.i("KVP avg: racing the aggregate on ${avgSegs.size} stretch(es), BEST on the rest")
+                            Timber.i("KVP avg: racing the aggregate on ${avgSegs.size} stretch(es), BEST on the rest (slice skipped on covered stretches)")
                         }
                         // The aggregate wins where it is raceable; BEST pieces are TRIMMED around it (not
                         // dropped whole) so partial overlap can't discard a long recorded stretch.

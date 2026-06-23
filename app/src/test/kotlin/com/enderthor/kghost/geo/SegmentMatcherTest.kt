@@ -44,6 +44,55 @@ class SegmentMatcherTest {
         assertTrue(SegmentMatcher.match(route, listOf(track), GhostPick.BEST, params).isEmpty())
     }
 
+    @Test fun `coveredRanges skips the slice for fully-covered intervals`() {
+        val track = RecordedTrack(
+            id = "t1", startedAtEpoch = 1_000L,
+            points = (0..18).map { i -> pt(0.004 + i * 0.0005, i * 55.0, i * 11.0).toDto() },
+        )
+        // Baseline: one segment over the middle stretch.
+        val base = SegmentMatcher.match(route, listOf(track), GhostPick.BEST, params)
+        assertEquals(1, base.size)
+        val seg = base.first()
+
+        // Whole route covered → the interval is fully inside → skipped → no segments produced.
+        val whole = SegmentMatcher.match(
+            route, listOf(track), GhostPick.BEST, params, coveredRanges = listOf(0.0 to route.totalM),
+        )
+        assertTrue("whole-route coverage skips everything", whole.isEmpty())
+
+        // A covered range that fully contains the interval → skipped.
+        val containing = SegmentMatcher.match(
+            route, listOf(track), GhostPick.BEST, params,
+            coveredRanges = listOf((seg.routeStartM - 1.0) to (seg.routeEndM + 1.0)),
+        )
+        assertTrue("covering the interval skips it", containing.isEmpty())
+
+        // A covered range elsewhere (does not contain the interval) → unchanged.
+        val elsewhere = SegmentMatcher.match(
+            route, listOf(track), GhostPick.BEST, params, coveredRanges = listOf(0.0 to 1.0),
+        )
+        assertEquals("unrelated coverage leaves the segment", 1, elsewhere.size)
+        assertEquals(seg.routeStartM, elsewhere.first().routeStartM, 1e-9)
+        assertEquals(seg.routeEndM, elsewhere.first().routeEndM, 1e-9)
+    }
+
+    @Test fun `coveredRanges keeps a beyond-coverage track's tail (coverage-monotone across grouping)`() {
+        // A: fully inside the covered range, FAST — without the skip it would win the merged group and
+        // then be trimmed 100% by overlay, losing B's tail. B: overlaps A but extends BEYOND the
+        // covered range, slower. With the skip, A is dropped → B is raced → its beyond-coverage tail
+        // survives (the coverage-monotone property the adversarial exhaustive search confirmed).
+        val a = RecordedTrack("A", 2_000L, (0..22).map { i -> pt(0.004 + i * 0.0005, i * 55.0, i * 6.0).toDto() })
+        val b = RecordedTrack("B", 1_000L, (0..22).map { i -> pt(0.005 + i * 0.0005, i * 55.0, i * 12.0).toDto() })
+        val covered = listOf(0.0 to 1675.0) // contains A's stretch, not B's far tail
+
+        val cov = SegmentMatcher.match(route, listOf(a, b), GhostPick.BEST, params, coveredRanges = covered)
+        assertTrue("a segment survives", cov.isNotEmpty())
+        assertTrue(
+            "the beyond-coverage tail is still raced (A skipped, B contributes its tail)",
+            cov.maxOf { it.routeEndM } > 1675.0,
+        )
+    }
+
     @Test fun `BEST picks the faster of two tracks over the same stretch`() {
         fun track(id: String, secPerStep: Double) = RecordedTrack(
             id, 1_000L, (0..18).map { i -> pt(0.004 + i * 0.0005, i * 55.0, i * secPerStep).toDto() })

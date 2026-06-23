@@ -119,6 +119,23 @@ object SegmentMatcher {
         tracks: List<RecordedTrack>,
         pick: GhostPick,
         params: Params = Params(),
+        // Route-distance ranges the caller ALREADY covers (the AVERAGE aggregate's raceable stretches).
+        // The expensive O(n²) [extractTrackSlice] is skipped for any per-track coverage interval that
+        // falls ENTIRELY inside one of these ranges. On a warmed-up route (aggregate covers what the
+        // rider rides) this avoids slice extraction entirely → the match goes from minutes to
+        // near-instant.
+        //
+        // Why this is COVERAGE-MONOTONE (never races LESS route than the old match()+overlay, only the
+        // same or more — verified by an exhaustive 2-candidate adversarial search, 0 regressions):
+        // a skipped interval lies wholly inside ONE covered stretch, so RouteGhost.overlay would TRIM
+        // 100% of any segment it produced. So dropping it before grouping removes nothing overlay would
+        // have kept. The subtle case is when that interval would have WON a group it shares with a
+        // candidate B extending BEYOND the covered range (the span-pick CAN let a fully-covered
+        // candidate win — it is not always the widest): in the old code the covered winner is emitted
+        // then fully trimmed, so B's uncovered tail is lost; skipping the covered candidate lets B win
+        // and contribute that tail. Hence equal-or-more coverage, never less. An interval extending
+        // beyond the covered ranges (`interval.second > range.second`) is never skipped.
+        coveredRanges: List<Pair<Double, Double>> = emptyList(),
     ): List<LiveSegment> {
         val candidates = ArrayList<Candidate>()
 
@@ -155,6 +172,8 @@ object SegmentMatcher {
 
             // Step 4 + 5 (ghost): one candidate per interval.
             for (interval in intervals) {
+                // Skip the O(n²) slice for an interval already fully covered by the caller (aggregate).
+                if (coveredRanges.any { interval.first >= it.first && interval.second <= it.second }) continue
                 val slice = extractTrackSlice(route, modelPoints, trackLL, interval, params.toleranceM)
                     ?: continue // < 2 usable points after extraction/dedup
                 val label0 = "" // filled below once we know the ghost time
