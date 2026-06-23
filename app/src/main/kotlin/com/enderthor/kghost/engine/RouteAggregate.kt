@@ -27,10 +27,24 @@ const val AGG_MIN_LAPS = 2
 
 /**
  * "Started at the route start" tolerance (m): the rider's route position at first movement (D0) must
- * be within this of 0 for the lap to update the aggregate. A lap that joined mid-route would inject a
- * time origin offset, so it is skipped instead of polluting the mean.
+ * be within this of 0 for the lap to update the aggregate. A lap that joined mid-route injects a
+ * time-origin offset (it lacks the `[0, D0]` time, so it folds `t≈0` at node-D0), so it is skipped
+ * rather than polluting the mean.
+ *
+ * Set to 300 m (was 50): in normal use the rider starts AT the route origin but with routine GPS /
+ * start-area variation of ~100-300 m (observed D0 up to 257 m on a real ride), and 50 m rejected
+ * almost every real lap → the aggregate never warmed up and AVERAGE was stuck on the BEST-warmup
+ * ghost forever. 300 m covers that observed range and is the practical maximum that does not
+ * meaningfully distort the CURRENT model: because the raced ghost uses node-time DIFFERENCES
+ * ([buildRunSegment] subtracts the run's start-node time), a D0 offset is confined to the start
+ * region (≤ D0) — which a rider starting that far in does not race anyway — and is further diluted by
+ * the EMA (α=0.25) over a few laps; the bulk of the route's average is unaffected.
+ *
+ * The proper fix for a genuine mid-route / arbitrary-point start (re-anchoring a partial lap to the
+ * existing aggregate's time at its first covered node, so there is NO offset at all) is a model
+ * redesign deferred to a later release.
  */
-const val AGG_START_TOL_M = 50.0
+const val AGG_START_TOL_M = 300.0
 
 /** Max plausible cyclist speed (m/s) between two nodes; a faster jump is a GPS spike and is rejected. */
 const val AGG_MAX_SPEED_MS = 30.0
