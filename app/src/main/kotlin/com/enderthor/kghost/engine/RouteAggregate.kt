@@ -56,9 +56,9 @@ const val AGG_SCHEMA_VERSION = 1
 /** One grid node of the per-route average: the EMA mean rider-time to reach it, and the lap count. */
 @Serializable
 data class AggregateNode(
-    /** EMA mean rider-time from route start to this node (s). Meaningful only when [count] > 0. */
-    val timeS: Double = 0.0,
-    /** How many contributing laps have reached this node (warmup gate + partial-lap support). */
+    /** EMA mean rider-time to traverse the segment from node k-1 to this node k (s). Node 0 = 0. */
+    val dtS: Double = 0.0,
+    /** How many contributing laps covered THIS node-pair (warmup gate + partial-lap support). */
     val count: Int = 0,
 )
 
@@ -107,15 +107,16 @@ data class PerRouteAggregate(
     /** Builds a segment-relative [LiveSegment] for the node run `[from, to]`, or null if degenerate. */
     private fun buildRunSegment(from: Int, to: Int): LiveSegment? {
         val startDist = from * stepM
-        val startTime = nodes[from].timeS
         val samples = ArrayList<GhostSample>(to - from + 1)
+        var cum = 0.0
         var prevTime = 0.0
         samples.add(GhostSample(0.0, 0.0))
         for (k in from + 1..to) {
             val dist = (k - from) * stepM
-            // Independent per-node EMAs can, rarely, dip below the previous node's mean; clamp so the
-            // curve stays non-decreasing in time (GhostCurve.init requires that).
-            val t = (nodes[k].timeS - startTime).coerceAtLeast(prevTime)
+            cum += nodes[k].dtS
+            // Independent per-segment EMAs could, rarely, produce a non-positive step; clamp so the curve
+            // stays strictly non-decreasing in time (GhostCurve.init requires that).
+            val t = cum.coerceAtLeast(prevTime)
             samples.add(GhostSample(dist, t))
             prevTime = t
         }
@@ -156,7 +157,9 @@ fun updateAggregate(
     // Reuse the existing grid only when it matches this route's axis (same node count + step); a route
     // whose length crossed the key's 100 m rounding boundary gets a fresh grid rather than a bad blend.
     val base: Array<AggregateNode> =
-        if (existing != null && existing.nodes.size == nodeCount && existing.stepM == stepM) {
+        if (existing != null && existing.nodes.size == nodeCount && existing.stepM == stepM &&
+            existing.schemaVersion == AGG_SCHEMA_VERSION
+        ) {
             existing.nodes.toTypedArray()
         } else {
             Array(nodeCount) { AggregateNode() }
@@ -171,6 +174,7 @@ fun updateAggregate(
         // stop duration. prevNodeTime is on the ADJUSTED (dwell-compressed) clock.
         var prevNodeTime = lap.first()[1]
         var prevNodeDist = lap.first()[0]
+        var prevNodeIdx = -1 // grid index of the last FOLDED node (-1 = none yet)
         // Seconds compressed out of this lap so far by the dwell clip. Subtracting it from every later
         // node keeps the lap's own moving pace intact while removing the stop.
         var clipS = 0.0
@@ -209,17 +213,23 @@ fun updateAggregate(
             } else if (dt < 0.0) {
                 continue // node at the baseline's own distance but time went backwards: corrupt sample
             }
+            // Fold the SINGLE-step delta only when the previous folded node is exactly k-1; otherwise
+            // this is the first covered node or sits past a gap → just re-baseline (no valid 1-step dt).
+            val segDt = tAdj - prevNodeTime
+            if (prevNodeIdx == k - 1) {
+                val node = base[k]
+                // Plain running mean while seeding (first AGG_SEED_LAPS laps), then the EMA — see
+                // [AGG_SEED_LAPS] for why a bare EMA from lap 1 is wrong.
+                val mean = when {
+                    node.count == 0 -> segDt
+                    node.count < AGG_SEED_LAPS -> (node.dtS * node.count + segDt) / (node.count + 1)
+                    else -> alpha * segDt + (1.0 - alpha) * node.dtS
+                }
+                base[k] = AggregateNode(dtS = mean, count = node.count + 1)
+            }
             prevNodeTime = tAdj
             prevNodeDist = d
-            val node = base[k]
-            // Plain running mean while seeding (first AGG_SEED_LAPS laps), then the EMA — see
-            // [AGG_SEED_LAPS] for why a bare EMA from lap 1 is wrong.
-            val mean = when {
-                node.count == 0 -> tAdj
-                node.count < AGG_SEED_LAPS -> (node.timeS * node.count + tAdj) / (node.count + 1)
-                else -> alpha * tAdj + (1.0 - alpha) * node.timeS
-            }
-            base[k] = AggregateNode(timeS = mean, count = node.count + 1)
+            prevNodeIdx = k
         }
     }
 
@@ -228,6 +238,7 @@ fun updateAggregate(
         routeName = routeName,
         routeLenM = routeLenM,
         stepM = stepM,
+        schemaVersion = AGG_SCHEMA_VERSION,
         nodes = base.asList(),
     )
 }
