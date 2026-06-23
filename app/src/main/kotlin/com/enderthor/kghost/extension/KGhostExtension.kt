@@ -1321,9 +1321,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             if (laps.isNotEmpty()) {
                                 val seeded = seedAggregateFromLaps(key, state.name, path.totalM, laps)
                                 // saveIfAbsent (not save): if a ride-end EMA update created an aggregate for
-                                // this key after the load above, don't clobber it — keep the existing one.
-                                withContext(Dispatchers.IO) { aggregateStore().saveIfAbsent(seeded) }
-                                agg = seeded
+                                // this key after the load above, don't clobber it — and RACE that persisted
+                                // one (re-load), not the unsaved seed, so in-memory matches disk.
+                                agg = withContext(Dispatchers.IO) {
+                                    if (aggregateStore().saveIfAbsent(seeded)) seeded
+                                    else aggregateStore().load(key) ?: seeded
+                                }
                                 Timber.i("KVP avg: seeded aggregate $key from ${laps.size} history lap(s)")
                             }
                         }
