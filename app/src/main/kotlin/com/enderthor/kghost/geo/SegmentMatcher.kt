@@ -245,14 +245,15 @@ object SegmentMatcher {
         params: Params = Params(),
     ): List<List<DoubleArray>> {
         val out = ArrayList<List<DoubleArray>>()
-        // Cap to the most-recent maxTracks (backstop), but fold OLDEST-first so the seed EMA weights the
-        // most recent laps most. (The production caller pre-caps via loadTopCandidates and passes them
-        // oldest-first, so this re-sort only matters if a future caller hands over an uncapped set.)
-        val selected = if (tracks.size > params.maxTracks) {
-            tracks.sortedByDescending { it.startedAtEpoch }.take(params.maxTracks).sortedBy { it.startedAtEpoch }
+        // Cap to the most-recent maxTracks (backstop), then ALWAYS fold oldest-first so the seed EMA
+        // weights recent laps most — enforced regardless of the caller's ordering (the contract is
+        // oldest-first; the production caller already pre-caps + sorts, this just makes it robust).
+        val capped = if (tracks.size > params.maxTracks) {
+            tracks.sortedByDescending { it.startedAtEpoch }.take(params.maxTracks)
         } else {
             tracks
         }
+        val selected = capped.sortedBy { it.startedAtEpoch }
         for (track in selected) {
             val modelPoints = track.points.map { it.toModel() }
             if (modelPoints.size < 2) continue
@@ -264,6 +265,13 @@ object SegmentMatcher {
                     ?: continue
                 // time = the track point's own timeS, re-based to 0 at the slice start so the lap
                 // series is a clean (routeDist, elapsed) pair.
+                // NOTE: the first sample's routeM is the slice's first track point, which usually sits a
+                // few metres PAST the grid node at the interval start. updateAggregate can only fold a
+                // FULL grid segment (both endpoints inside the lap), so the first (partial) grid step of
+                // a covered run is not raceable until a lap covers it whole — the run effectively starts
+                // at most one 25 m step late. This is intentional: extrapolating a time back to the grid
+                // node would fabricate riding over un-ridden metres. It is symmetric with the LIVE lap
+                // (lapAggBuffer also starts at a continuous routeDist), so seeded and live agree.
                 val t0 = slice.first().first.timeS
                 val lap = slice.map { (tp, routeM) -> doubleArrayOf(routeM, tp.timeS - t0) }
                 if (lap.size >= 2) out.add(lap)
