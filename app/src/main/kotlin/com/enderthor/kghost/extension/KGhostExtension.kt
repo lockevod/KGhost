@@ -2321,12 +2321,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 "KVP race anchored: firstMove=${"%.0f".format(moveStart)}s D0=${"%.0f".format(d0)}m " +
                                     "ghostStart=${"%.0f".format(ghostStartElapsedS!!)}s @ routeDist=${"%.0f".format(effRouteDist)}m elapsed=${"%.0f".format(elapsedS)}s",
                             )
-                            // Average-ghost contribution gate, decided ONCE at the anchor: only a lap that
-                            // started at the route start (D0 ≈ 0) folds into the aggregate, so its time
-                            // origin lines up with other laps'. A mid-route join leaves the target null
-                            // (skip). Key + grid axis use the DECODED-POLYLINE length — the same
-                            // deterministic length the match-time aggregate load keys on, so save and
-                            // load can never round to different keys.
+                            // Average-ghost contribution: EVERY lap folds into the aggregate regardless of
+                            // where it started — the aggregate stores per-segment deltas (origin-invariant),
+                            // so a mid-route start just contributes the stretches it covers. Key + grid axis
+                            // use the DECODED-POLYLINE length — the same deterministic length the match-time
+                            // aggregate load keys on, so save and load can never round to different keys.
                             lapAggTarget = LapAggTarget(routeKeyOf(rm.routeName, rm.path.totalM), rm.routeName, rm.path.totalM)
                         }
                         // ghostElapsed = (elapsedS − firstMove) + rg.timeAt(D0): ghost at D0 at race start,

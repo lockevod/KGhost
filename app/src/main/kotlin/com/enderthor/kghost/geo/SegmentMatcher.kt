@@ -245,8 +245,11 @@ object SegmentMatcher {
         params: Params = Params(),
     ): List<List<DoubleArray>> {
         val out = ArrayList<List<DoubleArray>>()
+        // Cap to the most-recent maxTracks (backstop), but fold OLDEST-first so the seed EMA weights the
+        // most recent laps most. (The production caller pre-caps via loadTopCandidates and passes them
+        // oldest-first, so this re-sort only matters if a future caller hands over an uncapped set.)
         val selected = if (tracks.size > params.maxTracks) {
-            tracks.sortedByDescending { it.startedAtEpoch }.take(params.maxTracks)
+            tracks.sortedByDescending { it.startedAtEpoch }.take(params.maxTracks).sortedBy { it.startedAtEpoch }
         } else {
             tracks
         }
