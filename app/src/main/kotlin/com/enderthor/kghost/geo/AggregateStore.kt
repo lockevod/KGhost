@@ -42,7 +42,37 @@ class AggregateStore(private val dir: File) {
     }
 
     /** Persists [agg] atomically + durably (shared fsync-temp-then-rename, see [atomicWriteText]). */
-    fun save(agg: PerRouteAggregate) = synchronized(writeLock) {
+    fun save(agg: PerRouteAggregate) = synchronized(writeLock) { saveUnlocked(agg) }
+
+    /**
+     * Atomic load-modify-save under the per-dir write lock: [transform] sees the CURRENT aggregate (or
+     * null if absent/stale) and its result is persisted with no other writer able to interleave between
+     * the read and the write. Returns the saved value. Use this for the ride-end EMA update so a
+     * concurrent history seed cannot land a save between this load and this save (a lost update).
+     */
+    fun update(routeKey: String, transform: (PerRouteAggregate?) -> PerRouteAggregate): PerRouteAggregate =
+        synchronized(writeLock) {
+            val updated = transform(load(routeKey))
+            saveUnlocked(updated)
+            updated
+        }
+
+    /**
+     * Persists [agg] ONLY if no VALID current aggregate already exists for its key (a missing OR
+     * stale-schema blob counts as absent). Returns true if written. The history seed uses this so that,
+     * if a concurrent ride-end [update] created an aggregate after the seed did its own (unlocked) load
+     * check, the seed does not clobber it — the existing one stands and keeps EMA-updating.
+     */
+    fun saveIfAbsent(agg: PerRouteAggregate): Boolean = synchronized(writeLock) {
+        if (load(agg.routeKey) != null) {
+            false
+        } else {
+            saveUnlocked(agg)
+            true
+        }
+    }
+
+    private fun saveUnlocked(agg: PerRouteAggregate) {
         if (!dir.exists()) dir.mkdirs()
         atomicWriteText(File(dir, fileNameFor(agg.routeKey)), jsonForStorage.encodeToString(agg))
     }

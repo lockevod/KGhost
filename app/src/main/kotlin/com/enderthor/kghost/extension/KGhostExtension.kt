@@ -1320,7 +1320,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             val laps = SegmentMatcher.routeLaps(path, tracks.sortedBy { it.startedAtEpoch }, SegmentMatcher.Params(maxTracks = maxTracks))
                             if (laps.isNotEmpty()) {
                                 val seeded = seedAggregateFromLaps(key, state.name, path.totalM, laps)
-                                withContext(Dispatchers.IO) { aggregateStore().save(seeded) }
+                                // saveIfAbsent (not save): if a ride-end EMA update created an aggregate for
+                                // this key after the load above, don't clobber it — keep the existing one.
+                                withContext(Dispatchers.IO) { aggregateStore().saveIfAbsent(seeded) }
                                 agg = seeded
                                 Timber.i("KVP avg: seeded aggregate $key from ${laps.size} history lap(s)")
                             }
@@ -2601,11 +2603,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             scope.launch(Dispatchers.IO) {
                 withContext(NonCancellable) {
                     runCatching {
-                        val aggStore = aggregateStore()
-                        val updated = updateAggregate(
-                            aggStore.load(lapTarget.key), lapTarget.key, lapTarget.name, lapTarget.lenM, lapSamples,
-                        )
-                        aggStore.save(updated)
+                        // Atomic load-modify-save: no concurrent seed/save can interleave between the
+                        // read and the write of this key (would otherwise be a lost update).
+                        aggregateStore().update(lapTarget.key) { existing ->
+                            updateAggregate(existing, lapTarget.key, lapTarget.name, lapTarget.lenM, lapSamples)
+                        }
                         Timber.i("KVP avg: updated aggregate ${lapTarget.key} (${lapSamples.size} samples)")
                     }.onFailure { Timber.w(it, "KVP avg: aggregate update failed for ${lapTarget.key}") }
                 }
