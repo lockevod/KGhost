@@ -28,6 +28,7 @@ import com.enderthor.kghost.engine.AGG_MIN_LAPS
 import com.enderthor.kghost.engine.AGG_START_TOL_M
 import com.enderthor.kghost.engine.AGG_STEP_M
 import com.enderthor.kghost.engine.updateAggregate
+import com.enderthor.kghost.engine.seedAggregateFromLaps
 import com.enderthor.kghost.geo.AggregateStore
 import com.enderthor.kghost.geo.BBox
 import com.enderthor.kghost.geo.LatLng
@@ -1309,23 +1310,28 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // drift across recalcs; an unstable length would round to a different key on a
                         // later ride and silently orphan the aggregate. The ride-end save keys on the same
                         // rm.path.totalM.
-                        val avgSegs = aggregateStore().load(routeKeyOf(state.name, path.totalM))
-                            ?.toLiveSegments().orEmpty()
-                        // Run the BEST match for the stretches the aggregate does NOT yet cover — falling
-                        // to the bare Ghost-Pace fill where the rider HAS recorded history would throw it
-                        // away. But SKIP the expensive O(n²) slice on stretches the aggregate already
-                        // covers (overlay trims those away anyway): on a warmed route this makes the match
-                        // near-instant instead of taking minutes. Warmup (empty aggregate → no covered
-                        // ranges) is just the all-BEST case, unchanged.
+                        val key = routeKeyOf(state.name, path.totalM)
+                        var agg = aggregateStore().load(key)
+                        if (agg == null) {
+                            // No (valid) aggregate yet → SEED from recorded history so AVERAGE races from ride 1 and the
+                            // expensive match becomes a one-time seed. Fold the candidate tracks' route laps, oldest first.
+                            val laps = SegmentMatcher.routeLaps(path, tracks.sortedBy { it.startedAtEpoch }, SegmentMatcher.Params(maxTracks = maxTracks))
+                            if (laps.isNotEmpty()) {
+                                agg = seedAggregateFromLaps(key, state.name, path.totalM, laps)
+                                aggregateStore().save(agg)
+                                Timber.i("KVP avg: seeded aggregate $key from ${laps.size} history lap(s)")
+                            }
+                        }
+                        val avgSegs = agg?.toLiveSegments().orEmpty()
                         val covered = avgSegs.map { it.routeStartM to it.routeEndM }
                         val bestSegs = SegmentMatcher.match(
                             path, tracks, GhostPick.BEST, SegmentMatcher.Params(maxTracks = maxTracks),
                             coveredRanges = covered,
                         )
                         if (avgSegs.isEmpty()) {
-                            Timber.i("KVP avg: no raceable aggregate for '${state.name}' yet (needs ≥$AGG_MIN_LAPS laps from the route start) — racing BEST while it warms up")
+                            Timber.i("KVP avg: no raceable aggregate for '${state.name}' yet — racing BEST while it warms up")
                         } else {
-                            Timber.i("KVP avg: racing the aggregate on ${avgSegs.size} stretch(es), BEST on the rest (slice skipped on covered stretches)")
+                            Timber.i("KVP avg: racing the aggregate on ${avgSegs.size} stretch(es), BEST on the rest (slice skipped on covered)")
                         }
                         // The aggregate wins where it is raceable; BEST pieces are TRIMMED around it (not
                         // dropped whole) so partial overlap can't discard a long recorded stretch.
@@ -1959,15 +1965,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     // Without setting it here, a rider who always starts slightly off the line
                                     // (so the race anchors via THIS rejoin-fallback path) would NEVER feed the
                                     // average and it would never build, undiagnosably.
-                                    lapAggTarget = if (d0 <= AGG_START_TOL_M) {
-                                        LapAggTarget(routeKeyOf(rm.routeName, rm.path.totalM), rm.routeName, rm.path.totalM)
-                                    } else {
-                                        Timber.i(
-                                            "KVP avg: this lap will NOT update the average — started " +
-                                                "${"%.0f".format(d0)}m past the route start (rejoin-fallback anchor)",
-                                        )
-                                        null
-                                    }
+                                    lapAggTarget = LapAggTarget(routeKeyOf(rm.routeName, rm.path.totalM), rm.routeName, rm.path.totalM)
                                     Timber.i(
                                         "KVP race anchored (rejoin-fallback): firstMove=${"%.0f".format(moveStart)}s " +
                                             "D0=${"%.0f".format(d0)}m ghostStart=${"%.0f".format(ghostStartElapsedS!!)}s " +
@@ -2330,17 +2328,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             // (skip). Key + grid axis use the DECODED-POLYLINE length — the same
                             // deterministic length the match-time aggregate load keys on, so save and
                             // load can never round to different keys.
-                            lapAggTarget = if (d0 <= AGG_START_TOL_M) {
-                                LapAggTarget(routeKeyOf(rm.routeName, rm.path.totalM), rm.routeName, rm.path.totalM)
-                            } else {
-                                // Logged prominently: "my average never builds" is otherwise undiagnosable —
-                                // a rider who always joins this far past the start NEVER feeds the average.
-                                Timber.i(
-                                    "KVP avg: this lap will NOT update the average — started ${"%.0f".format(d0)}m past " +
-                                        "the route start (tolerance ${AGG_START_TOL_M.toInt()}m)",
-                                )
-                                null
-                            }
+                            lapAggTarget = LapAggTarget(routeKeyOf(rm.routeName, rm.path.totalM), rm.routeName, rm.path.totalM)
                         }
                         // ghostElapsed = (elapsedS − firstMove) + rg.timeAt(D0): ghost at D0 at race start,
                         // then advances on real elapsed time (frozen only on pause — ELAPSED_TIME stops).
