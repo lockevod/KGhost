@@ -12,6 +12,10 @@ live on a data field and as a marker on the map.
   **one continuous ghost of the whole route** — your past self on the stretches you've ridden before,
   stitched with the Ghost Pace pace everywhere else — and races you against it, automatically, with no
   setup. The two halves are not separate features: they are the same ghost.
+- **Best, last, or average** — for the stretches you've ridden before, choose whether the ghost is your
+  **fastest** lap, your **most recent**, or a smoothed **average** of your recent laps. The average is
+  ready from your **first ride** on a route — KGhost seeds it from your recorded history instead of
+  waiting to warm up — and a lap counts toward it even when you don't start at the route's beginning.
 - **External ghosts (import)** — race against rides you did *not* record with KGhost: it scans the
   Karoo's own `/sdcard/FitFiles/*.fit` history and imports GPX/FIT files you drop into
   `/sdcard/KGhost/`, turning them into ghosts to race.
