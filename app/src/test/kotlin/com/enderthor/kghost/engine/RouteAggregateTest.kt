@@ -199,4 +199,15 @@ class RouteAggregateTest {
         assertEquals(10.0, c.timeAt(25.0), 1e-9)
         assertEquals(10.0, c.timeAt(50.0), 1e-9)
     }
+
+    @Test fun `seedAggregateFromLaps folds laps in order and marks pairs raceable`() {
+        val l1 = lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0, 75.0 to 15.0, 100.0 to 20.0)
+        val l2 = lap(0.0 to 0.0, 25.0 to 6.0, 50.0 to 12.0, 75.0 to 18.0, 100.0 to 24.0)
+        val agg = seedAggregateFromLaps("loop", "Loop", 1000.0, listOf(l1, l2))
+        assertEquals(AGG_SCHEMA_VERSION, agg.schemaVersion)
+        // Two laps covered nodes 1..4 → raceable; per-segment dtS is the running mean of 5 and 6 = 5.5.
+        assertEquals(5.5, agg.nodes[1].dtS, 1e-9)
+        assertEquals(2, agg.nodes[1].count)
+        assertTrue(agg.toLiveSegments().isNotEmpty())
+    }
 }

@@ -242,3 +242,24 @@ fun updateAggregate(
         nodes = base.asList(),
     )
 }
+
+/**
+ * Builds a fresh aggregate by folding [laps] (already in the desired EMA order — oldest first) via
+ * [updateAggregate]. Used to SEED a route's average from recorded history at first match, so AVERAGE
+ * races from ride 1. Each lap is a `(routeDistM, timeS)` series; origin-invariant, so a lap may start
+ * anywhere on the route.
+ */
+fun seedAggregateFromLaps(
+    routeKey: String,
+    routeName: String,
+    routeLenM: Double,
+    laps: List<List<DoubleArray>>,
+): PerRouteAggregate {
+    var agg: PerRouteAggregate? = null
+    for (lap in laps) agg = updateAggregate(agg, routeKey, routeName, routeLenM, lap)
+    return agg ?: PerRouteAggregate(
+        routeKey = routeKey, routeName = routeName, routeLenM = routeLenM,
+        schemaVersion = AGG_SCHEMA_VERSION,
+        nodes = List((Math.floor(routeLenM / AGG_STEP_M) + 1).toInt().coerceAtLeast(1)) { AggregateNode() },
+    )
+}
