@@ -236,9 +236,7 @@ fun seedAggregateFromLaps(
 ): PerRouteAggregate {
     var agg: PerRouteAggregate? = null
     for (lap in laps) agg = updateAggregate(agg, routeKey, routeName, routeLenM, lap)
-    return agg ?: PerRouteAggregate(
-        routeKey = routeKey, routeName = routeName, routeLenM = routeLenM,
-        schemaVersion = AGG_SCHEMA_VERSION,
-        nodes = List((Math.floor(routeLenM / AGG_STEP_M) + 1).toInt().coerceAtLeast(1)) { AggregateNode() },
-    )
+    // Empty laps → a fresh, correctly-sized, stamped aggregate. Reuse updateAggregate (a <2-point lap
+    // is a no-op fold) so the grid-size formula lives in exactly one place.
+    return agg ?: updateAggregate(null, routeKey, routeName, routeLenM, emptyList())
 }

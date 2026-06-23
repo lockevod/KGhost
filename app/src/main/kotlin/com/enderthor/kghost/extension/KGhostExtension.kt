@@ -2502,6 +2502,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         mapGhostState = null
         mapLoopJob?.cancelAndJoin()
         mapLoopJob = null
+        // A first-ride AVERAGE seed runs INSIDE the match coroutine and saves the aggregate. Join it
+        // before finishAndSaveRecording()'s own aggregate save so the two can't overlap (the seed save
+        // would otherwise race the ride-end save of the same key). cancelAndJoin: a short ride can end
+        // while a slow seed match is still in flight — finishing the ride supersedes it.
+        matchJob?.cancelAndJoin()
+        matchJob = null
     }
 
     /**
