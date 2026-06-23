@@ -25,7 +25,6 @@ import com.enderthor.kghost.engine.StalenessLogic
 import com.enderthor.kghost.engine.GhostPaceSource
 import com.enderthor.kghost.engine.toInfo
 import com.enderthor.kghost.engine.AGG_MIN_LAPS
-import com.enderthor.kghost.engine.AGG_START_TOL_M
 import com.enderthor.kghost.engine.AGG_STEP_M
 import com.enderthor.kghost.engine.updateAggregate
 import com.enderthor.kghost.engine.seedAggregateFromLaps
