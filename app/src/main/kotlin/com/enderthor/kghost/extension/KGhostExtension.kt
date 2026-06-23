@@ -1259,6 +1259,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // than a frame. Default is fine; loadTopCandidates does file IO but never overlaps a save
             // in practice (save runs at ride-end, matching at route-load).
             matchJob = scope.launch(Dispatchers.Default) {
+                val matchStartMs = System.currentTimeMillis()
                 runCatching {
                     val path = PolylinePath(Polyline.decode(routePolyline))
                     val bbox = BBox.around(path.points) ?: run {
@@ -1272,13 +1273,25 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Default-pool contention at route-load and delay ② activating. Capping the candidate
                     // count on long routes bounds that without touching match accuracy (it only limits how
                     // many historical rides are considered, which on a long route is naturally few anyway).
+                    // Candidate cap. The match is ~linear in candidate COUNT and each candidate's match
+                    // cost grows with route length (per-track route-vertex scans), so a frequently-ridden
+                    // route accrues many overlapping history tracks and is the EXPENSIVE case — the old
+                    // buckets were inverted (short routes got the 120 default → on a much-ridden 40 km
+                    // loop the match took >5 min and route mode NEVER engaged, so the map ghost never
+                    // appeared). loadTopCandidates returns the MOST route-overlapping tracks first, so the
+                    // few kept are the most relevant; BEST only needs the closest-matching ride per
+                    // stretch (and AVERAGE races its precomputed aggregate, not this live match).
                     val maxTracks = when {
-                        path.totalM > 200_000 -> 40
-                        path.totalM > 120_000 -> 70
-                        else -> SegmentMatcher.Params().maxTracks
+                        path.totalM > 120_000 -> 4
+                        path.totalM > 40_000 -> 6
+                        else -> 10
                     }
                     // Pre-cap candidates by ROUTE OVERLAP (relevance), parsing only the top tracks.
                     val tracks = trackStore().loadTopCandidates(bbox, maxTracks)
+                    // Timing: loadTopCandidates does file IO + parse; the match below is O(track points).
+                    // A multi-minute total here = the route ghost can't engage until it finishes (the
+                    // rider sees no map ghost meanwhile). Surfaces whether the delay is load vs match.
+                    Timber.i("KVP match: loaded ${tracks.size} candidate track(s) in ${System.currentTimeMillis() - matchStartMs}ms (routeLen=${"%.0f".format(path.totalM)})")
                     // A superseding route should cancel this stale match promptly: bail before the
                     // expensive match if we've been cancelled.
                     currentCoroutineContext().ensureActive()
@@ -1333,7 +1346,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         Timber.d(
                             "route mode ON: ${matched.size} segment(s), routeGhost=${routeGhost != null} " +
                                 "on '${state.name}' karooLen=${"%.0f".format(state.routeDistance)} " +
-                                "polyLen=${"%.0f".format(path.totalM)} delta=${"%.0f".format(state.routeDistance - path.totalM)}",
+                                "polyLen=${"%.0f".format(path.totalM)} delta=${"%.0f".format(state.routeDistance - path.totalM)} " +
+                                "matchMs=${System.currentTimeMillis() - matchStartMs}",
                         )
                     }
                 }.onFailure { e ->
@@ -1434,7 +1448,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         }
         // Ride-start config baseline: guarantees every ride's log records the active settings even if the
         // last config-change line rotated out of the file (answers "what settings was this ride on?").
-        Timber.i("KVP startTick START (route=${routeMode != null}) config: ${configSummary(activeConfig.value)}")
+        // lastNav/pendingNav surface WHETHER the nav stream has delivered any state by the time
+        // recording starts — key for the "route loaded before the ride → ghost never appears" case:
+        // `none` means streamNavigationState gave us nothing yet (a route settled before we subscribed,
+        // or navigation isn't active), so route mode can't engage and the map ghost stays hidden.
+        Timber.i(
+            "KVP startTick START (route=${routeMode != null}) " +
+                "lastNav=${lastNavEvent?.state?.let { it::class.simpleName } ?: "none"} " +
+                "pendingNav=${pendingNavState != null} config: ${configSummary(activeConfig.value)}",
+        )
         isRecording = true
         // Only stamp the epoch on a genuinely fresh start. If the tick coroutine previously died
         // mid-ride (e.g. an exception) a later Recording emission re-enters startTick; without this

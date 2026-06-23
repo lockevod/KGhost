@@ -142,14 +142,20 @@ object SegmentMatcher {
         for (track in selected) {
             val modelPoints = track.points.map { it.toModel() }
             if (modelPoints.size < 2) continue
-            val trackPath = PolylinePath(modelPoints.map { LatLng(it.lat, it.lng) })
+            // Build the track's LatLng list ONCE and reuse it for both the coverage path and the
+            // per-interval slice extraction. extractTrackSlice runs O(seeds × points) projections and
+            // used to allocate a fresh LatLng for EVERY point on EVERY seed's chain walk — an n²
+            // allocation storm that dominates GC on the Karoo for a full-overlap track. Same values,
+            // so the match result is byte-identical.
+            val trackLL = modelPoints.map { LatLng(it.lat, it.lng) }
+            val trackPath = PolylinePath(trackLL)
 
             // Step 2 + 3: sample the route by distance, test coverage by the track, build intervals.
             val intervals = coveredRunsToIntervals(route, trackPath, params)
 
             // Step 4 + 5 (ghost): one candidate per interval.
             for (interval in intervals) {
-                val slice = extractTrackSlice(route, modelPoints, interval, params.toleranceM)
+                val slice = extractTrackSlice(route, modelPoints, trackLL, interval, params.toleranceM)
                     ?: continue // < 2 usable points after extraction/dedup
                 val label0 = "" // filled below once we know the ghost time
                 val ghost = RecordedGhostSource.fromTrackSlice(slice, label0).curve()
@@ -396,6 +402,7 @@ object SegmentMatcher {
     private fun extractTrackSlice(
         route: PolylinePath,
         trackPoints: List<TrackPoint>,
+        trackLL: List<LatLng>,
         interval: Pair<Double, Double>,
         toleranceM: Double,
     ): List<TrackPoint>? {
@@ -412,6 +419,18 @@ object SegmentMatcher {
                 fwdWindowM = endM - startM,
             )
 
+        // Per-point seed-projection cache. The seed projection scans the WHOLE interval's route
+        // vertices (the expensive call), and it is needed BOTH by the can-start scan (every point) AND
+        // as each chain's first-point projection. Computing it once per index and reusing removes the
+        // redundant recompute per seed. Same Projection value → identical result.
+        val seedProjCache = arrayOfNulls<Projection>(trackPoints.size)
+        fun seedProjAt(i: Int): Projection =
+            seedProjCache[i] ?: seedProjection(trackLL[i]).also { seedProjCache[i] = it }
+
+        // Reused scratch for the allocation-free per-point projection in the chain walk (one buffer
+        // for the whole O(seeds × points) loop, not a Projection per call → the GC win).
+        val projOut = DoubleArray(2)
+
         // Builds the stitched chain that starts at [seedIndex] (skipping blips, never terminating on
         // one). Returns the kept (point, routeM) pairs; empty if the seed itself is not in-interval.
         fun buildChain(seedIndex: Int): List<Pair<TrackPoint, Double>> {
@@ -419,19 +438,22 @@ object SegmentMatcher {
             var prevRouteM = Double.NaN
             for (i in seedIndex until trackPoints.size) {
                 val tp = trackPoints[i]
-                val ll = LatLng(tp.lat, tp.lng)
-                val proj = if (kept.isEmpty()) {
-                    seedProjection(ll)
-                } else {
-                    route.nearestProjectionNear(
-                        ll,
-                        aroundDistanceM = prevRouteM,
-                        backWindowM = sliceBackWindowM,
-                        fwdWindowM = sliceFwdWindowM,
+                val routeM: Double
+                val perpM: Double
+                if (kept.isEmpty()) {
+                    val proj = seedProjAt(i) // cached whole-interval seed projection (not hot)
+                    routeM = proj.distanceAlongM; perpM = proj.perpDistM
+                } else if (route.nearestProjectionNearInto(
+                        tp.lat, tp.lng, prevRouteM, sliceBackWindowM, sliceFwdWindowM, projOut,
                     )
+                ) {
+                    routeM = projOut[0]; perpM = projOut[1]
+                } else {
+                    // Empty window → the SAME global fallback nearestProjectionNear would take.
+                    val proj = route.nearestProjection(trackLL[i])
+                    routeM = proj.distanceAlongM; perpM = proj.perpDistM
                 }
-                val routeM = proj.distanceAlongM
-                val onRoute = proj.perpDistM < toleranceM
+                val onRoute = perpM < toleranceM
                 val insideInterval = routeM in startM..endM
                 val monotonicOdometer = kept.isEmpty() || tp.distanceM > kept.last().first.distanceM
                 // Strict route-forward progress: a kept point must advance in route-distance past the
@@ -474,8 +496,7 @@ object SegmentMatcher {
         // CORRIDOR_ENTRY (deferred, test-only) keeps only the can-start points whose predecessor was
         // not can-start.
         fun canStart(i: Int): Boolean {
-            val tp = trackPoints[i]
-            val proj = seedProjection(LatLng(tp.lat, tp.lng))
+            val proj = seedProjAt(i)
             return proj.perpDistM < toleranceM && proj.distanceAlongM in startM..endM
         }
 

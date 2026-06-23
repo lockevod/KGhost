@@ -191,6 +191,56 @@ class PolylinePath(val points: List<LatLng>) {
     }
 
     /**
+     * Allocation-free equivalent of the WINDOWED part of [nearestProjectionNear], for the hot
+     * per-point chain walk in [com.enderthor.kghost.geo.SegmentMatcher] (O(track points × seeds)
+     * calls, where allocating a [Projection] per call dominated GC during route matching). Writes the
+     * windowed nearest projection's `distanceAlongM` into `out[0]` and `perpDistM` into `out[1]` and
+     * returns true; returns false when NO segment intersects the window (best perp stays MAX_VALUE) —
+     * the SAME condition under which [nearestProjectionNear] falls back to the global
+     * [nearestProjection], so the caller takes that identical fallback. The arithmetic and candidate
+     * set are byte-for-byte those of [nearestProjectionInRange] (proven by PolylineProjectionIntoDiffTest).
+     */
+    fun nearestProjectionNearInto(
+        pLat: Double,
+        pLng: Double,
+        aroundDistanceM: Double,
+        backWindowM: Double,
+        fwdWindowM: Double,
+        out: DoubleArray,
+    ): Boolean {
+        val windowLoM = aroundDistanceM - backWindowM
+        val windowHiM = aroundDistanceM + fwdWindowM
+        var bestAlong = 0.0
+        var bestPerp = Double.MAX_VALUE
+        val start = firstSegmentFrom(windowLoM)
+        for (i in start until points.size - 1) {
+            val segLoM = cumulativeM[i]; val segHiM = cumulativeM[i + 1]
+            if (segLoM > windowHiM) break
+            if (segHiM < windowLoM) continue
+            val a = points[i]; val b = points[i + 1]
+            // Arithmetic mirrors nearestProjectionInRange EXACTLY (same ops, same order, the explicit
+            // ax=ay=0 origin) so the result is bit-for-bit identical — verified by PolylineProjectionIntoDiffTest.
+            val mPerDegLat = 111_320.0
+            val mPerDegLng = 111_320.0 * cos(Math.toRadians(a.lat))
+            val ax = 0.0; val ay = 0.0
+            val bx = (b.lng - a.lng) * mPerDegLng; val by = (b.lat - a.lat) * mPerDegLat
+            val px = (pLng - a.lng) * mPerDegLng; val py = (pLat - a.lat) * mPerDegLat
+            val segLen2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay)
+            val t = if (segLen2 == 0.0) 0.0 else (((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / segLen2).coerceIn(0.0, 1.0)
+            val fx = ax + t * (bx - ax); val fy = ay + t * (by - ay)
+            val perp = sqrt((px - fx) * (px - fx) + (py - fy) * (py - fy))
+            if (perp < bestPerp) {
+                bestPerp = perp
+                bestAlong = cumulativeM[i] + t * (cumulativeM[i + 1] - cumulativeM[i])
+            }
+        }
+        if (bestPerp == Double.MAX_VALUE) return false
+        out[0] = bestAlong
+        out[1] = bestPerp
+        return true
+    }
+
+    /**
      * Core projection scan restricted to segments whose `[cumulativeM[i], cumulativeM[i + 1]]`
      * range intersects `[windowLoM, windowHiM]`. With an infinite window this is the plain global
      * nearest projection.
