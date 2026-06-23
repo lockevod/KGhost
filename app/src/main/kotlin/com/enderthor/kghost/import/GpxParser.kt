@@ -7,9 +7,11 @@ import com.enderthor.kghost.geo.Source
 import com.enderthor.kghost.geo.TrackPoint
 import com.enderthor.kghost.geo.toDto
 import org.xml.sax.Attributes
+import org.xml.sax.InputSource
 import org.xml.sax.helpers.DefaultHandler
 import timber.log.Timber
 import java.io.File
+import java.io.StringReader
 import java.text.SimpleDateFormat
 import java.time.Instant
 import java.util.Locale
@@ -34,10 +36,27 @@ object GpxParser {
             timeZone = TimeZone.getTimeZone("UTC")
         }
 
+    /**
+     * One factory, built once and reused for every file (newInstance() does a service-loader lookup,
+     * wasteful per-file in a bulk import). XXE hardening is DEFENCE IN DEPTH:
+     *  - `disallow-doctype-decl` rejects any DOCTYPE outright — but this feature is Xerces-specific
+     *    (the JVM/test backend). On the Karoo's Android runtime the SAX backend is Expat, which does
+     *    NOT recognise it: `setFeature` then throws and is swallowed here, so on-device a DOCTYPE may
+     *    still be ALLOWED. Hence it cannot be the only line of defence.
+     *  - the load-bearing, runtime-independent guarantee is [GpxHandler.resolveEntity], which returns
+     *    an empty source so NO external entity (file://, http://) is ever fetched on ANY SAX impl.
+     *  - the external-entity features are best-effort belts on top.
+     */
+    private val factory: SAXParserFactory = SAXParserFactory.newInstance().apply {
+        runCatching { setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
+        runCatching { setFeature("http://xml.org/sax/features/external-general-entities", false) }
+        runCatching { setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
+    }
+
     /** Parses [file] into a [RecordedTrack], or null if invalid / missing per-point times. */
     fun parse(file: File): RecordedTrack? = runCatching {
         val handler = GpxHandler()
-        val parser = SAXParserFactory.newInstance().newSAXParser()
+        val parser = factory.newSAXParser()
         parser.parse(file, handler)
         handler.result
     }.getOrElse { e ->
@@ -52,8 +71,17 @@ object GpxParser {
             ?: runCatching { fallbackFormat.parse(text)?.time }.getOrNull()
     }
 
-    private class GpxHandler : DefaultHandler() {
+    internal class GpxHandler : DefaultHandler() {
         private val raw = ArrayList<RawPoint>()
+
+        /**
+         * XXE defence that holds on EVERY SAX backend (Android Expat included, where the
+         * disallow-doctype-decl feature may be silently unavailable): never fetch an external entity.
+         * Returning an empty source means a `<!ENTITY x SYSTEM "file:///…">` reference resolves to
+         * nothing instead of leaking local files / hitting a URL.
+         */
+        override fun resolveEntity(publicId: String?, systemId: String?): InputSource =
+            InputSource(StringReader(""))
 
         // State for the trkpt currently being read.
         private var curLat: Double? = null

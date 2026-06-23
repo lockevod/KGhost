@@ -86,8 +86,11 @@ class PolylinePath(val points: List<LatLng>) {
      */
     fun sampleAt(distanceAlongM: Double): RouteSample {
         val d = distanceAlongM.coerceIn(0.0, totalM)
-        var i = 0
-        while (i < points.size - 2 && cumulativeM[i + 1] < d) i++
+        // Binary search for the containing segment (first one whose far end cumulativeM[i+1] >= d),
+        // matching the old linear scan byte-for-byte but O(log n) — this runs per-tick to place the
+        // ghost marker, so on a long route it must not be an O(n) walk. coerceAtMost keeps i+1 valid
+        // (the cap the linear scan applied via `points.size - 2`).
+        val i = firstSegmentFrom(d).coerceAtMost(points.size - 2)
         val a = points[i]; val b = points[i + 1]
         val segLen = cumulativeM[i + 1] - cumulativeM[i]
         val f = if (segLen > 0.0) ((d - cumulativeM[i]) / segLen).coerceIn(0.0, 1.0) else 0.0

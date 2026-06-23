@@ -100,6 +100,7 @@ class GapNumericDataType(
                 if (config.preview) DEMO_STATE else GapStateHolder.state.value,
                 RenderPrefs.gapDisplay.value,
                 RenderPrefs.imperialDistance.value,
+                context.isKarooNightMode(),
             ),
         )
 
@@ -153,9 +154,12 @@ class GapNumericDataType(
                         // field shows a meaningful sample instead of the inactive `---` placeholder.
                         val state = if (config.preview) DEMO_STATE else liveState
                         val imperial = RenderPrefs.imperialDistance.value
+                        // Read day/night ONCE per frame and thread it into both the dedup key and the
+                        // view build (was read twice — a wasted read and a potential key/render skew).
+                        val dark = context.isKarooNightMode()
                         val key = gapRenderKey(
                             state, gapDisplay, isRoute = false,
-                            dark = context.isKarooNightMode(), imperial = imperial,
+                            dark = dark, imperial = imperial,
                         )
                         if (isHeartbeat) {
                             // Anti-stuck re-assert: re-emit the cached frame without rebuilding it.
@@ -168,7 +172,7 @@ class GapNumericDataType(
                         } else if (key == lastKey && lastRv != null) {
                             return@collect // pixel-identical change → skip the rebuild + IPC
                         }
-                        val rv = buildView(state, gapDisplay, imperial)
+                        val rv = buildView(state, gapDisplay, imperial, dark)
                         emitter.updateView(rv)
                         lastKey = key
                         lastRv = rv
@@ -189,8 +193,8 @@ class GapNumericDataType(
         }
     }
 
-    private fun buildView(state: GapState, gapDisplay: GapDisplay, imperial: Boolean): RemoteViews {
-        val dark = context.isKarooNightMode()
+    private fun buildView(state: GapState, gapDisplay: GapDisplay, imperial: Boolean, dark: Boolean): RemoteViews {
+        // [dark] is read once per frame by the caller and passed in (was re-read here).
         val neutral = if (dark) Color.WHITE else Color.BLACK
         val neutralHint = if (dark) 0xCCFFFFFF.toInt() else 0xCC000000.toInt()
 

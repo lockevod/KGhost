@@ -27,6 +27,15 @@ class GapCalculatorTest {
         assertEquals(-100.0, s.gapDistanceM, 1e-6) // 400 - 500
     }
 
+    @Test fun `exactly on the ghost is not ahead`() {
+        // At 100 s the ghost has covered exactly 500 m; you are at 500 m too → gapTimeS == 0.
+        // "Ahead" means strictly faster (gapTimeS < 0), matching GapState.inactive() which is
+        // ahead=false at a zero gap. A dead-heat is neither ahead nor behind.
+        val s = GapCalculator.compute(progressM = 500.0, elapsedS = 100.0, curve = curve, fresh = true)
+        assertEquals(0.0, s.gapTimeS, 1e-9)
+        assertFalse(s.ahead)
+    }
+
     @Test fun `fresh false marks state as estimated`() {
         val s = GapCalculator.compute(progressM = 400.0, elapsedS = 100.0, curve = curve, fresh = false)
         assertTrue(s.estimated)

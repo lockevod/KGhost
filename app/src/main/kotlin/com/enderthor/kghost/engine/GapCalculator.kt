@@ -7,7 +7,7 @@ package com.enderthor.kghost.engine
  *   gapTimeS     = elapsedS − curve.timeAt(progressM)
  *   gapDistanceM = progressM − curve.distanceAt(elapsedS)
  *   ghostProgressM = curve.distanceAt(elapsedS)
- *   ahead        = gapTimeS <= 0
+ *   ahead        = gapTimeS < 0   (strictly faster; a dead-heat at 0 is neither ahead nor behind)
  *   estimated    = !fresh   (a prolonged-GPS-loss dead-reckoned estimate; shown marked, not blanked)
  *   active       = true
  */
@@ -36,7 +36,7 @@ object GapCalculator {
             gapDistanceM = gapDistanceM,
             progressM = progressM,
             ghostProgressM = ghostDistanceNow,
-            ahead = gapTimeS <= 0.0,
+            ahead = gapTimeS < 0.0,
             estimated = !fresh,
             active = true,
         )

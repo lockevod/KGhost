@@ -142,6 +142,16 @@ object FileLogTree : Timber.Tree() {
             File(context.getExternalFilesDir(null) ?: context.filesDir, "logs")
         }
 
+    /**
+     * Consulted by Timber BEFORE it formats a log's args and dispatches to [log]. Returning false
+     * when [enabled] is off lets Timber short-circuit this tree's whole pipeline (arg formatting,
+     * dispatch) for every diagnostic call — the cheapest possible "off" cost. When on, capture every
+     * priority (the file log is meant to be exhaustive). Note: Kotlin string-template messages are
+     * still built at the call site regardless; the per-tick diagnostic blocks gate those behind their
+     * own ~2.5 s throttle.
+     */
+    public override fun isLoggable(tag: String?, priority: Int): Boolean = enabled
+
     override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
         if (!enabled) return
         val line = buildString {

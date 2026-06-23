@@ -36,7 +36,10 @@ class HistoryImporter(
     private val fitDecode: (File, Source) -> RecordedTrack? = FitDecoder::decode,
     private val gpxParse: (File) -> RecordedTrack? = GpxParser::parse,
     private val lastScanProvider: () -> Long = { 0L },
-    private val lastScanSetter: (Long) -> Unit = {},
+    // suspend so the caller can AWAIT each persist: the lastScan write must be ordered and complete
+    // before the run continues, otherwise N fire-and-forget writes can land out of order (a smaller
+    // epoch winning) or swallow a failure, leaving lastScan stale (a re-run then reprocesses files).
+    private val lastScanSetter: suspend (Long) -> Unit = {},
 ) {
 
     private enum class Kind { FITFILES_FIT, IMPORT_FIT, IMPORT_GPX }

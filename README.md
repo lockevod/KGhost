@@ -167,7 +167,11 @@ Device-level switches and recorded-track-library management (not per profile):
   recording, no alerts).
 - **Record rides** — auto-record each ride as a GPS track for future ghost comparison.
 - **Import history** — scan the Karoo's `/sdcard/FitFiles` and import GPX/FIT from `/sdcard/KGhost/`
-  (needs all-files access); "import all" or "new only". Shows the recorded-track count.
+  (needs all-files access); "import all" or "new only". Shows the recorded-track count and, after a
+  scan, a summary: *imported · duplicates · not valid*. **Not valid** is not an error — it just counts
+  files that can't be used as a ghost because they lack the GPS position **and** per-point timestamps a
+  race needs (most often route exports from Strava/Komoot, which carry no time), plus empty/corrupt or
+  too-short files. The scan keeps running if you switch screens.
 - **Auto-clean library** — keeps your recorded rides tidy by archiving near-duplicate rides of a route
   (keeping the **fastest and two most recent** of each), so the ghosts stay meaningful and storage
   stays bounded. Archived rides are moved to `/sdcard/KGhost/tracks/archive` and can be restored. On by

@@ -116,7 +116,7 @@
     <string name="import_cancel">Cancelar</string>
     <string name="import_scanning">Buscando archivos…</string>
     <string name="import_parsing">Analizando %1$d / %2$d…</string>
-    <string name="import_summary">%1$d importados · %2$d duplicados · %3$d fallidos</string>
+    <string name="import_summary">%1$d importados · %2$d duplicados · %3$d no válidos</string>
     <string name="import_canceled">Importación cancelada.</string>
     <string name="import_error">La importación falló. Revisa el acceso al almacenamiento e inténtalo de nuevo.</string>
 </resources>

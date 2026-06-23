@@ -12,7 +12,8 @@ package com.enderthor.kghost.engine
  * @param gapDistanceM  progressM − curve.distanceAt(elapsedS). Positive when ahead.
  * @param progressM     Your current position on the ghost's distance axis (metres).
  * @param ghostProgressM Ghost's current position at elapsedS (metres). Useful for rendering.
- * @param ahead         True when gapTimeS <= 0 (you are at least as fast as the ghost).
+ * @param ahead         True when gapTimeS < 0 (strictly faster than the ghost); a dead-heat at 0 is
+ *                      neither ahead nor behind (ahead=false), matching [inactive].
  * @param estimated     True when this value is a dead-reckoned ESTIMATE during a prolonged GPS loss
  *                      (the position has been frozen-while-moving past the coast window). The field
  *                      keeps SHOWING the value (it never blanks for GPS loss) but renders it in the

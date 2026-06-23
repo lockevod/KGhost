@@ -88,6 +88,12 @@ class GapGraphicDataType(
          *  to an edge, at the cost of less sensitivity to small gaps near the centre. */
         const val WINDOW_M = 300.0
 
+        // The ±window scale label has only two possible values (metric/imperial) and WINDOW_M is
+        // constant, so precompute both once at class load instead of rebuilding the string every
+        // active frame.
+        val WINDOW_LABEL_METRIC = "±${WINDOW_M.toInt()} m"
+        val WINDOW_LABEL_IMPERIAL = "±${(WINDOW_M * FEET_PER_METRE).toInt()} ft"
+
         /** Fallback bitmap size when [ViewConfig.viewSize] is unavailable or non-positive. */
         const val FALLBACK_W = 200
         const val FALLBACK_H = 120
@@ -148,7 +154,7 @@ class GapGraphicDataType(
             val seedIsRoute = if (config.preview) false else SegmentInfoHolder.info.value != null
             val seedBmp = renderer.draw(
                 sw, sh, seedState, RenderPrefs.gapDisplay.value, seedIsRoute,
-                RenderPrefs.imperialDistance.value,
+                RenderPrefs.imperialDistance.value, context.isKarooNightMode(),
             )
             val seedRv = RemoteViews(context.packageName, R.layout.field_gap)
             seedRv.setImageViewBitmap(R.id.field_gap_image, seedBmp)
@@ -217,9 +223,13 @@ class GapGraphicDataType(
                         val state = if (config.preview) DEMO_STATE else liveState
                         val isRoute = if (config.preview) false else liveIsRoute
                         val imperial = RenderPrefs.imperialDistance.value
+                        // Read day/night ONCE per frame and thread it into BOTH the dedup key and the
+                        // draw — reading it twice risked a key computed with one value and pixels drawn
+                        // with the other (a key/render skew that defeats the dedup), plus a wasted read.
+                        val dark = context.isKarooNightMode()
                         val key = gapRenderKey(
                             state, gapDisplay, isRoute,
-                            dark = context.isKarooNightMode(), imperial = imperial,
+                            dark = dark, imperial = imperial,
                         )
                         if (isHeartbeat) {
                             val cached = lastRv
@@ -232,7 +242,7 @@ class GapGraphicDataType(
                             return@collect // pixel-identical change → skip redraw + IPC
                         }
                         val (w, h) = bitmapSize(config)
-                        val bmp = renderer.draw(w, h, state, gapDisplay, isRoute, imperial)
+                        val bmp = renderer.draw(w, h, state, gapDisplay, isRoute, imperial, dark)
                         val rv = RemoteViews(context.packageName, R.layout.field_gap)
                         rv.setImageViewBitmap(R.id.field_gap_image, bmp)
                         emitter.updateView(rv)
@@ -316,7 +326,7 @@ class GapGraphicDataType(
             reuseCanvas = null
         }
 
-        fun draw(w: Int, h: Int, state: GapState, gapDisplay: GapDisplay, isRoute: Boolean, imperial: Boolean): Bitmap {
+        fun draw(w: Int, h: Int, state: GapState, gapDisplay: GapDisplay, isRoute: Boolean, imperial: Boolean, dark: Boolean): Bitmap {
             // Reuse the bitmap+Canvas across frames; only recreate when the target size changes
             // (e.g. config.viewSize changed). Same-coroutine: this recreate cannot race a draw from
             // another scope. RemoteViews copies the bitmap into the Binder parcel at updateView
@@ -334,7 +344,7 @@ class GapGraphicDataType(
 
             // Night mode: black background (matches Karoo dark UI, white text readable).
             // Day mode: white background (sunlight-readable; black text on black = invisible).
-            val dark = context.isKarooNightMode()
+            // [dark] is read once per frame by the caller and passed in (was re-read here).
             val bgColor = if (dark) Color.BLACK else Color.WHITE
             canvas.drawColor(bgColor)
 
@@ -369,7 +379,7 @@ class GapGraphicDataType(
             tagPaint.textAlign = Paint.Align.LEFT
             canvas.drawText(if (isRoute) "SEG" else "GP", left, tagY, tagPaint)
             tagPaint.textAlign = Paint.Align.RIGHT
-            val windowLabel = if (imperial) "±${(WINDOW_M * FEET_PER_METRE).toInt()} ft" else "±${WINDOW_M.toInt()} m"
+            val windowLabel = if (imperial) WINDOW_LABEL_IMPERIAL else WINDOW_LABEL_METRIC
             canvas.drawText(windowLabel, right, tagY, tagPaint)
 
             // Track bar.

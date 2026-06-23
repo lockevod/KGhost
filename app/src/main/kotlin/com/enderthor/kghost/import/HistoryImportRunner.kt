@@ -76,8 +76,11 @@ object HistoryImportRunner {
                     trackStore = TrackStore(TrackStorage.tracksDir(appContext)),
                     decimate = HistoryImporter::defaultDecimate,
                     lastScanProvider = { lastScanEpoch },
+                    // Awaited inside the importer's flush (suspend setter): persisting lastScan in
+                    // order — not via a detached scope.launch — prevents an out-of-order write from
+                    // leaving a stale epoch and surfaces a write failure instead of swallowing it.
                     lastScanSetter = { epoch ->
-                        scope.launch { configManager.updateConfig { it.copy(lastScanEpoch = epoch) } }
+                        configManager.updateConfig { it.copy(lastScanEpoch = epoch) }
                     },
                 )
                 importer.import(onlyNew = onlyNew).collect { _progress.value = it }
