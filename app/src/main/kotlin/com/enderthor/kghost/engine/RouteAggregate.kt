@@ -71,14 +71,17 @@ data class PerRouteAggregate(
      */
     fun toLiveSegments(): List<LiveSegment> {
         val out = ArrayList<LiveSegment>()
-        var i = 0
-        while (i < nodes.size) {
-            if (nodes[i].count < AGG_MIN_LAPS) { i++; continue }
-            var j = i
-            while (j + 1 < nodes.size && nodes[j + 1].count >= AGG_MIN_LAPS) j++
-            // Run [i, j] of node indices (inclusive). A segment needs at least two nodes.
-            if (j > i) buildRunSegment(i, j)?.let { out.add(it) }
-            i = j + 1
+        // node[k].count = laps that covered the INCOMING segment (k-1 -> k); node 0 has no incoming
+        // segment, so scan from k=1. A contiguous run of raceable nodes [firstK, lastK] covers the
+        // route stretch [(firstK-1)*step, lastK*step], so the segment is built from node firstK-1 —
+        // its true start (else a mid-route run would begin one grid step late and drop the first dt).
+        var k = 1
+        while (k < nodes.size) {
+            if (nodes[k].count < AGG_MIN_LAPS) { k++; continue }
+            val firstK = k
+            while (k + 1 < nodes.size && nodes[k + 1].count >= AGG_MIN_LAPS) k++
+            buildRunSegment(firstK - 1, k)?.let { out.add(it) }
+            k++
         }
         return out
     }
@@ -119,9 +122,11 @@ data class PerRouteAggregate(
  * Folds one lap's `(routeDist, riderTimeFromStartS)` series into [existing] (or a fresh grid) and
  * returns the updated aggregate. Pure.
  *
- * @param lap ascending-in-routeDist samples; [DoubleArray] `[routeDistM, riderTimeS]`. `riderTimeS`
- *   is measured on the fair-start clock (time since the rider first rolled at the route start), so
- *   the average is consistent with the live race's "fair start".
+ * @param lap ascending-in-routeDist samples; [DoubleArray] `[routeDistM, riderTimeS]`. Only the
+ *   DIFFERENCE in `riderTimeS` between consecutive covered nodes is folded (as per-segment deltas),
+ *   so the model is origin-invariant: the time may be on any consistent clock and the lap may START
+ *   ANYWHERE on the route (a live fair-start lap, or a history slice re-based to its own start via
+ *   [seedAggregateFromLaps]). Time must be non-decreasing along the lap; absolute origin is irrelevant.
  */
 fun updateAggregate(
     existing: PerRouteAggregate?,

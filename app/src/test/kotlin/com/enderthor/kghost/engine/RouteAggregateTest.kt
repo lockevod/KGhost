@@ -154,6 +154,23 @@ class RouteAggregateTest {
         assertEquals(20.0, s.ghost.timeAt(s.routeEndM - s.routeStartM), 1e-6)
     }
 
+    @Test fun `a mid-route covered run is raced from its true start (no off-by-one)`() {
+        // Lap covering route [500, 600] (nodes 20..24) at 5 s per 25 m. node 20 is the first covered
+        // node → re-baselines (count stays 0); nodes 21..24 fold the four segments (20->21 .. 23->24).
+        // After two laps those four segments are raceable, so the covered stretch is [500, 600] — it
+        // must NOT start at node 21 (525 m) and must NOT drop the first segment's 5 s.
+        val key = "loop"
+        val l = lap(500.0 to 0.0, 525.0 to 5.0, 550.0 to 10.0, 575.0 to 15.0, 600.0 to 20.0)
+        val agg = updateAggregate(updateAggregate(null, key, "Loop", 1000.0, l), key, "Loop", 1000.0, l)
+        val segs = agg.toLiveSegments()
+        assertEquals(1, segs.size)
+        val s = segs.first()
+        assertEquals(500.0, s.routeStartM, 1e-9)
+        assertEquals(600.0, s.routeEndM, 1e-9)
+        // Full 100 m = 4 segments * 5 s = 20 s (includes the first covered segment 500->525).
+        assertEquals(20.0, s.ghost.timeAt(100.0), 1e-6)
+    }
+
     @Test fun `schemaVersion is stamped on the result`() {
         val agg = updateAggregate(null, "k", "K", 100.0, lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0))
         assertEquals(AGG_SCHEMA_VERSION, agg.schemaVersion)
