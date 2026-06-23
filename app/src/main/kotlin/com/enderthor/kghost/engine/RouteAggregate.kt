@@ -197,10 +197,12 @@ fun updateAggregate(
             } else if (dt < 0.0) {
                 continue // node at the baseline's own distance but time went backwards: corrupt sample
             }
-            // Fold the SINGLE-step delta only when the previous folded node is exactly k-1; otherwise
-            // this is the first covered node or sits past a gap → just re-baseline (no valid 1-step dt).
+            // Fold the SINGLE-step delta only when the previous folded node EXISTS and is exactly k-1;
+            // otherwise this is the first covered node or sits past a gap → just re-baseline (no valid
+            // 1-step dt). The `prevNodeIdx >= 0` guard keeps node 0 (no incoming segment) at count 0
+            // even for a lap that starts exactly at routeDist 0 (its degenerate dt would be 0 anyway).
             val segDt = tAdj - prevNodeTime
-            if (prevNodeIdx == k - 1) {
+            if (prevNodeIdx >= 0 && prevNodeIdx == k - 1) {
                 val node = base[k]
                 // Plain running mean while seeding (first AGG_SEED_LAPS laps), then the EMA — see
                 // [AGG_SEED_LAPS] for why a bare EMA from lap 1 is wrong.

@@ -21,9 +21,10 @@ class RouteAggregateTest {
             assertEquals(expected[k], agg.nodes[k].dtS, 1e-9)
             assertEquals(1, agg.nodes[k].count)
         }
-        // Node 0 (the lap's first covered node, sitting at the start origin) folds a degenerate
-        // zero-length delta against the phantom baseline; it carries dt=0 and never affects timing.
+        // Node 0 has no incoming segment, so it is never folded — even for a lap starting exactly at the
+        // origin it stays at the empty default (dt=0, count=0) and never affects timing.
         assertEquals(0.0, agg.nodes[0].dtS, 1e-9)
+        assertEquals(0, agg.nodes[0].count)
     }
 
     @Test fun `identical second lap leaves deltas unchanged, count 2`() {
@@ -201,8 +202,9 @@ class RouteAggregateTest {
         )
 
     @Test fun `toLiveSegments builds one segment per contiguous ge-2-lap run`() {
-        // counts 2,2,2,1,1 over 0,25,50,75,100. The race run scans nodes with count >= 2; node 0 here
-        // also carries count 2 so the run is [0,50], deltas 0,5,5 → segment time 10 s.
+        // counts 2,2,2,1,1 over nodes 0..4. The race scan considers nodes k>=1 (count >= 2 means the
+        // INCOMING segment k-1->k is covered): nodes 1,2 qualify → the run is built from firstK-1 = 0,
+        // so the segment is [0,50] with deltas dt[1],dt[2] = 5,5 → 10 s. Node 0's own count is irrelevant.
         val agg = aggOf(100.0, 0.0 to 2, 5.0 to 2, 5.0 to 2, 15.0 to 1, 20.0 to 1)
         val segs = agg.toLiveSegments()
         assertEquals(1, segs.size)
