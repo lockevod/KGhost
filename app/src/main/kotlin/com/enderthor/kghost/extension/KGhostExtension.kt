@@ -1353,6 +1353,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // Dispatchers.IO, not this match coroutine's Default (CPU) pool. The seed COMPUTE
                         // (routeLaps + seedAggregateFromLaps) stays on Default.
                         var agg = withContext(Dispatchers.IO) { aggregateStore().load(key) }
+                        val justSeeded = agg == null
                         if (agg == null) {
                             // No (valid) aggregate yet → SEED from recorded history so AVERAGE races from ride 1 and the
                             // expensive match becomes a one-time seed. Fold the candidate tracks' route laps, oldest first.
@@ -1371,12 +1372,25 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         }
                         val avgSegs = agg?.toLiveSegments().orEmpty()
                         val covered = avgSegs.map { it.routeStartM to it.routeEndM }
-                        val bestSegs = SegmentMatcher.match(
-                            path, tracks, GhostPick.BEST, SegmentMatcher.Params(maxTracks = maxTracks),
-                            coveredRanges = covered,
-                        )
+                        // On the SEED ride, SKIP the BEST match. The seed already covers what history covers,
+                        // so BEST would scan every candidate at full resolution only to skip it all (covered)
+                        // — minutes of pure waste before the ghost engages (matchMs ~258 s observed). Race the
+                        // seeded average alone now; any uncovered stretch falls back to Ghost-Pace this one
+                        // ride, and BEST refines on LATER rides (the aggregate then loads instantly, so its
+                        // BEST pass is cheap). Still run BEST if the seed yielded nothing raceable, so the
+                        // ride is never ghostless.
+                        val bestSegs = if (justSeeded && avgSegs.isNotEmpty()) {
+                            emptyList()
+                        } else {
+                            SegmentMatcher.match(
+                                path, tracks, GhostPick.BEST, SegmentMatcher.Params(maxTracks = maxTracks),
+                                coveredRanges = covered,
+                            )
+                        }
                         if (avgSegs.isEmpty()) {
                             Timber.i("KVP avg: no raceable aggregate for '${state.name}' yet — racing BEST while it warms up")
+                        } else if (justSeeded) {
+                            Timber.i("KVP avg: seeded — racing the aggregate on ${avgSegs.size} stretch(es); BEST deferred to the next ride (skipped the cold full-scan)")
                         } else {
                             Timber.i("KVP avg: racing the aggregate on ${avgSegs.size} stretch(es), BEST on the rest (slice skipped on covered)")
                         }
