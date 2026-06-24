@@ -980,20 +980,19 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     break
                 }
                 val atEof = sentLogBytes + want >= len
-                // Decode the window; if it doesn't reach EOF, cut at the last newline so the chunk is
-                // whole lines AND we advance by EXACTLY the cut bytes (a char boundary). `consumed` is
-                // the byte count we advance by — the raw `want` unless we trimmed to a newline. (Log
-                // lines are short, far under the window, so the no-newline branch can't realistically
-                // fire; advancing by `want` there keeps the offset byte-aligned regardless.)
-                var text = String(buf, Charsets.UTF_8)
+                // If not at EOF, cut at the last newline in the RAW bytes so the chunk is whole lines
+                // and `consumed` is byte-precise — no UTF-8 re-encoding that could drift if the window
+                // ended mid-sequence (e.g. splitting a ✓ across chunks).
                 var consumed = want.toLong()
+                var usedBuf = buf
                 if (!atEof) {
-                    val nl = text.lastIndexOf('\n')
+                    val nl = buf.indexOfLast { it == '\n'.code.toByte() }
                     if (nl >= 0) {
-                        text = text.substring(0, nl + 1)
-                        consumed = text.toByteArray(Charsets.UTF_8).size.toLong()
+                        consumed = (nl + 1).toLong()
+                        usedBuf = buf.copyOf(nl + 1)
                     }
                 }
+                val text = String(usedBuf, Charsets.UTF_8)
                 if (text.isEmpty()) break
                 val lines = text.count { it == '\n' }
                 val fileName = "kghost_v${ver}_${id}_${sid}_p${"%03d".format(logChunkSeq)}_$DEVICE_LABEL.log"

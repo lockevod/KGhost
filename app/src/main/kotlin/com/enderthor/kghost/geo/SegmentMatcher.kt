@@ -235,7 +235,7 @@ object SegmentMatcher {
      * `(routeDistM, elapsedS)` series ascending in routeDist (one point per kept track point, time
      * re-based to 0 at the lap start). The seed folds each lap via updateAggregate (origin-invariant).
      *
-     * Uses a CHEAP single forward pass ([seedLap]) — O(track points) per track — NOT the O(n²)
+     * Uses a CHEAP single forward pass ([seedLaps]) — O(track points) per track — NOT the O(n²)
      * best-chain-per-seed search [match] uses. Recorded tracks are already ~20 m-spaced, so decimating
      * barely cuts the O(n²) (a 40 km × 10-track seed ran ~84 s); the win is dropping the n² entirely.
      * The seed is averaged over many laps onto a 25 m grid, so the robustness of trying every seed
