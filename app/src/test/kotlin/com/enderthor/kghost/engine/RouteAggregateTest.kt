@@ -141,18 +141,56 @@ class RouteAggregateTest {
         assertEquals(1, b.nodes[24].count)
     }
 
-    // A node-pair needs >= AGG_MIN_LAPS laps before its node is raceable.
-    @Test fun `a pair is raceable only after two laps`() {
+    // A node-pair is raceable after a single lap (count >= 1).
+    @Test fun `a pair is raceable after one lap`() {
         val key = "loop"
         val l = lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0, 75.0 to 15.0, 100.0 to 20.0)
         val one = updateAggregate(null, key, "Loop", 1000.0, l)
-        assertTrue(one.toLiveSegments().isEmpty())
+        assertTrue(one.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).isNotEmpty())
         val two = updateAggregate(one, key, "Loop", 1000.0, l)
-        val segs = two.toLiveSegments()
+        val segs = two.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0)
         assertTrue(segs.isNotEmpty())
         // Ghost regression: traversing nodes 1..4 (75 m of grid span) takes 4 * 5 s = 20 s.
         val s = segs.first()
         assertEquals(20.0, s.ghost.timeAt(s.routeEndM - s.routeStartM), 1e-6)
+    }
+
+    @Test fun `toLiveSegments builds the chosen reducer's curve`() {
+        val key = "loop"
+        val a = updateAggregate(null, key, "Loop", 1000.0, lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0))
+        val agg = updateAggregate(a, key, "Loop", 1000.0, lap(0.0 to 0.0, 25.0 to 7.0, 50.0 to 14.0))
+        // node1: deltas 5,7 → ema6/min5/last7 ; node2: 5,7 → ema6/min5/last7. Run [1,2] → seg [0,50].
+        fun timeOf(pick: GhostPick) = agg.toLiveSegments(pick, minSegM = 0.0).first().ghost.timeAt(50.0)
+        assertEquals(12.0, timeOf(GhostPick.AVERAGE), 1e-6) // 6+6
+        assertEquals(10.0, timeOf(GhostPick.BEST), 1e-6)    // 5+5
+        assertEquals(14.0, timeOf(GhostPick.LAST), 1e-6)    // 7+7
+    }
+
+    @Test fun `BEST clamps a glitch-fast node to a plausible multiple of the average`() {
+        val key = "loop"
+        // Build node1 with a normal average (~5 s) but a glitch min (0.1 s = absurdly fast).
+        var agg = updateAggregate(null, key, "Loop", 1000.0, lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0))
+        agg = updateAggregate(agg, key, "Loop", 1000.0, lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0))
+        // Hand-inject a glitch min into node 1 (count stays, ema stays ~5).
+        val poisoned = agg.copy(nodes = agg.nodes.mapIndexed { i, n -> if (i == 1) n.copy(minDtS = 0.1) else n })
+        val bestSeg = poisoned.toLiveSegments(GhostPick.BEST, minSegM = 0.0).first()
+        // node1 BEST delta is clamped to dtS / BEST_MAX_SPEEDUP (= 5 / 1.5 ≈ 3.33), NOT 0.1.
+        assertEquals(5.0 / BEST_MAX_SPEEDUP, bestSeg.ghost.timeAt(25.0), 1e-6)
+    }
+
+    @Test fun `a node is raceable with one lap (all modes)`() {
+        val agg = updateAggregate(null, "k", "K", 1000.0, lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0))
+        // One lap → node1,node2 count==1 → raceable in every mode (minSegM=0 to bypass the length filter).
+        assertTrue(agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).isNotEmpty())
+        assertTrue(agg.toLiveSegments(GhostPick.BEST, minSegM = 0.0).isNotEmpty())
+        assertTrue(agg.toLiveSegments(GhostPick.LAST, minSegM = 0.0).isNotEmpty())
+    }
+
+    @Test fun `runs shorter than the minimum segment length are dropped`() {
+        // A ~50 m covered run (nodes 1..2) is dropped at the default 300 m min; kept at minSegM 0.
+        val agg = updateAggregate(null, "k", "K", 1000.0, lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0))
+        assertTrue(agg.toLiveSegments(GhostPick.AVERAGE).isEmpty())          // default AGG_MIN_SEG_M
+        assertTrue(agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).isNotEmpty())
     }
 
     @Test fun `a mid-route covered run is raced from its true start (no off-by-one)`() {
@@ -163,7 +201,7 @@ class RouteAggregateTest {
         val key = "loop"
         val l = lap(500.0 to 0.0, 525.0 to 5.0, 550.0 to 10.0, 575.0 to 15.0, 600.0 to 20.0)
         val agg = updateAggregate(updateAggregate(null, key, "Loop", 1000.0, l), key, "Loop", 1000.0, l)
-        val segs = agg.toLiveSegments()
+        val segs = agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0)
         assertEquals(1, segs.size)
         val s = segs.first()
         assertEquals(500.0, s.routeStartM, 1e-9)
@@ -181,7 +219,7 @@ class RouteAggregateTest {
         agg = updateAggregate(agg, key, "Loop", 1000.0, a)
         agg = updateAggregate(agg, key, "Loop", 1000.0, b)
         agg = updateAggregate(agg, key, "Loop", 1000.0, b)
-        val segs = agg.toLiveSegments().sortedBy { it.routeStartM }
+        val segs = agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).sortedBy { it.routeStartM }
         assertEquals(2, segs.size)
         assertEquals(0.0, segs[0].routeStartM, 1e-9)
         assertEquals(50.0, segs[0].routeEndM, 1e-9)
@@ -201,12 +239,12 @@ class RouteAggregateTest {
             nodes = nodes.map { AggregateNode(dtS = it.first, count = it.second) },
         )
 
-    @Test fun `toLiveSegments builds one segment per contiguous ge-2-lap run`() {
-        // counts 2,2,2,1,1 over nodes 0..4. The race scan considers nodes k>=1 (count >= 2 means the
+    @Test fun `toLiveSegments builds one segment per contiguous covered run`() {
+        // counts 1,1,1,0,0 over nodes 0..4. The race scan considers nodes k>=1 (count >= 1 means the
         // INCOMING segment k-1->k is covered): nodes 1,2 qualify → the run is built from firstK-1 = 0,
         // so the segment is [0,50] with deltas dt[1],dt[2] = 5,5 → 10 s. Node 0's own count is irrelevant.
-        val agg = aggOf(100.0, 0.0 to 2, 5.0 to 2, 5.0 to 2, 15.0 to 1, 20.0 to 1)
-        val segs = agg.toLiveSegments()
+        val agg = aggOf(100.0, 0.0 to 1, 5.0 to 1, 5.0 to 1, 15.0 to 0, 20.0 to 0)
+        val segs = agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0)
         assertEquals(1, segs.size)
         assertEquals(0.0, segs[0].routeStartM, 1e-9)
         assertEquals(50.0, segs[0].routeEndM, 1e-9)
@@ -214,21 +252,25 @@ class RouteAggregateTest {
         assertTrue(segs[0].ghostLabel.startsWith("AVG"))
     }
 
-    @Test fun `toLiveSegments empty while no run has 2 laps`() {
-        val agg = aggOf(100.0, 0.0 to 1, 5.0 to 1, 5.0 to 1, 15.0 to 1, 20.0 to 1)
-        assertTrue(agg.toLiveSegments().isEmpty())
+    @Test fun `toLiveSegments empty while no node is covered`() {
+        val agg = aggOf(100.0, 0.0 to 0, 5.0 to 0, 5.0 to 0, 15.0 to 0, 20.0 to 0)
+        assertTrue(agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).isEmpty())
     }
 
-    @Test fun `toLiveSegments skips a lone ge-2 node (needs two)`() {
-        val agg = aggOf(100.0, 0.0 to 2, 5.0 to 1, 5.0 to 1, 15.0 to 1, 20.0 to 1)
-        assertTrue(agg.toLiveSegments().isEmpty())
+    @Test fun `toLiveSegments races a lone covered node`() {
+        // With the count >= 1 gate a single covered node-pair (node 1) is raceable: segment [0,25].
+        val agg = aggOf(100.0, 0.0 to 1, 5.0 to 1, 5.0 to 0, 15.0 to 0, 20.0 to 0)
+        val segs = agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0)
+        assertEquals(1, segs.size)
+        assertEquals(0.0, segs[0].routeStartM, 1e-9)
+        assertEquals(25.0, segs[0].routeEndM, 1e-9)
     }
 
     @Test fun `toLiveSegments repairs a non-monotonic delta dip`() {
         // node2 delta is negative — its cumulative time would dip below node1's, so it must be clamped
         // so GhostCurve does not reject the curve.
         val agg = aggOf(100.0, 0.0 to 2, 10.0 to 2, -3.0 to 2, 13.0 to 2, 5.0 to 2)
-        val segs = agg.toLiveSegments()
+        val segs = agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0)
         assertEquals(1, segs.size)
         // cum: node1=10, node2=7 → clamped to 10, node3=20, node4=25 → strictly non-decreasing in time.
         val c = segs[0].ghost
@@ -260,6 +302,6 @@ class RouteAggregateTest {
         // Two laps covered nodes 1..4 → raceable; per-segment dtS is the running mean of 5 and 6 = 5.5.
         assertEquals(5.5, agg.nodes[1].dtS, 1e-9)
         assertEquals(2, agg.nodes[1].count)
-        assertTrue(agg.toLiveSegments().isNotEmpty())
+        assertTrue(agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).isNotEmpty())
     }
 }

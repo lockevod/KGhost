@@ -1372,7 +1372,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 Timber.i("KVP avg: seeded aggregate $key from ${laps.size} history lap(s) — routeLaps ${lapMs}ms")
                             }
                         }
-                        val avgSegs = agg?.toLiveSegments().orEmpty()
+                        val avgSegs = agg?.toLiveSegments(GhostPick.AVERAGE).orEmpty()
                         val covered = avgSegs.map { it.routeStartM to it.routeEndM }
                         // On the SEED ride, SKIP the BEST match. The seed already covers what history covers,
                         // so BEST would scan every candidate at full resolution only to skip it all (covered)

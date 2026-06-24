@@ -32,6 +32,15 @@ const val AGG_MAX_SPEED_MS = 30.0
  *  discarded (and re-seeded) instead of mis-read. */
 const val AGG_SCHEMA_VERSION = 2
 
+/** BEST reducer plausibility cap: a node's "best" may be at most this many times faster than its
+ *  own average there. Clips a single glitch-fast segment (which as a raw min would spike the curve)
+ *  while leaving any realistic best (5–15 % over average) untouched. Self-anchored → no jumps. */
+const val BEST_MAX_SPEEDUP = 1.5
+
+/** Minimum raceable run length (m). A contiguous covered run shorter than this is dropped (isolated
+ *  noise). Shared by all picks (the count≥1 runs are the same); ported from SegmentMatcher.minSegmentM. */
+const val AGG_MIN_SEG_M = 300.0
+
 /** One grid node: the three reducers of the per-segment delta (node k-1 → k), plus the lap count. */
 @Serializable
 data class AggregateNode(
@@ -67,31 +76,45 @@ data class PerRouteAggregate(
     val nodes: List<AggregateNode>,
 ) {
     /**
-     * Turns the well-covered stretches of this average into raceable [LiveSegment]s — contiguous runs
-     * of nodes with `count >= AGG_MIN_LAPS`. The caller feeds these through [RouteGhost.build], which
-     * bridges the uncovered stretches (warmup / never-ridden) with the Ghost-Pace fill exactly as it
-     * does for BEST/LAST. Returns an empty list while no stretch has ≥2 laps yet (so AVERAGE can fall
-     * back to BEST during warmup).
+     * Raceable [LiveSegment]s for [pick], from this grid: contiguous runs of covered nodes (count≥1),
+     * each built from the pick's reducer (EMA / min-clamped / last). Runs shorter than [minSegM] are
+     * dropped. The caller bridges the gaps (count==0 / dropped) with the Ghost-Pace fill via
+     * [RouteGhost.build]. Same run set for every pick (count is shared) — only the curve differs.
      */
-    fun toLiveSegments(): List<LiveSegment> {
+    fun toLiveSegments(pick: GhostPick, minSegM: Double = AGG_MIN_SEG_M): List<LiveSegment> {
         val out = ArrayList<LiveSegment>()
-        // node[k].count = laps that covered the INCOMING segment (k-1 -> k); node 0 has no incoming
-        // segment, so scan from k=1. A contiguous run of raceable nodes [firstK, lastK] covers the
-        // route stretch [(firstK-1)*step, lastK*step], so the segment is built from node firstK-1 —
-        // its true start (else a mid-route run would begin one grid step late and drop the first dt).
+        // node[k].count = laps covering the INCOMING segment (k-1→k); node 0 has none, so scan k≥1.
         var k = 1
         while (k < nodes.size) {
-            if (nodes[k].count < AGG_MIN_LAPS) { k++; continue }
+            if (nodes[k].count < 1) { k++; continue }
             val firstK = k
-            while (k + 1 < nodes.size && nodes[k + 1].count >= AGG_MIN_LAPS) k++
-            buildRunSegment(firstK - 1, k)?.let { out.add(it) }
+            while (k + 1 < nodes.size && nodes[k + 1].count >= 1) k++
+            buildRunSegment(firstK - 1, k, pick, minSegM)?.let { out.add(it) }
             k++
         }
         return out
     }
 
-    /** Builds a segment-relative [LiveSegment] for the node run `[from, to]`, or null if degenerate. */
-    private fun buildRunSegment(from: Int, to: Int): LiveSegment? {
+    /** The pick's per-segment delta at node [k]. BEST is clamped to a plausible multiple of the average
+     *  there (no glitch spike, no node-to-node jump); AVERAGE/LAST are the raw reducers. */
+    private fun nodeDelta(k: Int, pick: GhostPick): Double {
+        val n = nodes[k]
+        return when (pick) {
+            GhostPick.AVERAGE -> n.dtS
+            GhostPick.LAST -> n.lastDtS
+            GhostPick.BEST -> maxOf(n.minDtS, n.dtS / BEST_MAX_SPEEDUP)
+        }
+    }
+
+    private fun labelFor(pick: GhostPick, totalTimeS: Double): String = when (pick) {
+        GhostPick.BEST -> "PR " + mmss(totalTimeS)
+        GhostPick.LAST -> "Last " + mmss(totalTimeS)
+        GhostPick.AVERAGE -> "AVG " + mmss(totalTimeS)
+    }
+
+    /** Builds a segment-relative [LiveSegment] for the node run `[from, to]`, or null if too short/degenerate. */
+    private fun buildRunSegment(from: Int, to: Int, pick: GhostPick, minSegM: Double): LiveSegment? {
+        if ((to - from) * stepM < minSegM) return null
         val startDist = from * stepM
         val samples = ArrayList<GhostSample>(to - from + 1)
         var cum = 0.0
@@ -99,26 +122,17 @@ data class PerRouteAggregate(
         samples.add(GhostSample(0.0, 0.0))
         for (k in from + 1..to) {
             val dist = (k - from) * stepM
-            cum += nodes[k].dtS
-            // Independent per-segment EMAs could, rarely, produce a non-positive step; clamp so the curve
-            // stays non-decreasing in time (GhostCurve.init requires time >= the previous sample).
-            val t = cum.coerceAtLeast(prevTime)
+            cum += nodeDelta(k, pick)
+            val t = cum.coerceAtLeast(prevTime) // keep the curve non-decreasing (GhostCurve requires it)
             samples.add(GhostSample(dist, t))
             prevTime = t
         }
         if (samples.size < 2) return null
-        // Reject a corrupt run that implies an impossible average speed (defensive; nodes are guarded
-        // on update too). Let RouteGhost fill that stretch instead.
         val totalDist = samples.last().distanceM
         val totalTime = samples.last().timeS
-        if (totalTime <= 0.0 || totalDist / totalTime > AGG_MAX_SPEED_MS) return null
+        if (totalTime <= 0.0 || totalDist / totalTime > AGG_MAX_SPEED_MS) return null // defensive
         val curve = GhostCurve(samples)
-        return LiveSegment(
-            routeStartM = startDist,
-            routeEndM = to * stepM,
-            ghost = curve,
-            ghostLabel = "AVG " + mmss(curve.totalTimeS),
-        )
+        return LiveSegment(startDist, to * stepM, curve, labelFor(pick, curve.totalTimeS))
     }
 }
 
