@@ -2165,11 +2165,24 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // FIRST-FIX CONFIRMATION. The odometric filter below needs a trusted baseline, and
                         // D0 is latched ONCE (invariant for the whole route) — but the very FIRST on-route
                         // fix can be a wrong-pass snap on a self-intersecting route (the filter can't catch
-                        // it: there is no baseline yet). Require two consecutive fixes that agree
+                        // it: there is no baseline yet). Require two consecutive GPS fixes that agree
                         // odometrically before trusting anything: tick 1 stores a candidate, tick 2 confirms
                         // it (or replaces it and waits one more). Costs one tick of --- at route
                         // acquisition; firstMove gates the race anyway, so a stationary start loses nothing.
+                        // GPS is required: the Karoo's map-match while stationary can snap to the nearest
+                        // road segment (hundreds of metres off the true start), which would latch a wrong D0
+                        // permanently and make the ghost appear to start far ahead of the rider. Wait for the
+                        // GPS projector to supply a reliable on-route position before confirming D0.
                         if (lastGoodRouteDistM == null && routeStartDistM == null) {
+                            if (!routeDistFromGps) {
+                                val nowMs = System.currentTimeMillis()
+                                if (nowMs - lastDiagLogMs >= diagLogMs) {
+                                    lastDiagLogMs = nowMs
+                                    Timber.d("KVP tick route: Karoo-only position (${"%.0f".format(routeDist)}m) — D0 bootstrap waiting for GPS")
+                                }
+                                holdGap()
+                                return@runCatching
+                            }
                             val candPos = d0CandPos
                             val candOdo = d0CandOdo
                             val consistent = candPos != null && candOdo != null &&
@@ -2181,7 +2194,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 val nowMs = System.currentTimeMillis()
                                 if (nowMs - lastDiagLogMs >= diagLogMs) {
                                     lastDiagLogMs = nowMs
-                                    Timber.d("KVP tick route: first fix at ${"%.0f".format(routeDist)}m — awaiting confirmation")
+                                    Timber.d("KVP tick route: first GPS fix at ${"%.0f".format(routeDist)}m — awaiting confirmation")
                                 }
                                 holdGap()
                                 return@runCatching
