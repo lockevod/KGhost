@@ -22,9 +22,6 @@ const val AGG_SEED_LAPS = 4
  */
 const val AGG_MIN_SPEED_MS = 0.5
 
-/** A node needs at least this many contributing laps before AVERAGE will race it. */
-const val AGG_MIN_LAPS = 2
-
 /** Max plausible cyclist speed (m/s) between two nodes; a faster jump is a GPS spike and is rejected. */
 const val AGG_MAX_SPEED_MS = 30.0
 

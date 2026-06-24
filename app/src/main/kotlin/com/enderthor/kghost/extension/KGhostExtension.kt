@@ -24,7 +24,6 @@ import com.enderthor.kghost.engine.learnProfile
 import com.enderthor.kghost.engine.StalenessLogic
 import com.enderthor.kghost.engine.GhostPaceSource
 import com.enderthor.kghost.engine.toInfo
-import com.enderthor.kghost.engine.AGG_MIN_LAPS
 import com.enderthor.kghost.engine.AGG_STEP_M
 import com.enderthor.kghost.engine.updateAggregate
 import com.enderthor.kghost.engine.seedAggregateFromLaps
@@ -1312,18 +1311,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Default-pool contention at route-load and delay ② activating. Capping the candidate
                     // count on long routes bounds that without touching match accuracy (it only limits how
                     // many historical rides are considered, which on a long route is naturally few anyway).
-                    // Candidate cap. The match is ~linear in candidate COUNT and each candidate's match
-                    // cost grows with route length (per-track route-vertex scans), so a frequently-ridden
-                    // route accrues many overlapping history tracks and is the EXPENSIVE case — the old
-                    // buckets were inverted (short routes got the 120 default → on a much-ridden 40 km
-                    // loop the match took >5 min and route mode NEVER engaged, so the map ghost never
-                    // appeared). loadTopCandidates returns the MOST route-overlapping tracks first, so the
-                    // few kept are the most relevant; BEST only needs the closest-matching ride per
-                    // stretch (and AVERAGE races its precomputed aggregate, not this live match).
-                    // Match cost plateaus with track count (the few most-overlapping tracks dominate, so
-                    // 6 ≈ 10 in time), and more candidates = better BEST coverage / aggregate seeding —
-                    // so keep a healthy count. The warmed-route latency is solved by skipping the slice on
-                    // aggregate-covered stretches (coveredRanges below), not by a tiny cap.
+                    // Candidate cap for the one-time SEED (routeLaps). All three picks now race the
+                    // persisted per-route grid, seeded once from history — there is no live per-ride
+                    // match anymore — so this only bounds how many history tracks the cold seed folds.
+                    // loadTopCandidates returns the MOST route-overlapping tracks first, so the few kept
+                    // are the most relevant; more candidates = better seed coverage for all reducers
+                    // (min/last/EMA), so keep a healthy count. (On a warmed route the grid loads from
+                    // disk and the seed is skipped entirely, so the cap then costs nothing.)
                     val maxTracks = when {
                         path.totalM > 120_000 -> 8
                         path.totalM > 40_000 -> 10
