@@ -331,12 +331,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         private const val LOG_SEND_INTERVAL_MS = 20 * 60_000L
 
         /**
-         * Max characters per uploaded chunk. The Karoo `httpRequest` body crosses the host Binder
+         * Max BYTES per uploaded chunk. The Karoo `httpRequest` body crosses the host Binder
          * transaction at ~80 KB (KSafe's empirical CALIBRATION_MAX_CHUNK_BYTES = 72 000), so each POST
-         * must stay well under it — 60 000 chars ≈ 60 KB of ASCII log + multipart overhead. A bigger
-         * body fails with TransactionTooLargeException, so the WHOLE feature silently never delivers.
+         * must stay well under it — 60 000 bytes + multipart overhead. A bigger body fails with
+         * TransactionTooLargeException, so the WHOLE feature silently never delivers.
          */
-        private const val LOG_CHUNK_CHARS = 60_000
+        private const val LOG_CHUNK_BYTES = 60_000
 
         /** Chunks per PERIODIC cycle, so one window can't monopolise the link draining a huge backlog. */
         private const val LOG_PERIODIC_MAX_CHUNKS = 6
@@ -602,14 +602,18 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // The Anon tag (stable opaque install id) — fetched once, shown in the UI and the upload caption.
     @Volatile
     private var installId: String? = null
-    // Chars of the current ride's log already uploaded, so each cycle sends only what's new. Reset to 0
-    // (with [logChunkSeq]) on each new ride file.
+    // BYTES of the current ride's log already uploaded, so each cycle reads + sends only the new tail
+    // (a byte offset, NOT chars: we seek into the file and never re-read the multi-MB prefix — at ride
+    // end that re-read would spike CPU/IO exactly when the Karoo is saving + uploading the activity).
+    // Reset to 0 (with [logChunkSeq]) on each new ride file; [sentLogFilePath] guards the file identity.
     @Volatile
-    private var sentLogChars: Int = 0
+    private var sentLogBytes: Long = 0L
+    @Volatile
+    private var sentLogFilePath: String? = null
     @Volatile
     private var logChunkSeq: Int = 0
     // Guards against a periodic drain and the ride-end drain running concurrently (both advance
-    // sentLogChars), which could skip or duplicate a chunk.
+    // sentLogBytes), which could skip or duplicate a chunk.
     @Volatile
     private var logSendInFlight = false
 
@@ -918,15 +922,22 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     }
 
     /**
-     * Uploads the part of the current ride's log not yet sent ([sentLogChars]) to the developer's
+     * Uploads the part of the current ride's log not yet sent ([sentLogBytes]) to the developer's
      * Telegram via [LogReporter] (which redacts every GPS coordinate first, so no location data leaves
-     * the device), in chunks of [LOG_CHUNK_CHARS] — each `httpRequest` body MUST stay under the host
+     * the device), in chunks of [LOG_CHUNK_BYTES] — each `httpRequest` body MUST stay under the host
      * Binder transaction limit (~80 KB) or the whole POST fails. Sends at most [maxChunks] per call.
      *
-     * Runs entirely on [Dispatchers.IO] — the owning [scope] is Main, and reading a multi-MB file +
-     * the multipart build must never touch the Main thread (ANR). Advances [sentLogChars] only per
-     * SUCCESSFUL chunk, so a failure just retries from the same point next cycle; an in-flight guard
-     * stops the periodic and ride-end drains overlapping.
+     * Reads ONLY the not-yet-sent tail via a BYTE offset + [java.io.RandomAccessFile.seek], never the
+     * whole file: at ride end the log is multi-MB and the periodic drains already sent the bulk, so a
+     * `readText()` of the whole thing would be a CPU/IO spike landing exactly when the Karoo is saving
+     * + uploading the activity (same Companion link, same CPU) — the rider feels it as "finishing the
+     * ride got slower". Chunks are cut on a `\n` boundary and the offset advances by the chunk's
+     * ENCODED byte length, so the next seek never splits a UTF-8 sequence.
+     *
+     * Runs entirely on [Dispatchers.IO] (the owning [scope] is Main — file IO + multipart build must
+     * never touch Main → ANR). Advances [sentLogBytes] only per SUCCESSFUL chunk, so a failure just
+     * retries from the same point next cycle; an in-flight guard stops the periodic and ride-end drains
+     * overlapping, and [sentLogFilePath] resets the offset when the ride file changed under us.
      */
     private suspend fun sendLogTail(prefix: String, maxChunks: Int) = withContext(Dispatchers.IO) {
         if (!FileLogTree.enabled || !::karooSystem.isInitialized) return@withContext
@@ -934,30 +945,58 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         val file = FileLogTree.currentLogFile() ?: return@withContext
         logSendInFlight = true
         try {
+            // A new (or rotated) ride file → start its offset/sequence from the top.
+            if (file.path != sentLogFilePath) {
+                sentLogFilePath = file.path
+                sentLogBytes = 0L
+                logChunkSeq = 0
+            }
             // Make sure the last second of buffered lines is on disk before we read.
             FileLogTree.requestFlush()
             delay(400)
-            val full = runCatching { file.readText() }.getOrNull() ?: return@withContext
-            if (full.length <= sentLogChars) return@withContext
+            // Snapshot the length now; anything appended after is next call's tail.
+            val len = runCatching { file.length() }.getOrNull() ?: return@withContext
+            if (len <= sentLogBytes) return@withContext
             val id = installId ?: runCatching { configManager.getOrCreateInstallId() }.getOrNull()
                 ?.also { installId = it } ?: return@withContext
             val sid = FileLogTree.sessionId
             val ver = BuildConfig.VERSION_NAME
             var sent = 0
-            while (sentLogChars < full.length && sent < maxChunks) {
-                val hardEnd = minOf(sentLogChars + LOG_CHUNK_CHARS, full.length)
-                // Cut on a line boundary within the window so chunks stay readable; fall back to a
-                // hard cut if a single line somehow exceeds the window.
-                val nl = full.lastIndexOf('\n', hardEnd - 1)
-                val end = if (nl > sentLogChars) nl + 1 else hardEnd
-                val chunk = full.substring(sentLogChars, end)
-                if (chunk.isBlank()) break
-                val lines = chunk.count { it == '\n' }
+            while (sentLogBytes < len && sent < maxChunks) {
+                val want = minOf(LOG_CHUNK_BYTES.toLong(), len - sentLogBytes).toInt()
+                val buf = ByteArray(want)
+                val readOk = runCatching {
+                    java.io.RandomAccessFile(file, "r").use { raf ->
+                        raf.seek(sentLogBytes)
+                        raf.readFully(buf)
+                    }
+                }.isSuccess
+                if (!readOk) {
+                    Timber.w("KVP log upload ($prefix) read failed at byte $sentLogBytes")
+                    break
+                }
+                val atEof = sentLogBytes + want >= len
+                // Decode the window; if it doesn't reach EOF, cut at the last newline so the chunk is
+                // whole lines AND we advance by EXACTLY the cut bytes (a char boundary). `consumed` is
+                // the byte count we advance by — the raw `want` unless we trimmed to a newline. (Log
+                // lines are short, far under the window, so the no-newline branch can't realistically
+                // fire; advancing by `want` there keeps the offset byte-aligned regardless.)
+                var text = String(buf, Charsets.UTF_8)
+                var consumed = want.toLong()
+                if (!atEof) {
+                    val nl = text.lastIndexOf('\n')
+                    if (nl >= 0) {
+                        text = text.substring(0, nl + 1)
+                        consumed = text.toByteArray(Charsets.UTF_8).size.toLong()
+                    }
+                }
+                if (text.isEmpty()) break
+                val lines = text.count { it == '\n' }
                 val fileName = "kghost_v${ver}_${id}_${sid}_p${"%03d".format(logChunkSeq)}_$DEVICE_LABEL.log"
                 val caption = "KGhost log ($prefix)\nAnon tag: $id\nSession: $sid | $DEVICE_LABEL | v$ver | $lines lines"
-                val res = LogReporter.sendLogFile(chunk, fileName, caption, karooSystem)
+                val res = LogReporter.sendLogFile(text, fileName, caption, karooSystem)
                 if (res.ok) {
-                    sentLogChars = end
+                    sentLogBytes += consumed
                     logChunkSeq += 1
                     sent++
                 } else {
@@ -965,7 +1004,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     break
                 }
             }
-            if (sent > 0) Timber.i("KVP log upload ($prefix) ✓ — $sent chunk(s), through char $sentLogChars")
+            if (sent > 0) Timber.i("KVP log upload ($prefix) ✓ — $sent chunk(s), through byte $sentLogBytes")
         } finally {
             logSendInFlight = false
         }
@@ -1492,8 +1531,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // Rotate the diagnostic log to a fresh per-ride file so each ride's logs are
             // self-contained and distinguishable. No-op when file logging is disabled.
             FileLogTree.newRide(recordingStartedEpoch)
-            // Fresh ride file ⇒ nothing uploaded yet from it.
-            sentLogChars = 0
+            // Fresh ride file ⇒ nothing uploaded yet from it. Null the tracked path so the next drain
+            // re-syncs the byte offset to the new file (belt-and-suspenders with sendLogTail's guard).
+            sentLogBytes = 0L
+            sentLogFilePath = null
             logChunkSeq = 0
         }
         // GPS location consumer — subscribed only while Recording. Feeds the ride RECORDER (the route
