@@ -30,15 +30,19 @@ const val AGG_MAX_SPEED_MS = 30.0
 
 /** Persisted-aggregate schema version. Bump when the node/aggregate layout changes so old blobs are
  *  discarded (and re-seeded) instead of mis-read. */
-const val AGG_SCHEMA_VERSION = 1
+const val AGG_SCHEMA_VERSION = 2
 
-/** One grid node of the per-route average: the EMA mean rider-time to reach it, and the lap count. */
+/** One grid node: the three reducers of the per-segment delta (node k-1 → k), plus the lap count. */
 @Serializable
 data class AggregateNode(
-    /** EMA mean rider-time to traverse the segment from node k-1 to this node k (s). Node 0 = 0. */
+    /** EMA mean delta (s) — the AVERAGE reducer. Node 0 = 0. */
     val dtS: Double = 0.0,
-    /** How many contributing laps covered THIS node-pair (warmup gate + partial-lap support). */
+    /** Laps that covered THIS node-pair (raceable gate + warmup). */
     val count: Int = 0,
+    /** Smallest delta seen (s) — the BEST reducer (fastest traversal of this segment). */
+    val minDtS: Double = 0.0,
+    /** Delta from the most-recent contributing lap (s) — the LAST reducer. */
+    val lastDtS: Double = 0.0,
 )
 
 /**
@@ -206,14 +210,14 @@ fun updateAggregate(
             val segDt = tAdj - prevNodeTime
             if (prevNodeIdx >= 0 && prevNodeIdx == k - 1) {
                 val node = base[k]
-                // Plain running mean while seeding (first AGG_SEED_LAPS laps), then the EMA — see
-                // [AGG_SEED_LAPS] for why a bare EMA from lap 1 is wrong.
+                // Plain running mean while seeding (first AGG_SEED_LAPS laps), then the EMA.
                 val mean = when {
                     node.count == 0 -> segDt
                     node.count < AGG_SEED_LAPS -> (node.dtS * node.count + segDt) / (node.count + 1)
                     else -> alpha * segDt + (1.0 - alpha) * node.dtS
                 }
-                base[k] = AggregateNode(dtS = mean, count = node.count + 1)
+                val newMin = if (node.count == 0) segDt else minOf(node.minDtS, segDt)
+                base[k] = AggregateNode(dtS = mean, count = node.count + 1, minDtS = newMin, lastDtS = segDt)
             }
             prevNodeTime = tAdj
             prevNodeDist = d

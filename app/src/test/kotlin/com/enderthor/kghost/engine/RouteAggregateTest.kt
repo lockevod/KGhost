@@ -236,6 +236,22 @@ class RouteAggregateTest {
         assertEquals(10.0, c.timeAt(50.0), 1e-9)
     }
 
+    @Test fun `one fold updates ema, min and last per node`() {
+        val key = "loop"
+        // Two laps over nodes 1..2: lap A = 5 s/seg, lap B = 6 s then 4 s.
+        val a = updateAggregate(null, key, "Loop", 1000.0, lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0))
+        val agg = updateAggregate(a, key, "Loop", 1000.0, lap(0.0 to 0.0, 25.0 to 6.0, 50.0 to 10.0))
+        // node 1 deltas: 5 then 6 → ema(mean)=5.5, min=5, last=6.
+        assertEquals(5.5, agg.nodes[1].dtS, 1e-9)
+        assertEquals(5.0, agg.nodes[1].minDtS, 1e-9)
+        assertEquals(6.0, agg.nodes[1].lastDtS, 1e-9)
+        // node 2 deltas: 5 then 4 → ema=4.5, min=4, last=4.
+        assertEquals(4.5, agg.nodes[2].dtS, 1e-9)
+        assertEquals(4.0, agg.nodes[2].minDtS, 1e-9)
+        assertEquals(4.0, agg.nodes[2].lastDtS, 1e-9)
+        assertEquals(AGG_SCHEMA_VERSION, agg.schemaVersion)
+    }
+
     @Test fun `seedAggregateFromLaps folds laps in order and marks pairs raceable`() {
         val l1 = lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0, 75.0 to 15.0, 100.0 to 20.0)
         val l2 = lap(0.0 to 0.0, 25.0 to 6.0, 50.0 to 12.0, 75.0 to 18.0, 100.0 to 24.0)
