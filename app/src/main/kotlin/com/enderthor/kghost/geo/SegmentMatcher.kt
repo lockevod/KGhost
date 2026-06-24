@@ -255,7 +255,11 @@ object SegmentMatcher {
         }
         val selected = capped.sortedBy { it.startedAtEpoch }
         for (track in selected) {
-            val modelPoints = track.points.map { it.toModel() }
+            // Decimate to ~SEED_DECIMATE_M for the SEED only. The aggregate is a 25 m grid +
+            // interpolated + EMA-averaged over many laps, so coarse per-lap input barely moves it,
+            // while halving the point count cuts this O(n²) slice extraction ~quadratically (the
+            // cold-seed cost). The live BEST match keeps FULL resolution — only routeLaps decimates.
+            val modelPoints = decimateByDistance(track.points.map { it.toModel() }, SEED_DECIMATE_M)
             if (modelPoints.size < 2) continue
             val trackLL = modelPoints.map { LatLng(it.lat, it.lng) }
             val trackPath = PolylinePath(trackLL)
@@ -277,6 +281,32 @@ object SegmentMatcher {
                 if (lap.size >= 2) out.add(lap)
             }
         }
+        return out
+    }
+
+    /**
+     * Seed decimation step (metres of track odometer). Tracks are recorded at ~10–20 m; for the
+     * history SEED we keep one point per ~50 m, which barely affects the 25 m-grid EMA aggregate but
+     * cuts the per-track O(n²) slice extraction sharply on the one-time cold seed.
+     */
+    private const val SEED_DECIMATE_M = 50.0
+
+    /**
+     * Keeps one point per [stepM] of the track's own odometer (`distanceM`), endpoints always kept.
+     * Used only by [routeLaps] (the seed) — see [SEED_DECIMATE_M].
+     */
+    private fun decimateByDistance(points: List<TrackPoint>, stepM: Double): List<TrackPoint> {
+        if (points.size <= 2) return points
+        val out = ArrayList<TrackPoint>(points.size / 2 + 2)
+        out.add(points.first())
+        var lastKeptDist = points.first().distanceM
+        for (i in 1 until points.size - 1) {
+            if (points[i].distanceM - lastKeptDist >= stepM) {
+                out.add(points[i])
+                lastKeptDist = points[i].distanceM
+            }
+        }
+        out.add(points.last())
         return out
     }
 

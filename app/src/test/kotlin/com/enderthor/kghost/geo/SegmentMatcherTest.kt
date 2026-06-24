@@ -388,4 +388,17 @@ class SegmentMatcherTest {
         assertTrue(lap.zipWithNext().all { (a, b) -> b[0] >= a[0] })
         assertTrue(lap.first()[1] <= lap.last()[1]) // time non-decreasing
     }
+
+    @Test fun `routeLaps decimates a dense track to ~50 m for the seed`() {
+        // A DENSE track: ~11 m between points (distanceM = i*11) over the route's middle ~1 km.
+        val dense = RecordedTrack(
+            id = "dense", startedAtEpoch = 1_000L,
+            points = (0..90).map { i -> pt(0.004 + i * 0.0001, i * 11.0, i * 2.2).toDto() },
+        )
+        val lap = SegmentMatcher.routeLaps(route, listOf(dense), params).first()
+        // 91 raw points, but the seed keeps ~one per 50 m → the average routeDist gap is ~50 m, not ~11.
+        val avgGapM = (lap.last()[0] - lap.first()[0]) / (lap.size - 1)
+        assertTrue("decimated to ~50 m spacing (avg gap ${avgGapM}m, ${lap.size} pts)", avgGapM >= 35.0)
+        assertTrue("still ascending in routeDist", lap.zipWithNext().all { (a, b) -> b[0] >= a[0] })
+    }
 }
