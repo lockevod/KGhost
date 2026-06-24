@@ -396,9 +396,10 @@ class SegmentMatcherTest {
             points = (0..90).map { i -> pt(0.004 + i * 0.0001, i * 11.0, i * 2.2).toDto() },
         )
         val lap = SegmentMatcher.routeLaps(route, listOf(dense), params).first()
-        // 91 raw points, but the seed keeps ~one per 50 m → the average routeDist gap is ~50 m, not ~11.
+        // 91 raw points (~11 m apart), but the seed keeps ~one per SEED_DECIMATE_M (30 m) → the average
+        // routeDist gap is ~30 m, well above the raw ~11 m, proving decimation happened.
         val avgGapM = (lap.last()[0] - lap.first()[0]) / (lap.size - 1)
-        assertTrue("decimated to ~50 m spacing (avg gap ${avgGapM}m, ${lap.size} pts)", avgGapM >= 35.0)
+        assertTrue("decimated to ~30 m spacing (avg gap ${avgGapM}m, ${lap.size} pts)", avgGapM >= 22.0)
         assertTrue("still ascending in routeDist", lap.zipWithNext().all { (a, b) -> b[0] >= a[0] })
     }
 }

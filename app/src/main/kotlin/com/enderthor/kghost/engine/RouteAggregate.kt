@@ -158,7 +158,8 @@ fun updateAggregate(
         // stop duration. prevNodeTime is on the ADJUSTED (dwell-compressed) clock.
         var prevNodeTime = lap.first()[1]
         var prevNodeDist = lap.first()[0]
-        var prevNodeIdx = -1 // grid index of the last FOLDED node (-1 = none yet)
+        var prevNodeIdx = -1 // grid index of the last COVERED node we advanced past (folded OR just
+        // re-baselined); -1 = none yet. The fold gate below uses it to require a consecutive pair.
         // Seconds compressed out of this lap so far by the dwell clip. Subtracting it from every later
         // node keeps the lap's own moving pace intact while removing the stop.
         var clipS = 0.0
@@ -197,7 +198,8 @@ fun updateAggregate(
             } else if (dt < 0.0) {
                 continue // node at the baseline's own distance but time went backwards: corrupt sample
             }
-            // Fold the SINGLE-step delta only when the previous folded node EXISTS and is exactly k-1;
+            // Fold the SINGLE-step delta only when the previous COVERED node EXISTS and is exactly k-1
+            // (it may have only re-baselined, not folded — either way it gives us the node-(k-1) time);
             // otherwise this is the first covered node or sits past a gap → just re-baseline (no valid
             // 1-step dt). The `prevNodeIdx >= 0` guard keeps node 0 (no incoming segment) at count 0
             // even for a lap that starts exactly at routeDist 0 (its degenerate dt would be 0 anyway).

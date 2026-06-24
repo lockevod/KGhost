@@ -286,10 +286,16 @@ object SegmentMatcher {
 
     /**
      * Seed decimation step (metres of track odometer). Tracks are recorded at ~10–20 m; for the
-     * history SEED we keep one point per ~50 m, which barely affects the 25 m-grid EMA aggregate but
-     * cuts the per-track O(n²) slice extraction sharply on the one-time cold seed.
+     * history SEED we keep one point per ~30 m, which barely affects the 25 m-grid EMA aggregate but
+     * cuts the per-track O(n²) slice extraction on the one-time cold seed.
+     *
+     * Why 30 and not 50: coverage detection projects route samples onto the decimated trackPath's
+     * CHORDS, which bow off a curve by sagitta ≈ step²/(8·R). At 50 m a hairpin of R≈9 m bows ~35 m =
+     * the coverage tolerance → the apex stretch could silently drop from the SEED (self-heals on the
+     * first live lap, but degrades cold completeness on switchbacks/MTB). At 30 m that worst case is
+     * ~12 m, comfortably inside the 35 m budget, while still cutting the point count enough to matter.
      */
-    private const val SEED_DECIMATE_M = 50.0
+    private const val SEED_DECIMATE_M = 30.0
 
     /**
      * Keeps one point per [stepM] of the track's own odometer (`distanceM`), endpoints always kept.
