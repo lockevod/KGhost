@@ -11,15 +11,18 @@ class MapGlideTest {
     private val cur = 110.0
     private val curT = 2000L
 
-    @Test fun `at the moment a new sample lands the marker sits on the previous one (one tick lag)`() {
+    @Test fun `at the instant a new sample lands the marker sits on the previous one`() {
         assertEquals(prev, MapGlide.interpDistM(prev, prevT, cur, curT, nowMs = curT), 1e-9)
     }
 
-    @Test fun `glides to the current sample over the next tick interval`() {
-        // One full span later it reaches cur.
-        assertEquals(cur, MapGlide.interpDistM(prev, prevT, cur, curT, nowMs = curT + (curT - prevT)), 1e-9)
-        // Halfway through, it is halfway between.
-        assertEquals(105.0, MapGlide.interpDistM(prev, prevT, cur, curT, nowMs = curT + 500), 1e-9)
+    @Test fun `glides to the current sample over GLIDE_MS then holds (low lag)`() {
+        // Reaches cur after the short GLIDE_MS window, NOT after a full inter-tick interval.
+        assertEquals(cur, MapGlide.interpDistM(prev, prevT, cur, curT, nowMs = curT + MapGlide.GLIDE_MS.toLong()), 1e-9)
+        // Halfway through the glide window → halfway between.
+        assertEquals(105.0, MapGlide.interpDistM(prev, prevT, cur, curT, nowMs = curT + (MapGlide.GLIDE_MS / 2).toLong()), 1e-9)
+        // Past the glide window but before the next sample → HOLDS at cur (this is what kills the lag:
+        // the marker sits on the field's latest value instead of trailing toward it all tick).
+        assertEquals(cur, MapGlide.interpDistM(prev, prevT, cur, curT, nowMs = curT + 1500), 1e-9)
     }
 
     @Test fun `never leads past the current sample however late the loop fires`() {

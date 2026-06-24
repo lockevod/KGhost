@@ -24,10 +24,9 @@ import com.enderthor.kghost.engine.learnProfile
 import com.enderthor.kghost.engine.StalenessLogic
 import com.enderthor.kghost.engine.GhostPaceSource
 import com.enderthor.kghost.engine.toInfo
-import com.enderthor.kghost.engine.AGG_MIN_LAPS
-import com.enderthor.kghost.engine.AGG_START_TOL_M
 import com.enderthor.kghost.engine.AGG_STEP_M
 import com.enderthor.kghost.engine.updateAggregate
+import com.enderthor.kghost.engine.seedAggregateFromLaps
 import com.enderthor.kghost.geo.AggregateStore
 import com.enderthor.kghost.geo.BBox
 import com.enderthor.kghost.geo.LatLng
@@ -331,12 +330,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         private const val LOG_SEND_INTERVAL_MS = 20 * 60_000L
 
         /**
-         * Max characters per uploaded chunk. The Karoo `httpRequest` body crosses the host Binder
+         * Max BYTES per uploaded chunk. The Karoo `httpRequest` body crosses the host Binder
          * transaction at ~80 KB (KSafe's empirical CALIBRATION_MAX_CHUNK_BYTES = 72 000), so each POST
-         * must stay well under it — 60 000 chars ≈ 60 KB of ASCII log + multipart overhead. A bigger
-         * body fails with TransactionTooLargeException, so the WHOLE feature silently never delivers.
+         * must stay well under it — 60 000 bytes + multipart overhead. A bigger body fails with
+         * TransactionTooLargeException, so the WHOLE feature silently never delivers.
          */
-        private const val LOG_CHUNK_CHARS = 60_000
+        private const val LOG_CHUNK_BYTES = 60_000
 
         /** Chunks per PERIODIC cycle, so one window can't monopolise the link draining a huge backlog. */
         private const val LOG_PERIODIC_MAX_CHUNKS = 6
@@ -478,6 +477,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     @Volatile private var gpsAlertFired: Boolean = false
     // Previous tick's moving state (route mode) — drives the stationary→moving re-stamp edge.
     @Volatile private var wasMoving: Boolean = false
+    // Whether the D0 bootstrap position came from the GPS projector (true) or the Karoo map-match
+    // fallback (false). While false and the race is not yet anchored, a GPS fix refreshes D0 so a
+    // Karoo snap-to-wrong-segment is corrected before the anchor fires.
+    @Volatile private var routeStartDistFromGps: Boolean = false
     // First-fix D0 confirmation candidate (position + odometer at that position).
     @Volatile private var d0CandPos: Double? = null
     @Volatile private var d0CandOdo: Double? = null
@@ -505,6 +508,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         lastBufferedRouteDist = Double.NEGATIVE_INFINITY
         gpsAlertFired = false
         wasMoving = false
+        routeStartDistFromGps = false
         d0CandPos = null
         d0CandOdo = null
         prevSegStartM = null
@@ -602,14 +606,18 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // The Anon tag (stable opaque install id) — fetched once, shown in the UI and the upload caption.
     @Volatile
     private var installId: String? = null
-    // Chars of the current ride's log already uploaded, so each cycle sends only what's new. Reset to 0
-    // (with [logChunkSeq]) on each new ride file.
+    // BYTES of the current ride's log already uploaded, so each cycle reads + sends only the new tail
+    // (a byte offset, NOT chars: we seek into the file and never re-read the multi-MB prefix — at ride
+    // end that re-read would spike CPU/IO exactly when the Karoo is saving + uploading the activity).
+    // Reset to 0 (with [logChunkSeq]) on each new ride file; [sentLogFilePath] guards the file identity.
     @Volatile
-    private var sentLogChars: Int = 0
+    private var sentLogBytes: Long = 0L
+    @Volatile
+    private var sentLogFilePath: String? = null
     @Volatile
     private var logChunkSeq: Int = 0
     // Guards against a periodic drain and the ride-end drain running concurrently (both advance
-    // sentLogChars), which could skip or duplicate a chunk.
+    // sentLogBytes), which could skip or duplicate a chunk.
     @Volatile
     private var logSendInFlight = false
 
@@ -918,15 +926,22 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     }
 
     /**
-     * Uploads the part of the current ride's log not yet sent ([sentLogChars]) to the developer's
+     * Uploads the part of the current ride's log not yet sent ([sentLogBytes]) to the developer's
      * Telegram via [LogReporter] (which redacts every GPS coordinate first, so no location data leaves
-     * the device), in chunks of [LOG_CHUNK_CHARS] — each `httpRequest` body MUST stay under the host
+     * the device), in chunks of [LOG_CHUNK_BYTES] — each `httpRequest` body MUST stay under the host
      * Binder transaction limit (~80 KB) or the whole POST fails. Sends at most [maxChunks] per call.
      *
-     * Runs entirely on [Dispatchers.IO] — the owning [scope] is Main, and reading a multi-MB file +
-     * the multipart build must never touch the Main thread (ANR). Advances [sentLogChars] only per
-     * SUCCESSFUL chunk, so a failure just retries from the same point next cycle; an in-flight guard
-     * stops the periodic and ride-end drains overlapping.
+     * Reads ONLY the not-yet-sent tail via a BYTE offset + [java.io.RandomAccessFile.seek], never the
+     * whole file: at ride end the log is multi-MB and the periodic drains already sent the bulk, so a
+     * `readText()` of the whole thing would be a CPU/IO spike landing exactly when the Karoo is saving
+     * + uploading the activity (same Companion link, same CPU) — the rider feels it as "finishing the
+     * ride got slower". Chunks are cut on a `\n` boundary and the offset advances by the chunk's
+     * ENCODED byte length, so the next seek never splits a UTF-8 sequence.
+     *
+     * Runs entirely on [Dispatchers.IO] (the owning [scope] is Main — file IO + multipart build must
+     * never touch Main → ANR). Advances [sentLogBytes] only per SUCCESSFUL chunk, so a failure just
+     * retries from the same point next cycle; an in-flight guard stops the periodic and ride-end drains
+     * overlapping, and [sentLogFilePath] resets the offset when the ride file changed under us.
      */
     private suspend fun sendLogTail(prefix: String, maxChunks: Int) = withContext(Dispatchers.IO) {
         if (!FileLogTree.enabled || !::karooSystem.isInitialized) return@withContext
@@ -934,30 +949,57 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         val file = FileLogTree.currentLogFile() ?: return@withContext
         logSendInFlight = true
         try {
+            // A new (or rotated) ride file → start its offset/sequence from the top.
+            if (file.path != sentLogFilePath) {
+                sentLogFilePath = file.path
+                sentLogBytes = 0L
+                logChunkSeq = 0
+            }
             // Make sure the last second of buffered lines is on disk before we read.
             FileLogTree.requestFlush()
             delay(400)
-            val full = runCatching { file.readText() }.getOrNull() ?: return@withContext
-            if (full.length <= sentLogChars) return@withContext
+            // Snapshot the length now; anything appended after is next call's tail.
+            val len = runCatching { file.length() }.getOrNull() ?: return@withContext
+            if (len <= sentLogBytes) return@withContext
             val id = installId ?: runCatching { configManager.getOrCreateInstallId() }.getOrNull()
                 ?.also { installId = it } ?: return@withContext
             val sid = FileLogTree.sessionId
             val ver = BuildConfig.VERSION_NAME
             var sent = 0
-            while (sentLogChars < full.length && sent < maxChunks) {
-                val hardEnd = minOf(sentLogChars + LOG_CHUNK_CHARS, full.length)
-                // Cut on a line boundary within the window so chunks stay readable; fall back to a
-                // hard cut if a single line somehow exceeds the window.
-                val nl = full.lastIndexOf('\n', hardEnd - 1)
-                val end = if (nl > sentLogChars) nl + 1 else hardEnd
-                val chunk = full.substring(sentLogChars, end)
-                if (chunk.isBlank()) break
-                val lines = chunk.count { it == '\n' }
+            while (sentLogBytes < len && sent < maxChunks) {
+                val want = minOf(LOG_CHUNK_BYTES.toLong(), len - sentLogBytes).toInt()
+                val buf = ByteArray(want)
+                val readOk = runCatching {
+                    java.io.RandomAccessFile(file, "r").use { raf ->
+                        raf.seek(sentLogBytes)
+                        raf.readFully(buf)
+                    }
+                }.isSuccess
+                if (!readOk) {
+                    Timber.w("KVP log upload ($prefix) read failed at byte $sentLogBytes")
+                    break
+                }
+                val atEof = sentLogBytes + want >= len
+                // If not at EOF, cut at the last newline in the RAW bytes so the chunk is whole lines
+                // and `consumed` is byte-precise — no UTF-8 re-encoding that could drift if the window
+                // ended mid-sequence (e.g. splitting a ✓ across chunks).
+                var consumed = want.toLong()
+                var usedBuf = buf
+                if (!atEof) {
+                    val nl = buf.indexOfLast { it == '\n'.code.toByte() }
+                    if (nl >= 0) {
+                        consumed = (nl + 1).toLong()
+                        usedBuf = buf.copyOf(nl + 1)
+                    }
+                }
+                val text = String(usedBuf, Charsets.UTF_8)
+                if (text.isEmpty()) break
+                val lines = text.count { it == '\n' }
                 val fileName = "kghost_v${ver}_${id}_${sid}_p${"%03d".format(logChunkSeq)}_$DEVICE_LABEL.log"
                 val caption = "KGhost log ($prefix)\nAnon tag: $id\nSession: $sid | $DEVICE_LABEL | v$ver | $lines lines"
-                val res = LogReporter.sendLogFile(chunk, fileName, caption, karooSystem)
+                val res = LogReporter.sendLogFile(text, fileName, caption, karooSystem)
                 if (res.ok) {
-                    sentLogChars = end
+                    sentLogBytes += consumed
                     logChunkSeq += 1
                     sent++
                 } else {
@@ -965,7 +1007,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     break
                 }
             }
-            if (sent > 0) Timber.i("KVP log upload ($prefix) ✓ — $sent chunk(s), through char $sentLogChars")
+            if (sent > 0) Timber.i("KVP log upload ($prefix) ✓ — $sent chunk(s), through byte $sentLogBytes")
         } finally {
             logSendInFlight = false
         }
@@ -1273,18 +1315,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Default-pool contention at route-load and delay ② activating. Capping the candidate
                     // count on long routes bounds that without touching match accuracy (it only limits how
                     // many historical rides are considered, which on a long route is naturally few anyway).
-                    // Candidate cap. The match is ~linear in candidate COUNT and each candidate's match
-                    // cost grows with route length (per-track route-vertex scans), so a frequently-ridden
-                    // route accrues many overlapping history tracks and is the EXPENSIVE case — the old
-                    // buckets were inverted (short routes got the 120 default → on a much-ridden 40 km
-                    // loop the match took >5 min and route mode NEVER engaged, so the map ghost never
-                    // appeared). loadTopCandidates returns the MOST route-overlapping tracks first, so the
-                    // few kept are the most relevant; BEST only needs the closest-matching ride per
-                    // stretch (and AVERAGE races its precomputed aggregate, not this live match).
-                    // Match cost plateaus with track count (the few most-overlapping tracks dominate, so
-                    // 6 ≈ 10 in time), and more candidates = better BEST coverage / aggregate seeding —
-                    // so keep a healthy count. The warmed-route latency is solved by skipping the slice on
-                    // aggregate-covered stretches (coveredRanges below), not by a tiny cap.
+                    // Candidate cap for the one-time SEED (routeLaps). All three picks now race the
+                    // persisted per-route grid, seeded once from history — there is no live per-ride
+                    // match anymore — so this only bounds how many history tracks the cold seed folds.
+                    // loadTopCandidates returns the MOST route-overlapping tracks first, so the few kept
+                    // are the most relevant; more candidates = better seed coverage for all reducers
+                    // (min/last/EMA), so keep a healthy count. (On a warmed route the grid loads from
+                    // disk and the seed is skipped entirely, so the cap then costs nothing.)
                     val maxTracks = when {
                         path.totalM > 120_000 -> 8
                         path.totalM > 40_000 -> 10
@@ -1302,36 +1339,36 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Resolve the active profile once: mode/pick/target may all be per-profile overrides.
                     val eff = resolveProfile(activeConfig.value, activeProfileId)
                     val pick = eff.ghostPick
-                    val matched = if (pick == GhostPick.AVERAGE) {
-                        // AVERAGE races the per-route EMA aggregate where it is raceable, and the rider's
-                        // BEST everywhere else. Keyed on the DECODED-POLYLINE length — deterministic for a
-                        // route file, unlike state.routeDistance which can be NaN on early emissions and
-                        // drift across recalcs; an unstable length would round to a different key on a
-                        // later ride and silently orphan the aggregate. The ride-end save keys on the same
-                        // rm.path.totalM.
-                        val avgSegs = aggregateStore().load(routeKeyOf(state.name, path.totalM))
-                            ?.toLiveSegments().orEmpty()
-                        // Run the BEST match for the stretches the aggregate does NOT yet cover — falling
-                        // to the bare Ghost-Pace fill where the rider HAS recorded history would throw it
-                        // away. But SKIP the expensive O(n²) slice on stretches the aggregate already
-                        // covers (overlay trims those away anyway): on a warmed route this makes the match
-                        // near-instant instead of taking minutes. Warmup (empty aggregate → no covered
-                        // ranges) is just the all-BEST case, unchanged.
-                        val covered = avgSegs.map { it.routeStartM to it.routeEndM }
-                        val bestSegs = SegmentMatcher.match(
-                            path, tracks, GhostPick.BEST, SegmentMatcher.Params(maxTracks = maxTracks),
-                            coveredRanges = covered,
-                        )
-                        if (avgSegs.isEmpty()) {
-                            Timber.i("KVP avg: no raceable aggregate for '${state.name}' yet (needs ≥$AGG_MIN_LAPS laps from the route start) — racing BEST while it warms up")
-                        } else {
-                            Timber.i("KVP avg: racing the aggregate on ${avgSegs.size} stretch(es), BEST on the rest (slice skipped on covered stretches)")
+                    // ALL picks (AVERAGE/BEST/LAST) race the one persisted per-route grid. Keyed on the
+                    // DECODED-POLYLINE length — deterministic for a route file, unlike state.routeDistance
+                    // which can be NaN on early emissions and drift across recalcs; an unstable length would
+                    // round to a different key on a later ride and silently orphan the aggregate. The
+                    // ride-end save keys on the same rm.path.totalM.
+                    val key = routeKeyOf(state.name, path.totalM)
+                    // load/save are blocking filesystem IO (the save fsyncs+renames); run them on
+                    // Dispatchers.IO, not this match coroutine's Default (CPU) pool. The seed COMPUTE
+                    // (routeLaps + seedAggregateFromLaps) stays on Default.
+                    var agg = withContext(Dispatchers.IO) { aggregateStore().load(key) }
+                    val justSeeded = agg == null
+                    if (agg == null) {
+                        // First match of this route → seed the grid from recorded history (one-time, O(n)).
+                        val lapStartMs = System.currentTimeMillis()
+                        val laps = SegmentMatcher.routeLaps(path, tracks.sortedBy { it.startedAtEpoch }, SegmentMatcher.Params(maxTracks = maxTracks))
+                        val lapMs = System.currentTimeMillis() - lapStartMs
+                        if (laps.isNotEmpty()) {
+                            val seeded = seedAggregateFromLaps(key, state.name, path.totalM, laps)
+                            agg = withContext(Dispatchers.IO) {
+                                if (aggregateStore().saveIfAbsent(seeded)) seeded
+                                else aggregateStore().load(key) ?: seeded
+                            }
+                            Timber.i("KVP grid: seeded $key from ${laps.size} history lap(s) — routeLaps ${lapMs}ms")
                         }
-                        // The aggregate wins where it is raceable; BEST pieces are TRIMMED around it (not
-                        // dropped whole) so partial overlap can't discard a long recorded stretch.
-                        RouteGhost.overlay(avgSegs, bestSegs)
+                    }
+                    val matched = agg?.toLiveSegments(pick).orEmpty()
+                    if (matched.isEmpty()) {
+                        Timber.i("KVP grid: no raceable $pick for '${state.name}' yet — Ghost-Pace until it warms up")
                     } else {
-                        SegmentMatcher.match(path, tracks, pick, SegmentMatcher.Params(maxTracks = maxTracks))
+                        Timber.i("KVP grid: racing $pick on ${matched.size} stretch(es)${if (justSeeded) " (just seeded)" else ""}")
                     }
                     // Build the ONE continuous whole-route ghost (recorded stretches + VP-pace fills).
                     // Fill pace = the always-present VP target (default 12 km/h), so the ghost always
@@ -1478,8 +1515,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // Rotate the diagnostic log to a fresh per-ride file so each ride's logs are
             // self-contained and distinguishable. No-op when file logging is disabled.
             FileLogTree.newRide(recordingStartedEpoch)
-            // Fresh ride file ⇒ nothing uploaded yet from it.
-            sentLogChars = 0
+            // Fresh ride file ⇒ nothing uploaded yet from it. Null the tracked path so the next drain
+            // re-syncs the byte offset to the new file (belt-and-suspenders with sendLogTail's guard).
+            sentLogBytes = 0L
+            sentLogFilePath = null
             logChunkSeq = 0
         }
         // GPS location consumer — subscribed only while Recording. Feeds the ride RECORDER (the route
@@ -1811,6 +1850,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             ghostStartElapsedS = null
                             if (!sameRoute) {
                                 routeStartDistM = null
+                                routeStartDistFromGps = false
                                 firstMoveElapsedS = null
                                 lastGoodRouteDistM = null
                                 distMAtLastGoodM = null
@@ -1959,15 +1999,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     // Without setting it here, a rider who always starts slightly off the line
                                     // (so the race anchors via THIS rejoin-fallback path) would NEVER feed the
                                     // average and it would never build, undiagnosably.
-                                    lapAggTarget = if (d0 <= AGG_START_TOL_M) {
-                                        LapAggTarget(routeKeyOf(rm.routeName, rm.path.totalM), rm.routeName, rm.path.totalM)
-                                    } else {
-                                        Timber.i(
-                                            "KVP avg: this lap will NOT update the average — started " +
-                                                "${"%.0f".format(d0)}m past the route start (rejoin-fallback anchor)",
-                                        )
-                                        null
-                                    }
+                                    lapAggTarget = LapAggTarget(routeKeyOf(rm.routeName, rm.path.totalM), rm.routeName, rm.path.totalM)
                                     Timber.i(
                                         "KVP race anchored (rejoin-fallback): firstMove=${"%.0f".format(moveStart)}s " +
                                             "D0=${"%.0f".format(d0)}m ghostStart=${"%.0f".format(ghostStartElapsedS!!)}s " +
@@ -2154,12 +2186,25 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 val nowMs = System.currentTimeMillis()
                                 if (nowMs - lastDiagLogMs >= diagLogMs) {
                                     lastDiagLogMs = nowMs
-                                    Timber.d("KVP tick route: first fix at ${"%.0f".format(routeDist)}m — awaiting confirmation")
+                                    Timber.d("KVP tick route: first fix at ${"%.0f".format(routeDist)}m (${if (routeDistFromGps) "GPS" else "Karoo"}) — awaiting confirmation")
                                 }
                                 holdGap()
                                 return@runCatching
                             }
                             // Confirmed: fall through — this tick's routeDist becomes the baseline below.
+                        }
+                        // GPS correction window: if D0 was bootstrapped from a Karoo-only position and the
+                        // GPS projector now has a reliable fix, refresh D0 before the anchor fires. The
+                        // Karoo can snap to the wrong road segment while stationary (e.g. 258 m off the true
+                        // start). The GPS projector only runs after firstMoveElapsedS is set, so this block
+                        // fires AFTER first movement, not before. Once anchored (ghostStartElapsedS != null)
+                        // D0 is invariant; a last-chance correction just before the anchor handles the narrow
+                        // window where bootstrap confirmation and firstMove land on the same tick.
+                        if (!routeStartDistFromGps && routeDistFromGps && ghostStartElapsedS == null && routeStartDistM != null) {
+                            val corrected = (routeDist - (distM - rideDistAtRouteStartM)).coerceIn(0.0, routeLenM)
+                            Timber.i("KVP D0 GPS correction: ${"%.0f".format(routeStartDistM)}m (Karoo) → ${"%.0f".format(corrected)}m (GPS)")
+                            routeStartDistM = corrected
+                            routeStartDistFromGps = true
                         }
                         // END OF ROUTE — the rider has reached the destination (remaining≈0). Gated on
                         // routeStartDistM != null so this is the genuine FINISH, not the host's pre-position
@@ -2300,6 +2345,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // detects a deliberate mid-route start (D0 > 0).
                         if (routeStartDistM == null) {
                             routeStartDistM = (effRouteDist - (distM - rideDistAtRouteStartM)).coerceIn(0.0, routeLenM)
+                            routeStartDistFromGps = routeDistFromGps
                         }
                         val d0 = routeStartDistM!!
                         // Anchor the ghost clock to the rider's REAL race start: at firstMoveElapsedS the
@@ -2318,29 +2364,31 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 holdGap()
                                 return@runCatching
                             }
+                            // Last-chance GPS correction: if D0 was bootstrapped from the Karoo map-match
+                            // (routeStartDistFromGps=false) and GPS is available right now, correct D0
+                            // before anchoring. This covers the narrow window where the 2-tick bootstrap
+                            // confirmation and firstMove land on the same tick — the GPS correction block
+                            // above is gated on routeStartDistM!=null and fires on that same tick only if
+                            // GPS is already available; if it was not, the anchor would lock in the Karoo
+                            // D0 with no further correction possible. This final guard closes that gap.
+                            if (!routeStartDistFromGps && routeDistFromGps) {
+                                val corrected = (routeDist - (distM - rideDistAtRouteStartM)).coerceIn(0.0, routeLenM)
+                                Timber.i("KVP D0 last-chance GPS correction at anchor: ${"%.0f".format(routeStartDistM)}m → ${"%.0f".format(corrected)}m")
+                                routeStartDistM = corrected
+                                routeStartDistFromGps = true
+                            }
                             // The race anchor — THE event to verify the fair-start model. Logged once.
-                            ghostStartElapsedS = moveStart - rg.timeAt(d0)
+                            ghostStartElapsedS = moveStart - rg.timeAt(routeStartDistM!!)
                             Timber.i(
-                                "KVP race anchored: firstMove=${"%.0f".format(moveStart)}s D0=${"%.0f".format(d0)}m " +
+                                "KVP race anchored: firstMove=${"%.0f".format(moveStart)}s D0=${"%.0f".format(routeStartDistM!!)}m " +
                                     "ghostStart=${"%.0f".format(ghostStartElapsedS!!)}s @ routeDist=${"%.0f".format(effRouteDist)}m elapsed=${"%.0f".format(elapsedS)}s",
                             )
-                            // Average-ghost contribution gate, decided ONCE at the anchor: only a lap that
-                            // started at the route start (D0 ≈ 0) folds into the aggregate, so its time
-                            // origin lines up with other laps'. A mid-route join leaves the target null
-                            // (skip). Key + grid axis use the DECODED-POLYLINE length — the same
-                            // deterministic length the match-time aggregate load keys on, so save and
-                            // load can never round to different keys.
-                            lapAggTarget = if (d0 <= AGG_START_TOL_M) {
-                                LapAggTarget(routeKeyOf(rm.routeName, rm.path.totalM), rm.routeName, rm.path.totalM)
-                            } else {
-                                // Logged prominently: "my average never builds" is otherwise undiagnosable —
-                                // a rider who always joins this far past the start NEVER feeds the average.
-                                Timber.i(
-                                    "KVP avg: this lap will NOT update the average — started ${"%.0f".format(d0)}m past " +
-                                        "the route start (tolerance ${AGG_START_TOL_M.toInt()}m)",
-                                )
-                                null
-                            }
+                            // Average-ghost contribution: EVERY lap folds into the aggregate regardless of
+                            // where it started — the aggregate stores per-segment deltas (origin-invariant),
+                            // so a mid-route start just contributes the stretches it covers. Key + grid axis
+                            // use the DECODED-POLYLINE length — the same deterministic length the match-time
+                            // aggregate load keys on, so save and load can never round to different keys.
+                            lapAggTarget = LapAggTarget(routeKeyOf(rm.routeName, rm.path.totalM), rm.routeName, rm.path.totalM)
                         }
                         // ghostElapsed = (elapsedS − firstMove) + rg.timeAt(D0): ghost at D0 at race start,
                         // then advances on real elapsed time (frozen only on pause — ELAPSED_TIME stops).
@@ -2366,8 +2414,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // Average-ghost lap capture: one sample per ~AGG_STEP_M of forward route progress,
                         // on the SAME fair-start clock as the live gap (riderTime = elapsedS − firstMove), so
                         // the stored average lines up with how the live race is measured. Only on
-                        // trustworthy ticks and only when this lap qualifies (started at the route start, so
-                        // lapAggTarget != null). moveStart is non-null here — the race is anchored.
+                        // trustworthy ticks and only when a race is anchored (lapAggTarget != null — set on
+                        // EVERY anchored lap now; the aggregate is origin-invariant so any start contributes).
+                        // moveStart is non-null here — the race is anchored.
                         if (!spurious && lapAggTarget != null &&
                             effRouteDist > lastBufferedRouteDist + AGG_STEP_M
                         ) {
@@ -2516,6 +2565,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         mapGhostState = null
         mapLoopJob?.cancelAndJoin()
         mapLoopJob = null
+        // A first-ride AVERAGE seed runs INSIDE the match coroutine and saves the aggregate. Join it
+        // before finishAndSaveRecording()'s own aggregate save so the two can't overlap (the seed save
+        // would otherwise race the ride-end save of the same key). cancelAndJoin: a short ride can end
+        // while a slow seed match is still in flight — finishing the ride supersedes it.
+        matchJob?.cancelAndJoin()
+        matchJob = null
     }
 
     /**
@@ -2598,17 +2653,17 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             }
         }
         // Fold this lap into the per-route average-ghost aggregate, INDEPENDENT of the track save (so it
-        // survives the track-library prune). Only a qualifying lap — key set at the anchor because the
-        // rider started at the route start — with enough samples updates it.
+        // survives the track-library prune). Any anchored lap with enough samples updates it (the key is
+        // set at the anchor for every lap; the aggregate is origin-invariant, so any start contributes).
         if (lapTarget != null && lapSamples.size >= 2) {
             scope.launch(Dispatchers.IO) {
                 withContext(NonCancellable) {
                     runCatching {
-                        val aggStore = aggregateStore()
-                        val updated = updateAggregate(
-                            aggStore.load(lapTarget.key), lapTarget.key, lapTarget.name, lapTarget.lenM, lapSamples,
-                        )
-                        aggStore.save(updated)
+                        // Atomic load-modify-save: no concurrent seed/save can interleave between the
+                        // read and the write of this key (would otherwise be a lost update).
+                        aggregateStore().update(lapTarget.key) { existing ->
+                            updateAggregate(existing, lapTarget.key, lapTarget.name, lapTarget.lenM, lapSamples)
+                        }
                         Timber.i("KVP avg: updated aggregate ${lapTarget.key} (${lapSamples.size} samples)")
                     }.onFailure { Timber.w(it, "KVP avg: aggregate update failed for ${lapTarget.key}") }
                 }

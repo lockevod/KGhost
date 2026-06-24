@@ -83,7 +83,7 @@
     <string name="race_ghost_best">Best (PR)</string>
     <string name="race_ghost_last">Last</string>
     <string name="race_ghost_average">Average</string>
-    <string name="race_ghost_average_hint">Average races the recency-weighted mean of your recent laps of the loaded route (long stops don\'t count). It needs a couple of laps started at the route start before it kicks in; stretches without enough laps race your Best instead. Only the first lap of each ride counts.</string>
+    <string name="race_ghost_average_hint">Average races the recency-weighted mean of your recent laps of the loaded route (long stops don\'t count). It is seeded from your recorded history, so it races from your first ride — no warmup — and a lap counts no matter where on the route you start. Stretches you have never ridden use the Ghost Pace fill.</string>
     <string name="race_auto_record_label">Record ride history</string>
     <string name="race_auto_record_description">Automatically save each ride as a GPS track for future ghost comparison.</string>
     <string name="race_recorded_tracks">Recorded tracks: %1$d</string>

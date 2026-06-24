@@ -374,4 +374,47 @@ class SegmentMatcherTest {
             assertEquals(0.0, s.ghost.timeAt(0.0), 1e-6)
         }
     }
+
+    @Test fun `routeLaps returns each track's route-distance time series`() {
+        val track = RecordedTrack(
+            id = "t1", startedAtEpoch = 1_000L,
+            points = (0..18).map { i -> pt(0.004 + i * 0.0005, i * 55.0, i * 11.0).toDto() },
+        )
+        val laps = SegmentMatcher.routeLaps(route, listOf(track), params)
+        assertEquals(1, laps.size)                 // one track → one lap (single covered interval)
+        val lap = laps.first()
+        assertTrue(lap.size >= 2)
+        // Ascending in routeDist; each sample is [routeDistM, timeS].
+        assertTrue(lap.zipWithNext().all { (a, b) -> b[0] >= a[0] })
+        assertTrue(lap.first()[1] <= lap.last()[1]) // time non-decreasing
+    }
+
+    @Test fun `routeLaps (single forward pass) keeps on-route advancing points, drops a backward pass`() {
+        // Forward over the middle then an out-and-back RETURN (route-distance going down): the return
+        // pass must NOT be appended (it isn't a forward lap), so the lap stays strictly ascending.
+        val fwd = (0..12).map { i -> pt(0.004 + i * 0.0005, i * 55.0, i * 11.0) }
+        val back = (1..12).map { i -> pt(0.004 + (12 - i) * 0.0005, (12 + i) * 55.0, (12 + i) * 11.0) }
+        val track = RecordedTrack("oab", 1_000L, (fwd + back).map { it.toDto() })
+        val lap = SegmentMatcher.routeLaps(route, listOf(track), params).first()
+        assertTrue("strictly ascending in routeDist (no backward return pass)", lap.zipWithNext().all { (a, b) -> b[0] > a[0] })
+        assertTrue("time non-decreasing", lap.zipWithNext().all { (a, b) -> b[1] >= a[1] })
+        // Only the forward pass contributes (~13 points), not the 12 backward ones.
+        assertTrue("backward pass dropped (${lap.size} pts)", lap.size <= 13)
+    }
+
+    @Test fun `routeLaps splits a lap at a long off-route gap instead of bridging it`() {
+        // On-route to ~500 m, then a long OFF-route excursion (far north, perp >> tol), then rejoin
+        // on-route at ~1225 m — a ~725 m route jump. seedLaps must SPLIT (two laps), not bridge it
+        // with one fabricated fast segment.
+        val onA = (0..9).map { i -> pt(i * 0.0005, i * 55.0, i * 11.0).toDto() }
+        val off = (0..5).map { i -> TrackPoint(0.01, 0.005 + i * 0.0005, (10 + i) * 55.0, (10 + i) * 11.0).toDto() }
+        val onB = (0..8).map { i -> pt(0.011 + i * 0.0005, (16 + i) * 55.0, (16 + i) * 11.0).toDto() }
+        val track = RecordedTrack("gap", 1_000L, onA + off + onB)
+        val laps = SegmentMatcher.routeLaps(route, listOf(track), params)
+        assertEquals("the off-route gap splits into two laps, not one bridged lap", 2, laps.size)
+        // Neither lap contains the ~725 m jump (each step well under the split threshold).
+        assertTrue(laps.all { lap -> lap.zipWithNext().all { (a, b) -> b[0] - a[0] < 500.0 } })
+        assertTrue("first lap ends before the gap", laps[0].last()[0] < 700.0)
+        assertTrue("second lap starts after the gap", laps[1].first()[0] > 1000.0)
+    }
 }
