@@ -47,7 +47,8 @@ data class AggregateNode(
     val count: Int = 0,
     /** Smallest delta seen (s) — the BEST reducer (fastest traversal of this segment). */
     val minDtS: Double = 0.0,
-    /** Delta from the most-recent contributing lap (s) — the LAST reducer. */
+    /** Delta from the most-recent FOLDED (good) traversal of this segment (s) — the LAST reducer. A
+     *  rejected glitch lap does not overwrite it, so it is "last good", not literally "last ride". */
     val lastDtS: Double = 0.0,
 )
 
