@@ -2192,8 +2192,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 holdGap()
                                 return@runCatching
                             }
-                            // Confirmed: fall through — this tick's routeDist and source become the baseline.
-                            routeStartDistFromGps = routeDistFromGps
+                            // Confirmed: fall through — this tick's routeDist becomes the baseline below.
                         }
                         // GPS correction window: if D0 was bootstrapped from a Karoo-only position and the
                         // GPS projector now has a reliable fix, refresh D0 before the anchor fires. The
@@ -2205,8 +2204,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             Timber.i("KVP D0 GPS correction: ${"%.0f".format(routeStartDistM)}m (Karoo) → ${"%.0f".format(corrected)}m (GPS)")
                             routeStartDistM = corrected
                             routeStartDistFromGps = true
-                            d0CandPos = null   // reset so the corrected position re-confirms if needed
-                            d0CandOdo = null
                         }
                         // END OF ROUTE — the rider has reached the destination (remaining≈0). Gated on
                         // routeStartDistM != null so this is the genuine FINISH, not the host's pre-position
@@ -2347,6 +2344,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // detects a deliberate mid-route start (D0 > 0).
                         if (routeStartDistM == null) {
                             routeStartDistM = (effRouteDist - (distM - rideDistAtRouteStartM)).coerceIn(0.0, routeLenM)
+                            routeStartDistFromGps = routeDistFromGps
                         }
                         val d0 = routeStartDistM!!
                         // Anchor the ghost clock to the rider's REAL race start: at firstMoveElapsedS the
