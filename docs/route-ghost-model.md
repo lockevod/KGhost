@@ -190,6 +190,58 @@ The ride is still recorded as a decimated GPS track (for future ghosts) from the
 cached/default pre-lock fix never lands in the recorded track. This is the only thing GPS accuracy
 gates now — route *position* comes from the Karoo (§1), not from this stream.
 
+## 7. The route grid — BEST / LAST / AVERAGE from one per-route aggregate
+
+`best / last / average` is the per-route choice of WHICH past self to race (§ README). **All three race
+the SAME persisted per-route grid** (`engine/RouteAggregate.kt` `PerRouteAggregate`, persisted by
+`geo/AggregateStore.kt`); they differ only in which reducer they read from each node, so switching pick
+needs no re-match.
+
+**Grid of per-segment deltas (origin-invariant).** The route is sampled every `AGG_STEP_M` (25 m) into
+nodes. Node `k` stores three reducers of the time to traverse the segment *into* it (node `k-1 → k`),
+all updated in one fold: **`dtS`** (recency-weighted EMA → AVERAGE), **`minDtS`** (fastest → BEST),
+**`lastDtS`** (most-recent good → LAST), plus `count` (laps that covered it). It stores the per-segment
+**delta**, not a cumulative time from route 0, so the absolute start point cancels out: **a lap starting
+anywhere contributes to the stretches it covers** (no "must start at the route origin" gate). Node 0 has
+no incoming segment (`count` stays 0).
+
+**Folding a lap (`updateAggregate`).** A lap is a `(routeDist, riderTimeS)` series (the live
+`lapAggBuffer`, or a history slice). It is walked against the grid; for each consecutive covered
+node-pair the single-step delta is folded into ALL THREE reducers (EMA: running mean for the first
+`AGG_SEED_LAPS` laps then `AGG_ALPHA`; min: smallest seen; last: most-recent), guarded against GPS
+spikes (`AGG_MAX_SPEED_MS`), long dwells (`AGG_MIN_SPEED_MS` clip) and backward time — the guards run
+BEFORE the fold, so a glitch segment can never poison any reducer (it can't become the min). The first
+covered node re-baselines (no full segment to fold), so a covered run can start up to one 25 m step late
+— deliberate and symmetric between the live and seeded paths.
+
+**Raceable stretches (`toLiveSegments(pick)`).** AVERAGE needs `count ≥ AGG_MIN_LAPS` (2) per node — a
+single noisy GPS lap is not a smoothed mean — while BEST/LAST race at `count ≥ 1` (a single recorded
+ride is exactly what they represent). A contiguous run `[firstK, lastK]` of qualifying nodes becomes one
+`LiveSegment` over `[(firstK-1)·step, lastK·step]` (built from `firstK-1` so the first covered segment
+is included); runs shorter than `AGG_MIN_SEG_M` (300 m) are dropped as isolated noise. The curve is the
+cumulative sum of the pick's per-node delta: AVERAGE = `dtS`, LAST = `lastDtS`, BEST = `maxOf(minDtS,
+dtS / BEST_MAX_SPEEDUP)` — a self-anchored plausibility clamp (BEST ≤ ~2× the average there) so a
+GPS-glitch segment can't spike the curve, while a genuine strong day (≤2× the average) passes through.
+`RouteGhost.build` then bridges the un-raceable stretches with the Ghost-Pace fill into one continuous
+whole-route ghost. No live match, no per-pick overlay.
+
+**Seeded from history (every pick races from ride 1).** On the first match of a route with no (valid)
+grid, KGhost seeds it from the candidate tracks loaded for the match: `SegmentMatcher.routeLaps` (a cheap
+O(n) single forward pass per track, splitting at >500 m off-route gaps) yields each track's
+route-distance laps, folded oldest→newest by `seedAggregateFromLaps` — populating all three reducers —
+then persisted. So every pick is raceable from the first ride; later rides load the persisted grid
+instantly (no match, no re-seed) and the ride-end `update` folds the just-ridden lap. The legacy O(n²)
+`SegmentMatcher.match()` is deprecated and no longer on the race path. Compute runs on
+`Dispatchers.Default`; only load/save (blocking fsync IO) hop to `Dispatchers.IO`.
+
+**Persistence & concurrency.** One JSON blob per route key (`routeKeyOf(name, decoded-polyline-length)`),
+written atomically (temp + fsync + rename). `AGG_SCHEMA_VERSION` makes `load` discard an
+older-layout blob (→ re-seed). The seed (match coroutine) and the ride-end EMA update (`Dispatchers.IO`)
+are two writers of the same key: `AggregateStore.save` takes a process-wide per-dir write lock, the
+ride-end update is an atomic `update(key){ … }` (locked load-modify-save), and the seed uses
+`saveIfAbsent` so it never clobbers an aggregate a ride-end update just created. `stopTickAndJoin` joins
+the seed match before the ride-end save.
+
 ## Key symbols (in `KGhostExtension`)
 
 | Symbol | Meaning |

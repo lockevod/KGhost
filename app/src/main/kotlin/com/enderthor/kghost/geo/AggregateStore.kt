@@ -18,12 +18,23 @@ import java.io.File
  */
 class AggregateStore(private val dir: File) {
 
+    // Process-wide-per-dir write lock (symmetric with TrackStore.indexLock). Since the AVERAGE
+    // seeding writes from the match coroutine (Dispatchers.Default) while the ride-end EMA update
+    // writes from Dispatchers.IO, two saves of the SAME key could otherwise share atomicWriteText's
+    // fixed `<key>.json.tmp` and produce a torn (corrupt) blob. Serialising save() closes that window.
+    private val writeLock: Any = lockFor(dir)
+
     /** Loads the aggregate for [routeKey], or null if absent/corrupt (logged, never throws). */
     fun load(routeKey: String): PerRouteAggregate? {
         val f = File(dir, fileNameFor(routeKey))
         if (!f.isFile) return null
         return runCatching {
             jsonWithUnknownKeys.decodeFromString<PerRouteAggregate>(f.readText())
+                .takeIf { it.schemaVersion == com.enderthor.kghost.engine.AGG_SCHEMA_VERSION }
+                ?: run {
+                    Timber.i("aggregate %s is a stale schema; discarding (will re-seed)", routeKey)
+                    null
+                }
         }.getOrElse { e ->
             Timber.w(e, "aggregate %s present but failed to parse; ignoring (corrupt?)", routeKey)
             null
@@ -31,7 +42,37 @@ class AggregateStore(private val dir: File) {
     }
 
     /** Persists [agg] atomically + durably (shared fsync-temp-then-rename, see [atomicWriteText]). */
-    fun save(agg: PerRouteAggregate) {
+    fun save(agg: PerRouteAggregate) = synchronized(writeLock) { saveUnlocked(agg) }
+
+    /**
+     * Atomic load-modify-save under the per-dir write lock: [transform] sees the CURRENT aggregate (or
+     * null if absent/stale) and its result is persisted with no other writer able to interleave between
+     * the read and the write. Returns the saved value. Use this for the ride-end EMA update so a
+     * concurrent history seed cannot land a save between this load and this save (a lost update).
+     */
+    fun update(routeKey: String, transform: (PerRouteAggregate?) -> PerRouteAggregate): PerRouteAggregate =
+        synchronized(writeLock) {
+            val updated = transform(load(routeKey))
+            saveUnlocked(updated)
+            updated
+        }
+
+    /**
+     * Persists [agg] ONLY if no VALID current aggregate already exists for its key (a missing OR
+     * stale-schema blob counts as absent). Returns true if written. The history seed uses this so that,
+     * if a concurrent ride-end [update] created an aggregate after the seed did its own (unlocked) load
+     * check, the seed does not clobber it — the existing one stands and keeps EMA-updating.
+     */
+    fun saveIfAbsent(agg: PerRouteAggregate): Boolean = synchronized(writeLock) {
+        if (load(agg.routeKey) != null) {
+            false
+        } else {
+            saveUnlocked(agg)
+            true
+        }
+    }
+
+    private fun saveUnlocked(agg: PerRouteAggregate) {
         if (!dir.exists()) dir.mkdirs()
         atomicWriteText(File(dir, fileNameFor(agg.routeKey)), jsonForStorage.encodeToString(agg))
     }
@@ -68,6 +109,15 @@ class AggregateStore(private val dir: File) {
 
     companion object {
         const val DIR_NAME = "aggregates"
+
+        /** Process-wide write locks, keyed by canonical dir path, so two AggregateStore instances over
+         *  the same dir serialise their saves (symmetric with TrackStore's dirLocks). */
+        private val dirLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+        private fun lockFor(dir: File): Any {
+            val key = runCatching { dir.canonicalPath }.getOrDefault(dir.absolutePath)
+            return dirLocks.computeIfAbsent(key) { Any() }
+        }
 
         /** Aggregates kept at most (least-recently-updated pruned beyond this). */
         const val SWEEP_MAX_FILES = 200

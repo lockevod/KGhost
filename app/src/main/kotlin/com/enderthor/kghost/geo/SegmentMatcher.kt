@@ -114,6 +114,7 @@ object SegmentMatcher {
     /** Production default: see [SeedStrategy]. */
     @Volatile internal var seedStrategy: SeedStrategy = SeedStrategy.CAN_START
 
+    @Deprecated("Race path now uses the persisted RouteAggregate grid for all picks (see RouteAggregate.toLiveSegments). Unused; delete with extractTrackSlice/coveredRunsToIntervals once grid racing is validated on-device.")
     fun match(
         route: PolylinePath,
         tracks: List<RecordedTrack>,
@@ -175,6 +176,7 @@ object SegmentMatcher {
                 // Skip the O(n²) slice for an interval already fully covered by the caller (aggregate).
                 if (coveredRanges.any { interval.first >= it.first && interval.second <= it.second }) continue
                 val slice = extractTrackSlice(route, modelPoints, trackLL, interval, params.toleranceM)
+                    ?.map { it.first } // (TrackPoint, routeM) → just the points for the ghost
                     ?: continue // < 2 usable points after extraction/dedup
                 val label0 = "" // filled below once we know the ghost time
                 val ghost = RecordedGhostSource.fromTrackSlice(slice, label0).curve()
@@ -226,6 +228,100 @@ object SegmentMatcher {
 
         // Step 6: sort by route start.
         return segments.sortedBy { it.routeStartM }
+    }
+
+    /**
+     * Per-track route-distance laps for the AVERAGE aggregate seed: for each candidate track, a
+     * `(routeDistM, elapsedS)` series ascending in routeDist (one point per kept track point, time
+     * re-based to 0 at the lap start). The seed folds each lap via updateAggregate (origin-invariant).
+     *
+     * Uses a CHEAP single forward pass ([seedLaps]) — O(track points) per track — NOT the O(n²)
+     * best-chain-per-seed search [match] uses. Recorded tracks are already ~20 m-spaced, so decimating
+     * barely cuts the O(n²) (a 40 km × 10-track seed ran ~84 s); the win is dropping the n² entirely.
+     * The seed is averaged over many laps onto a 25 m grid, so the robustness of trying every seed
+     * (out-and-back disambiguation, longest-span selection) isn't worth the one-time cold-start cost.
+     * match()'s raced BEST ghost still uses the full [extractTrackSlice].
+     */
+    fun routeLaps(
+        route: PolylinePath,
+        tracks: List<RecordedTrack>,
+        params: Params = Params(),
+    ): List<List<DoubleArray>> {
+        val out = ArrayList<List<DoubleArray>>()
+        // Cap to the most-recent maxTracks (backstop), then fold oldest-first so the seed EMA weights
+        // recent laps most — enforced regardless of caller order (the contract is oldest-first).
+        val capped = if (tracks.size > params.maxTracks) {
+            tracks.sortedByDescending { it.startedAtEpoch }.take(params.maxTracks)
+        } else {
+            tracks
+        }
+        val selected = capped.sortedBy { it.startedAtEpoch }
+        for (track in selected) {
+            val modelPoints = track.points.map { it.toModel() }
+            if (modelPoints.size < 2) continue
+            out.addAll(seedLaps(route, modelPoints, params.toleranceM))
+        }
+        return out
+    }
+
+    /** Route-distance jump (m) above which [seedLaps] treats a windowed-projection miss as a long
+     *  off-route excursion and SPLITS the lap rather than bridging it (2 × [sliceFwdWindowM]). */
+    private const val SEED_MAX_GAP_M = 500.0
+
+    /**
+     * One forward pass over a track for the seed → ZERO OR MORE laps. Project each point onto the route
+     * (windowed around the previous kept routeDist, allocation-free), keep only points that are ON the
+     * route (`perp < tol`) AND advance in route-distance AND don't move time backward, emitting
+     * `(routeDistM, timeS − t0)`. O(points).
+     *
+     * vs [extractTrackSlice]: no best-chain-per-seed search, so a track ridden BACKWARD or an
+     * out-and-back's return pass yields no forward lap (correct — it isn't one), and a loop ridden
+     * twice in one recording contributes only its first pass (the second runs backward in routeM and
+     * is rejected by the advance check). For an averaged seed that's the desired, cheap behaviour.
+     *
+     * SPLIT on a big off-route gap: if the windowed projection finds nothing and the global fallback
+     * lands more than [SEED_MAX_GAP_M] of route-distance ahead, the track left the route for a long
+     * stretch — don't BRIDGE it with one fabricated fast segment (which would pollute the EMA pace).
+     * Close the current lap and re-anchor a fresh one at the rejoin point, so the off-route stretch is
+     * simply not covered (matching the old coverage-scan behaviour). Each emitted lap is monotonic in
+     * routeDist and time, and re-based to its own t0 (origin-invariant, so multiple laps per track are fine).
+     */
+    private fun seedLaps(route: PolylinePath, points: List<TrackPoint>, toleranceM: Double): List<List<DoubleArray>> {
+        val laps = ArrayList<List<DoubleArray>>()
+        var lap = ArrayList<DoubleArray>(points.size)
+        val projOut = DoubleArray(2)
+        var prevRouteM = Double.NaN
+        var t0 = Double.NaN
+        for (tp in points) {
+            val along: Double
+            val perp: Double
+            if (prevRouteM.isNaN() ||
+                !route.nearestProjectionNearInto(tp.lat, tp.lng, prevRouteM, sliceBackWindowM, sliceFwdWindowM, projOut)
+            ) {
+                val p = route.nearestProjection(LatLng(tp.lat, tp.lng))
+                along = p.distanceAlongM
+                perp = p.perpDistM
+            } else {
+                along = projOut[0]
+                perp = projOut[1]
+            }
+            if (perp >= toleranceM) continue // off-route blip → skip, keep scanning
+            if (!prevRouteM.isNaN() && along <= prevRouteM + routeAdvanceEpsilonM) continue // not advancing
+            if (!prevRouteM.isNaN() && along - prevRouteM > SEED_MAX_GAP_M) {
+                // Big off-route bridge → split here instead of fabricating a segment across the gap.
+                if (lap.size >= 2) laps.add(lap)
+                lap = ArrayList(points.size)
+                prevRouteM = Double.NaN
+                t0 = Double.NaN
+            }
+            if (t0.isNaN()) t0 = tp.timeS
+            val elapsed = tp.timeS - t0
+            if (lap.isNotEmpty() && elapsed < lap.last()[1]) continue // time went backward (glitch) → drop
+            lap.add(doubleArrayOf(along, elapsed))
+            prevRouteM = along
+        }
+        if (lap.size >= 2) laps.add(lap)
+        return laps
     }
 
     /**
@@ -424,7 +520,7 @@ object SegmentMatcher {
         trackLL: List<LatLng>,
         interval: Pair<Double, Double>,
         toleranceM: Double,
-    ): List<TrackPoint>? {
+    ): List<Pair<TrackPoint, Double>>? {
         val (startM, endM) = interval
 
         // Seed projection for a chain's first point: constrained to the interval so an ambiguous
@@ -550,16 +646,17 @@ object SegmentMatcher {
 
         if (best.size < 2) return null
 
-        val inside = best.map { it.first }
-
+        // Keep the (TrackPoint, routeM) pairs through orientation + dedup so callers (routeLaps) can
+        // reuse the SAME routeM the chain walk computed, guaranteeing the lap's routeDist matches the
+        // match path exactly. match() maps these back to .first for the ghost.
         // Reverse detection: if track distance decreases as route distance increases, the track
         // was ridden opposite to the route -> reverse so the slice ascends in track distance.
-        val oriented = if (inside.last().distanceM < inside.first().distanceM) inside.reversed() else inside
+        val oriented = if (best.last().first.distanceM < best.first().first.distanceM) best.reversed() else best
 
         // GhostCurve requires strictly increasing distance: collapse equal consecutive distances.
-        val deduped = ArrayList<TrackPoint>(oriented.size)
+        val deduped = ArrayList<Pair<TrackPoint, Double>>(oriented.size)
         for (p in oriented) {
-            if (deduped.isEmpty() || p.distanceM > deduped.last().distanceM) deduped += p
+            if (deduped.isEmpty() || p.first.distanceM > deduped.last().first.distanceM) deduped += p
         }
         if (deduped.size < 2) return null
 
@@ -567,7 +664,7 @@ object SegmentMatcher {
         // route span — a smeared/multi-lap chain that slipped past the per-point guards. The engine
         // assumes ghost.totalDistanceM ≈ routeEndM − routeStartM; emitting an inflated ghost breaks
         // gap-distance and ghost-progress, so we drop the interval (no segment) instead.
-        val odometerSpanM = deduped.last().distanceM - deduped.first().distanceM
+        val odometerSpanM = deduped.last().first.distanceM - deduped.first().first.distanceM
         val routeSpanM = endM - startM
         if (odometerSpanM > (routeSpanM + 2.0 * toleranceM) * routeSpanInflationLimit) return null
 

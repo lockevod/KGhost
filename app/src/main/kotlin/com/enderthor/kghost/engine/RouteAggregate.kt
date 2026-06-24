@@ -22,40 +22,41 @@ const val AGG_SEED_LAPS = 4
  */
 const val AGG_MIN_SPEED_MS = 0.5
 
-/** A node needs at least this many contributing laps before AVERAGE will race it. */
-const val AGG_MIN_LAPS = 2
-
-/**
- * "Started at the route start" tolerance (m): the rider's route position at first movement (D0) must
- * be within this of 0 for the lap to update the aggregate. A lap that joined mid-route injects a
- * time-origin offset (it lacks the `[0, D0]` time, so it folds `t≈0` at node-D0), so it is skipped
- * rather than polluting the mean.
- *
- * Set to 300 m (was 50): in normal use the rider starts AT the route origin but with routine GPS /
- * start-area variation of ~100-300 m (observed D0 up to 257 m on a real ride), and 50 m rejected
- * almost every real lap → the aggregate never warmed up and AVERAGE was stuck on the BEST-warmup
- * ghost forever. 300 m covers that observed range and is the practical maximum that does not
- * meaningfully distort the CURRENT model: because the raced ghost uses node-time DIFFERENCES
- * ([buildRunSegment] subtracts the run's start-node time), a D0 offset is confined to the start
- * region (≤ D0) — which a rider starting that far in does not race anyway — and is further diluted by
- * the EMA (α=0.25) over a few laps; the bulk of the route's average is unaffected.
- *
- * The proper fix for a genuine mid-route / arbitrary-point start (re-anchoring a partial lap to the
- * existing aggregate's time at its first covered node, so there is NO offset at all) is a model
- * redesign deferred to a later release.
- */
-const val AGG_START_TOL_M = 300.0
-
 /** Max plausible cyclist speed (m/s) between two nodes; a faster jump is a GPS spike and is rejected. */
 const val AGG_MAX_SPEED_MS = 30.0
 
-/** One grid node of the per-route average: the EMA mean rider-time to reach it, and the lap count. */
+/** Persisted-aggregate schema version. Bump when the node/aggregate layout changes so old blobs are
+ *  discarded (and re-seeded) instead of mis-read. */
+const val AGG_SCHEMA_VERSION = 2
+
+/** BEST reducer plausibility cap: a node's "best" may be at most this many times faster than its own
+ *  recency-weighted average there. Clips a GPS-glitch segment (which as a raw min would spike the
+ *  curve) while leaving a genuine strong day through — 2.0 (≤2× the average) covers a real hard effort
+ *  vs an easy-ride-heavy average; a tighter 1.5 would clamp a legitimately fast lap. Self-anchored. */
+const val BEST_MAX_SPEEDUP = 2.0
+
+/** AVERAGE needs at least this many laps on a node before it is raceable — one lap is not yet a
+ *  smoothed mean (a single noisy GPS lap would lurch). BEST/LAST race at ≥1 (a single recorded ride
+ *  is exactly what they represent). */
+const val AGG_MIN_LAPS = 2
+
+/** Minimum raceable run length (m). A contiguous raceable run shorter than this is dropped (isolated
+ *  noise); ported from SegmentMatcher.minSegmentM. The run set is per-pick (AVERAGE gates at
+ *  AGG_MIN_LAPS, BEST/LAST at 1). */
+const val AGG_MIN_SEG_M = 300.0
+
+/** One grid node: the three reducers of the per-segment delta (node k-1 → k), plus the lap count. */
 @Serializable
 data class AggregateNode(
-    /** EMA mean rider-time from route start to this node (s). Meaningful only when [count] > 0. */
-    val timeS: Double = 0.0,
-    /** How many contributing laps have reached this node (warmup gate + partial-lap support). */
+    /** EMA mean delta (s) — the AVERAGE reducer. Node 0 = 0. */
+    val dtS: Double = 0.0,
+    /** Laps that covered THIS node-pair (raceable gate + warmup). */
     val count: Int = 0,
+    /** Smallest delta seen (s) — the BEST reducer (fastest traversal of this segment). */
+    val minDtS: Double = 0.0,
+    /** Delta from the most-recent FOLDED (good) traversal of this segment (s) — the LAST reducer. A
+     *  rejected glitch lap does not overwrite it, so it is "last good", not literally "last ride". */
+    val lastDtS: Double = 0.0,
 )
 
 /**
@@ -74,58 +75,71 @@ data class PerRouteAggregate(
     val routeName: String,
     val routeLenM: Double,
     val stepM: Double = AGG_STEP_M,
+    /** Schema version; 0 = legacy/absent (old blobs lack the field). Checked on load; stale → discard. */
+    val schemaVersion: Int = 0,
     /** Node `k` (index) represents route distance `k * stepM`. Size = floor(routeLenM/stepM) + 1. */
     val nodes: List<AggregateNode>,
 ) {
     /**
-     * Turns the well-covered stretches of this average into raceable [LiveSegment]s — contiguous runs
-     * of nodes with `count >= AGG_MIN_LAPS`. The caller feeds these through [RouteGhost.build], which
-     * bridges the uncovered stretches (warmup / never-ridden) with the Ghost-Pace fill exactly as it
-     * does for BEST/LAST. Returns an empty list while no stretch has ≥2 laps yet (so AVERAGE can fall
-     * back to BEST during warmup).
+     * Raceable [LiveSegment]s for [pick], from this grid: contiguous runs of covered nodes (count≥1),
+     * each built from the pick's reducer (EMA / min-clamped / last). Runs shorter than [minSegM] are
+     * dropped. The caller bridges the gaps (count==0 / dropped) with the Ghost-Pace fill via
+     * [RouteGhost.build]. AVERAGE needs ≥ [AGG_MIN_LAPS] laps per node (a single noisy lap is not a
+     * smoothed mean); BEST/LAST race at ≥ 1 (a single recorded ride is what they represent).
      */
-    fun toLiveSegments(): List<LiveSegment> {
+    fun toLiveSegments(pick: GhostPick, minSegM: Double = AGG_MIN_SEG_M): List<LiveSegment> {
         val out = ArrayList<LiveSegment>()
-        var i = 0
-        while (i < nodes.size) {
-            if (nodes[i].count < AGG_MIN_LAPS) { i++; continue }
-            var j = i
-            while (j + 1 < nodes.size && nodes[j + 1].count >= AGG_MIN_LAPS) j++
-            // Run [i, j] of node indices (inclusive). A segment needs at least two nodes.
-            if (j > i) buildRunSegment(i, j)?.let { out.add(it) }
-            i = j + 1
+        val minLaps = if (pick == GhostPick.AVERAGE) AGG_MIN_LAPS else 1
+        // node[k].count = laps covering the INCOMING segment (k-1→k); node 0 has none, so scan k≥1.
+        var k = 1
+        while (k < nodes.size) {
+            if (nodes[k].count < minLaps) { k++; continue }
+            val firstK = k
+            while (k + 1 < nodes.size && nodes[k + 1].count >= minLaps) k++
+            buildRunSegment(firstK - 1, k, pick, minSegM)?.let { out.add(it) }
+            k++
         }
         return out
     }
 
-    /** Builds a segment-relative [LiveSegment] for the node run `[from, to]`, or null if degenerate. */
-    private fun buildRunSegment(from: Int, to: Int): LiveSegment? {
+    /** The pick's per-segment delta at node [k]. BEST is clamped to a plausible multiple of the average
+     *  there (no glitch spike, no node-to-node jump); AVERAGE/LAST are the raw reducers. */
+    private fun nodeDelta(k: Int, pick: GhostPick): Double {
+        val n = nodes[k]
+        return when (pick) {
+            GhostPick.AVERAGE -> n.dtS
+            GhostPick.LAST -> n.lastDtS
+            GhostPick.BEST -> maxOf(n.minDtS, n.dtS / BEST_MAX_SPEEDUP)
+        }
+    }
+
+    private fun labelFor(pick: GhostPick, totalTimeS: Double): String = when (pick) {
+        GhostPick.BEST -> "PR " + mmss(totalTimeS)
+        GhostPick.LAST -> "Last " + mmss(totalTimeS)
+        GhostPick.AVERAGE -> "AVG " + mmss(totalTimeS)
+    }
+
+    /** Builds a segment-relative [LiveSegment] for the node run `[from, to]`, or null if too short/degenerate. */
+    private fun buildRunSegment(from: Int, to: Int, pick: GhostPick, minSegM: Double): LiveSegment? {
+        if ((to - from) * stepM < minSegM) return null
         val startDist = from * stepM
-        val startTime = nodes[from].timeS
         val samples = ArrayList<GhostSample>(to - from + 1)
+        var cum = 0.0
         var prevTime = 0.0
         samples.add(GhostSample(0.0, 0.0))
         for (k in from + 1..to) {
             val dist = (k - from) * stepM
-            // Independent per-node EMAs can, rarely, dip below the previous node's mean; clamp so the
-            // curve stays non-decreasing in time (GhostCurve.init requires that).
-            val t = (nodes[k].timeS - startTime).coerceAtLeast(prevTime)
+            cum += nodeDelta(k, pick)
+            val t = cum.coerceAtLeast(prevTime) // keep the curve non-decreasing (GhostCurve requires it)
             samples.add(GhostSample(dist, t))
             prevTime = t
         }
         if (samples.size < 2) return null
-        // Reject a corrupt run that implies an impossible average speed (defensive; nodes are guarded
-        // on update too). Let RouteGhost fill that stretch instead.
         val totalDist = samples.last().distanceM
         val totalTime = samples.last().timeS
-        if (totalTime <= 0.0 || totalDist / totalTime > AGG_MAX_SPEED_MS) return null
+        if (totalTime <= 0.0 || totalDist / totalTime > AGG_MAX_SPEED_MS) return null // defensive
         val curve = GhostCurve(samples)
-        return LiveSegment(
-            routeStartM = startDist,
-            routeEndM = to * stepM,
-            ghost = curve,
-            ghostLabel = "AVG " + mmss(curve.totalTimeS),
-        )
+        return LiveSegment(startDist, to * stepM, curve, labelFor(pick, curve.totalTimeS))
     }
 }
 
@@ -133,9 +147,11 @@ data class PerRouteAggregate(
  * Folds one lap's `(routeDist, riderTimeFromStartS)` series into [existing] (or a fresh grid) and
  * returns the updated aggregate. Pure.
  *
- * @param lap ascending-in-routeDist samples; [DoubleArray] `[routeDistM, riderTimeS]`. `riderTimeS`
- *   is measured on the fair-start clock (time since the rider first rolled at the route start), so
- *   the average is consistent with the live race's "fair start".
+ * @param lap ascending-in-routeDist samples; [DoubleArray] `[routeDistM, riderTimeS]`. Only the
+ *   DIFFERENCE in `riderTimeS` between consecutive covered nodes is folded (as per-segment deltas),
+ *   so the model is origin-invariant: the time may be on any consistent clock and the lap may START
+ *   ANYWHERE on the route (a live fair-start lap, or a history slice re-based to its own start via
+ *   [seedAggregateFromLaps]). Time must be non-decreasing along the lap; absolute origin is irrelevant.
  */
 fun updateAggregate(
     existing: PerRouteAggregate?,
@@ -150,7 +166,9 @@ fun updateAggregate(
     // Reuse the existing grid only when it matches this route's axis (same node count + step); a route
     // whose length crossed the key's 100 m rounding boundary gets a fresh grid rather than a bad blend.
     val base: Array<AggregateNode> =
-        if (existing != null && existing.nodes.size == nodeCount && existing.stepM == stepM) {
+        if (existing != null && existing.nodes.size == nodeCount && existing.stepM == stepM &&
+            existing.schemaVersion == AGG_SCHEMA_VERSION
+        ) {
             existing.nodes.toTypedArray()
         } else {
             Array(nodeCount) { AggregateNode() }
@@ -165,6 +183,8 @@ fun updateAggregate(
         // stop duration. prevNodeTime is on the ADJUSTED (dwell-compressed) clock.
         var prevNodeTime = lap.first()[1]
         var prevNodeDist = lap.first()[0]
+        var prevNodeIdx = -1 // grid index of the last COVERED node we advanced past (folded OR just
+        // re-baselined); -1 = none yet. The fold gate below uses it to require a consecutive pair.
         // Seconds compressed out of this lap so far by the dwell clip. Subtracting it from every later
         // node keeps the lap's own moving pace intact while removing the stop.
         var clipS = 0.0
@@ -203,17 +223,26 @@ fun updateAggregate(
             } else if (dt < 0.0) {
                 continue // node at the baseline's own distance but time went backwards: corrupt sample
             }
+            // Fold the SINGLE-step delta only when the previous COVERED node EXISTS and is exactly k-1
+            // (it may have only re-baselined, not folded — either way it gives us the node-(k-1) time);
+            // otherwise this is the first covered node or sits past a gap → just re-baseline (no valid
+            // 1-step dt). The `prevNodeIdx >= 0` guard keeps node 0 (no incoming segment) at count 0
+            // even for a lap that starts exactly at routeDist 0 (its degenerate dt would be 0 anyway).
+            val segDt = tAdj - prevNodeTime
+            if (prevNodeIdx >= 0 && prevNodeIdx == k - 1) {
+                val node = base[k]
+                // Plain running mean while seeding (first AGG_SEED_LAPS laps), then the EMA.
+                val mean = when {
+                    node.count == 0 -> segDt
+                    node.count < AGG_SEED_LAPS -> (node.dtS * node.count + segDt) / (node.count + 1)
+                    else -> alpha * segDt + (1.0 - alpha) * node.dtS
+                }
+                val newMin = if (node.count == 0) segDt else minOf(node.minDtS, segDt)
+                base[k] = AggregateNode(dtS = mean, count = node.count + 1, minDtS = newMin, lastDtS = segDt)
+            }
             prevNodeTime = tAdj
             prevNodeDist = d
-            val node = base[k]
-            // Plain running mean while seeding (first AGG_SEED_LAPS laps), then the EMA — see
-            // [AGG_SEED_LAPS] for why a bare EMA from lap 1 is wrong.
-            val mean = when {
-                node.count == 0 -> tAdj
-                node.count < AGG_SEED_LAPS -> (node.timeS * node.count + tAdj) / (node.count + 1)
-                else -> alpha * tAdj + (1.0 - alpha) * node.timeS
-            }
-            base[k] = AggregateNode(timeS = mean, count = node.count + 1)
+            prevNodeIdx = k
         }
     }
 
@@ -222,6 +251,26 @@ fun updateAggregate(
         routeName = routeName,
         routeLenM = routeLenM,
         stepM = stepM,
+        schemaVersion = AGG_SCHEMA_VERSION,
         nodes = base.asList(),
     )
+}
+
+/**
+ * Builds a fresh aggregate by folding [laps] (already in the desired EMA order — oldest first) via
+ * [updateAggregate]. Used to SEED a route's average from recorded history at first match, so AVERAGE
+ * races from ride 1. Each lap is a `(routeDistM, timeS)` series; origin-invariant, so a lap may start
+ * anywhere on the route.
+ */
+fun seedAggregateFromLaps(
+    routeKey: String,
+    routeName: String,
+    routeLenM: Double,
+    laps: List<List<DoubleArray>>,
+): PerRouteAggregate {
+    var agg: PerRouteAggregate? = null
+    for (lap in laps) agg = updateAggregate(agg, routeKey, routeName, routeLenM, lap)
+    // Empty laps → a fresh, correctly-sized, stamped aggregate. Reuse updateAggregate (a <2-point lap
+    // is a no-op fold) so the grid-size formula lives in exactly one place.
+    return agg ?: updateAggregate(null, routeKey, routeName, routeLenM, emptyList())
 }
