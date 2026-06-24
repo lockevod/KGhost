@@ -7,5 +7,5 @@
   "latestVersionCode": 202606231,
   "developer": "github.com/lockevod",
   "description": "Race against a ghost on your Karoo: a fixed-pace Ghost Pace or your own past self on a route, stitched into one continuous ghost. Shows the live time/distance gap on graphical and numeric data fields and draws the ghost's position on the map. Records each ride automatically and can import GPX/FIT ghosts dropped in /sdcard/KGhost. Keeps estimating during GPS dropouts. Beta version, use with care.",
-  "releaseNotes": "Fix average mode. Fix ghost vs custom field decoupling. Route position now comes from the Karoo's own map-matching (loop- and reroute-safe). Storage access is re-read without restarting after you grant it. Clearer storage-permission notice. Imperial-unit fixes and es-ES localization."
+  "releaseNotes": "Fix warmup all modes. Fix ghost vs custom field decoupling. Route position now comes from the Karoo's own map-matching (loop- and reroute-safe). Storage access is re-read without restarting after you grant it. Clearer storage-permission notice. Imperial-unit fixes and es-ES localization."
 }
