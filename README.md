@@ -152,9 +152,9 @@ The Ghost Pace and "race your own" are two halves of one ghost, so they are conf
 - **Race your own** — which past ride to race (**best** / **last** / **average**) and optional alerts
   when you **enter** and **leave** a stretch that has a recorded ghost (nearby stretches won't
   double-alert). **Average** races the recency-weighted mean of your recent laps of the loaded route
-  (so a typical effort, not a one-off PR or single recent ride). It needs a couple of laps **started at
-  the route start** before it kicks in; on stretches without enough laps you race your **best** there
-  instead. Long stops (a café, a photo) are compressed out so one stop never slows the average, and only
+  (so a typical effort, not a one-off PR or single recent ride). It needs at least **2 laps** covering
+  a stretch before it kicks in — whether or not you started from the beginning of the route. On
+  stretches without enough history you race the **Ghost Pace** fill instead. Long stops (a café, a photo) are compressed out so one stop never slows the average, and only
   the **first lap of each ride** counts toward it. The average is kept per route (under
   `/sdcard/KGhost/aggregates` when all-files access is granted) and survives the library auto-clean
   below.
