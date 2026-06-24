@@ -243,11 +243,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          * pick at an exact self-intersection still needs a heading/bearing check — tracked separately.)
          */
         private const val BOOTSTRAP_SLACK_M = 30.0
-        /** Fallback timeout (ms): if GPS has not provided an on-route fix within this window after the
-         *  first on-route position is seen, accept the Karoo map-match position for the D0 bootstrap.
-         *  Chosen well below [GPS_ALERT_S] so the race can still start in poor GPS conditions while
-         *  avoiding the common case where GPS locks quickly (a few seconds) and delivers the correct D0. */
-        private const val D0_GPS_FALLBACK_MS = 30_000L
 
         /**
          * Route projector (GPS → polyline). The Karoo's own map-match (`routeLen − remaining`) can lock
@@ -482,10 +477,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     @Volatile private var gpsAlertFired: Boolean = false
     // Previous tick's moving state (route mode) — drives the stationary→moving re-stamp edge.
     @Volatile private var wasMoving: Boolean = false
-    // Wall-clock (ms) of the first tick where an on-route position was available — used to time
-    // out the GPS-required D0 bootstrap: after D0_GPS_FALLBACK_MS without a GPS fix, the Karoo
-    // position is accepted so the race can still start in poor GPS conditions.
-    @Volatile private var onRouteSinceMs: Long = 0L
+    // Whether the D0 bootstrap position came from the GPS projector (true) or the Karoo map-match
+    // fallback (false). While false and the race is not yet anchored, a GPS fix refreshes D0 so a
+    // Karoo snap-to-wrong-segment is corrected before the anchor fires.
+    @Volatile private var routeStartDistFromGps: Boolean = false
     // First-fix D0 confirmation candidate (position + odometer at that position).
     @Volatile private var d0CandPos: Double? = null
     @Volatile private var d0CandOdo: Double? = null
@@ -513,7 +508,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         lastBufferedRouteDist = Double.NEGATIVE_INFINITY
         gpsAlertFired = false
         wasMoving = false
-        onRouteSinceMs = 0L
+        routeStartDistFromGps = false
         d0CandPos = null
         d0CandOdo = null
         prevSegStartM = null
@@ -1856,10 +1851,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             ghostStartElapsedS = null
                             if (!sameRoute) {
                                 routeStartDistM = null
+                                routeStartDistFromGps = false
                                 firstMoveElapsedS = null
                                 lastGoodRouteDistM = null
                                 distMAtLastGoodM = null
-                                onRouteSinceMs = 0L
                                 d0CandPos = null
                                 d0CandOdo = null
                                 rideDistAtRouteStartM = distM
@@ -2176,30 +2171,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // FIRST-FIX CONFIRMATION. The odometric filter below needs a trusted baseline, and
                         // D0 is latched ONCE (invariant for the whole route) — but the very FIRST on-route
                         // fix can be a wrong-pass snap on a self-intersecting route (the filter can't catch
-                        // it: there is no baseline yet). Require two consecutive GPS fixes that agree
+                        // it: there is no baseline yet). Require two consecutive fixes that agree
                         // odometrically before trusting anything: tick 1 stores a candidate, tick 2 confirms
                         // it (or replaces it and waits one more). Costs one tick of --- at route
                         // acquisition; firstMove gates the race anyway, so a stationary start loses nothing.
-                        // GPS is required: the Karoo's map-match while stationary can snap to the nearest
-                        // road segment (hundreds of metres off the true start), which would latch a wrong D0
-                        // permanently and make the ghost appear to start far ahead of the rider. Wait for the
-                        // GPS projector to supply a reliable on-route position before confirming D0.
                         if (lastGoodRouteDistM == null && routeStartDistM == null) {
-                            val nowMs = System.currentTimeMillis()
-                            if (onRouteSinceMs == 0L) onRouteSinceMs = nowMs
-                            val gpsTimedOut = nowMs - onRouteSinceMs >= D0_GPS_FALLBACK_MS
-                            if (!routeDistFromGps && !gpsTimedOut) {
-                                if (nowMs - lastDiagLogMs >= diagLogMs) {
-                                    lastDiagLogMs = nowMs
-                                    val waitedS = (nowMs - onRouteSinceMs) / 1000
-                                    Timber.d("KVP tick route: Karoo-only position (${"%.0f".format(routeDist)}m) — D0 bootstrap waiting for GPS (${waitedS}s / ${D0_GPS_FALLBACK_MS / 1000}s)")
-                                }
-                                holdGap()
-                                return@runCatching
-                            }
-                            if (!routeDistFromGps) {
-                                Timber.w("KVP tick route: GPS fallback for D0 bootstrap after ${D0_GPS_FALLBACK_MS / 1000}s — using Karoo position ${"%.0f".format(routeDist)}m")
-                            }
                             val candPos = d0CandPos
                             val candOdo = d0CandOdo
                             val consistent = candPos != null && candOdo != null &&
@@ -2211,12 +2187,26 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 val nowMs = System.currentTimeMillis()
                                 if (nowMs - lastDiagLogMs >= diagLogMs) {
                                     lastDiagLogMs = nowMs
-                                    Timber.d("KVP tick route: first GPS fix at ${"%.0f".format(routeDist)}m — awaiting confirmation")
+                                    Timber.d("KVP tick route: first fix at ${"%.0f".format(routeDist)}m (${if (routeDistFromGps) "GPS" else "Karoo"}) — awaiting confirmation")
                                 }
                                 holdGap()
                                 return@runCatching
                             }
-                            // Confirmed: fall through — this tick's routeDist becomes the baseline below.
+                            // Confirmed: fall through — this tick's routeDist and source become the baseline.
+                            routeStartDistFromGps = routeDistFromGps
+                        }
+                        // GPS correction window: if D0 was bootstrapped from a Karoo-only position and the
+                        // GPS projector now has a reliable fix, refresh D0 before the anchor fires. The
+                        // Karoo can snap to the wrong road segment while stationary (e.g. 258 m off the true
+                        // start). The formula accounts for distance ridden, so this is safe at any time
+                        // before first movement. Once anchored (ghostStartElapsedS != null) D0 is invariant.
+                        if (!routeStartDistFromGps && routeDistFromGps && ghostStartElapsedS == null && routeStartDistM != null) {
+                            val corrected = (routeDist - (distM - rideDistAtRouteStartM)).coerceIn(0.0, routeLenM)
+                            Timber.i("KVP D0 GPS correction: ${"%.0f".format(routeStartDistM)}m (Karoo) → ${"%.0f".format(corrected)}m (GPS)")
+                            routeStartDistM = corrected
+                            routeStartDistFromGps = true
+                            d0CandPos = null   // reset so the corrected position re-confirms if needed
+                            d0CandOdo = null
                         }
                         // END OF ROUTE — the rider has reached the destination (remaining≈0). Gated on
                         // routeStartDistM != null so this is the genuine FINISH, not the host's pre-position
