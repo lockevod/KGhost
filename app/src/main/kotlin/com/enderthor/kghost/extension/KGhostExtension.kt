@@ -2197,8 +2197,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // GPS correction window: if D0 was bootstrapped from a Karoo-only position and the
                         // GPS projector now has a reliable fix, refresh D0 before the anchor fires. The
                         // Karoo can snap to the wrong road segment while stationary (e.g. 258 m off the true
-                        // start). The formula accounts for distance ridden, so this is safe at any time
-                        // before first movement. Once anchored (ghostStartElapsedS != null) D0 is invariant.
+                        // start). The GPS projector only runs after firstMoveElapsedS is set, so this block
+                        // fires AFTER first movement, not before. Once anchored (ghostStartElapsedS != null)
+                        // D0 is invariant; a last-chance correction just before the anchor handles the narrow
+                        // window where bootstrap confirmation and firstMove land on the same tick.
                         if (!routeStartDistFromGps && routeDistFromGps && ghostStartElapsedS == null && routeStartDistM != null) {
                             val corrected = (routeDist - (distM - rideDistAtRouteStartM)).coerceIn(0.0, routeLenM)
                             Timber.i("KVP D0 GPS correction: ${"%.0f".format(routeStartDistM)}m (Karoo) → ${"%.0f".format(corrected)}m (GPS)")
@@ -2363,10 +2365,23 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 holdGap()
                                 return@runCatching
                             }
+                            // Last-chance GPS correction: if D0 was bootstrapped from the Karoo map-match
+                            // (routeStartDistFromGps=false) and GPS is available right now, correct D0
+                            // before anchoring. This covers the narrow window where the 2-tick bootstrap
+                            // confirmation and firstMove land on the same tick — the GPS correction block
+                            // above is gated on routeStartDistM!=null and fires on that same tick only if
+                            // GPS is already available; if it was not, the anchor would lock in the Karoo
+                            // D0 with no further correction possible. This final guard closes that gap.
+                            if (!routeStartDistFromGps && routeDistFromGps) {
+                                val corrected = (routeDist - (distM - rideDistAtRouteStartM)).coerceIn(0.0, routeLenM)
+                                Timber.i("KVP D0 last-chance GPS correction at anchor: ${"%.0f".format(routeStartDistM)}m → ${"%.0f".format(corrected)}m")
+                                routeStartDistM = corrected
+                                routeStartDistFromGps = true
+                            }
                             // The race anchor — THE event to verify the fair-start model. Logged once.
-                            ghostStartElapsedS = moveStart - rg.timeAt(d0)
+                            ghostStartElapsedS = moveStart - rg.timeAt(routeStartDistM!!)
                             Timber.i(
-                                "KVP race anchored: firstMove=${"%.0f".format(moveStart)}s D0=${"%.0f".format(d0)}m " +
+                                "KVP race anchored: firstMove=${"%.0f".format(moveStart)}s D0=${"%.0f".format(routeStartDistM!!)}m " +
                                     "ghostStart=${"%.0f".format(ghostStartElapsedS!!)}s @ routeDist=${"%.0f".format(effRouteDist)}m elapsed=${"%.0f".format(elapsedS)}s",
                             )
                             // Average-ghost contribution: EVERY lap folds into the aggregate regardless of
