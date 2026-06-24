@@ -258,27 +258,36 @@ object SegmentMatcher {
         for (track in selected) {
             val modelPoints = track.points.map { it.toModel() }
             if (modelPoints.size < 2) continue
-            seedLap(route, modelPoints, params.toleranceM)?.let { out.add(it) }
+            out.addAll(seedLaps(route, modelPoints, params.toleranceM))
         }
         return out
     }
 
+    /** Route-distance jump (m) above which [seedLaps] treats a windowed-projection miss as a long
+     *  off-route excursion and SPLITS the lap rather than bridging it (2 × [sliceFwdWindowM]). */
+    private const val SEED_MAX_GAP_M = 500.0
+
     /**
-     * One forward pass over a track for the seed: project each point onto the route (windowed around
-     * the previous kept routeDist, allocation-free), keep only points that are ON the route
-     * (`perp < tol`) AND advance in route-distance AND don't move time backward. Emits
-     * `(routeDistM, timeS − t0)`. O(points). null if fewer than 2 points are kept.
+     * One forward pass over a track for the seed → ZERO OR MORE laps. Project each point onto the route
+     * (windowed around the previous kept routeDist, allocation-free), keep only points that are ON the
+     * route (`perp < tol`) AND advance in route-distance AND don't move time backward, emitting
+     * `(routeDistM, timeS − t0)`. O(points).
      *
      * vs [extractTrackSlice]: no best-chain-per-seed search, so a track ridden BACKWARD or an
      * out-and-back's return pass yields no forward lap (correct — it isn't one), and a loop ridden
      * twice in one recording contributes only its first pass (the second runs backward in routeM and
-     * is rejected by the advance check). For an averaged seed that's the desired, cheap behaviour. The
-     * first (partial) grid step is left for updateAggregate's re-baseline (same start-quantization as
-     * the live lap, so seeded and live agree). Monotonic in both routeDist and time so the fold's
-     * guards are satisfied.
+     * is rejected by the advance check). For an averaged seed that's the desired, cheap behaviour.
+     *
+     * SPLIT on a big off-route gap: if the windowed projection finds nothing and the global fallback
+     * lands more than [SEED_MAX_GAP_M] of route-distance ahead, the track left the route for a long
+     * stretch — don't BRIDGE it with one fabricated fast segment (which would pollute the EMA pace).
+     * Close the current lap and re-anchor a fresh one at the rejoin point, so the off-route stretch is
+     * simply not covered (matching the old coverage-scan behaviour). Each emitted lap is monotonic in
+     * routeDist and time, and re-based to its own t0 (origin-invariant, so multiple laps per track are fine).
      */
-    private fun seedLap(route: PolylinePath, points: List<TrackPoint>, toleranceM: Double): List<DoubleArray>? {
-        val lap = ArrayList<DoubleArray>(points.size)
+    private fun seedLaps(route: PolylinePath, points: List<TrackPoint>, toleranceM: Double): List<List<DoubleArray>> {
+        val laps = ArrayList<List<DoubleArray>>()
+        var lap = ArrayList<DoubleArray>(points.size)
         val projOut = DoubleArray(2)
         var prevRouteM = Double.NaN
         var t0 = Double.NaN
@@ -297,13 +306,21 @@ object SegmentMatcher {
             }
             if (perp >= toleranceM) continue // off-route blip → skip, keep scanning
             if (!prevRouteM.isNaN() && along <= prevRouteM + routeAdvanceEpsilonM) continue // not advancing
+            if (!prevRouteM.isNaN() && along - prevRouteM > SEED_MAX_GAP_M) {
+                // Big off-route bridge → split here instead of fabricating a segment across the gap.
+                if (lap.size >= 2) laps.add(lap)
+                lap = ArrayList(points.size)
+                prevRouteM = Double.NaN
+                t0 = Double.NaN
+            }
             if (t0.isNaN()) t0 = tp.timeS
             val elapsed = tp.timeS - t0
             if (lap.isNotEmpty() && elapsed < lap.last()[1]) continue // time went backward (glitch) → drop
             lap.add(doubleArrayOf(along, elapsed))
             prevRouteM = along
         }
-        return if (lap.size >= 2) lap else null
+        if (lap.size >= 2) laps.add(lap)
+        return laps
     }
 
     /**

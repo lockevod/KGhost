@@ -401,4 +401,20 @@ class SegmentMatcherTest {
         // Only the forward pass contributes (~13 points), not the 12 backward ones.
         assertTrue("backward pass dropped (${lap.size} pts)", lap.size <= 13)
     }
+
+    @Test fun `routeLaps splits a lap at a long off-route gap instead of bridging it`() {
+        // On-route to ~500 m, then a long OFF-route excursion (far north, perp >> tol), then rejoin
+        // on-route at ~1225 m — a ~725 m route jump. seedLaps must SPLIT (two laps), not bridge it
+        // with one fabricated fast segment.
+        val onA = (0..9).map { i -> pt(i * 0.0005, i * 55.0, i * 11.0).toDto() }
+        val off = (0..5).map { i -> TrackPoint(0.01, 0.005 + i * 0.0005, (10 + i) * 55.0, (10 + i) * 11.0).toDto() }
+        val onB = (0..8).map { i -> pt(0.011 + i * 0.0005, (16 + i) * 55.0, (16 + i) * 11.0).toDto() }
+        val track = RecordedTrack("gap", 1_000L, onA + off + onB)
+        val laps = SegmentMatcher.routeLaps(route, listOf(track), params)
+        assertEquals("the off-route gap splits into two laps, not one bridged lap", 2, laps.size)
+        // Neither lap contains the ~725 m jump (each step well under the split threshold).
+        assertTrue(laps.all { lap -> lap.zipWithNext().all { (a, b) -> b[0] - a[0] < 500.0 } })
+        assertTrue("first lap ends before the gap", laps[0].last()[0] < 700.0)
+        assertTrue("second lap starts after the gap", laps[1].first()[0] > 1000.0)
+    }
 }
