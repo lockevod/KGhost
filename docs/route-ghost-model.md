@@ -214,14 +214,15 @@ BEFORE the fold, so a glitch segment can never poison any reducer (it can't beco
 covered node re-baselines (no full segment to fold), so a covered run can start up to one 25 m step late
 — deliberate and symmetric between the live and seeded paths.
 
-**Raceable stretches (`toLiveSegments(pick)`).** A node is raceable once `count ≥ 1` (any covered
-segment) — the same run set for every pick. A contiguous run `[firstK, lastK]` becomes one `LiveSegment`
-over `[(firstK-1)·step, lastK·step]` (built from `firstK-1` so the first covered segment is included);
-runs shorter than `AGG_MIN_SEG_M` (300 m) are dropped as isolated noise. The curve is the cumulative sum
-of the pick's per-node delta: AVERAGE = `dtS`, LAST = `lastDtS`, BEST = `maxOf(minDtS, dtS /
-BEST_MAX_SPEEDUP)` — a self-anchored plausibility clamp (BEST ≤ ~1.5× the average there) so one
-glitch-fast segment can't spike the curve and there are no node-to-node jumps. `RouteGhost.build` then
-bridges the uncovered stretches (`count == 0` / dropped) with the Ghost-Pace fill into one continuous
+**Raceable stretches (`toLiveSegments(pick)`).** AVERAGE needs `count ≥ AGG_MIN_LAPS` (2) per node — a
+single noisy GPS lap is not a smoothed mean — while BEST/LAST race at `count ≥ 1` (a single recorded
+ride is exactly what they represent). A contiguous run `[firstK, lastK]` of qualifying nodes becomes one
+`LiveSegment` over `[(firstK-1)·step, lastK·step]` (built from `firstK-1` so the first covered segment
+is included); runs shorter than `AGG_MIN_SEG_M` (300 m) are dropped as isolated noise. The curve is the
+cumulative sum of the pick's per-node delta: AVERAGE = `dtS`, LAST = `lastDtS`, BEST = `maxOf(minDtS,
+dtS / BEST_MAX_SPEEDUP)` — a self-anchored plausibility clamp (BEST ≤ ~2× the average there) so a
+GPS-glitch segment can't spike the curve, while a genuine strong day (≤2× the average) passes through.
+`RouteGhost.build` then bridges the un-raceable stretches with the Ghost-Pace fill into one continuous
 whole-route ghost. No live match, no per-pick overlay.
 
 **Seeded from history (every pick races from ride 1).** On the first match of a route with no (valid)

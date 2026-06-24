@@ -29,13 +29,20 @@ const val AGG_MAX_SPEED_MS = 30.0
  *  discarded (and re-seeded) instead of mis-read. */
 const val AGG_SCHEMA_VERSION = 2
 
-/** BEST reducer plausibility cap: a node's "best" may be at most this many times faster than its
- *  own average there. Clips a single glitch-fast segment (which as a raw min would spike the curve)
- *  while leaving any realistic best (5–15 % over average) untouched. Self-anchored → no jumps. */
-const val BEST_MAX_SPEEDUP = 1.5
+/** BEST reducer plausibility cap: a node's "best" may be at most this many times faster than its own
+ *  recency-weighted average there. Clips a GPS-glitch segment (which as a raw min would spike the
+ *  curve) while leaving a genuine strong day through — 2.0 (≤2× the average) covers a real hard effort
+ *  vs an easy-ride-heavy average; a tighter 1.5 would clamp a legitimately fast lap. Self-anchored. */
+const val BEST_MAX_SPEEDUP = 2.0
 
-/** Minimum raceable run length (m). A contiguous covered run shorter than this is dropped (isolated
- *  noise). Shared by all picks (the count≥1 runs are the same); ported from SegmentMatcher.minSegmentM. */
+/** AVERAGE needs at least this many laps on a node before it is raceable — one lap is not yet a
+ *  smoothed mean (a single noisy GPS lap would lurch). BEST/LAST race at ≥1 (a single recorded ride
+ *  is exactly what they represent). */
+const val AGG_MIN_LAPS = 2
+
+/** Minimum raceable run length (m). A contiguous raceable run shorter than this is dropped (isolated
+ *  noise); ported from SegmentMatcher.minSegmentM. The run set is per-pick (AVERAGE gates at
+ *  AGG_MIN_LAPS, BEST/LAST at 1). */
 const val AGG_MIN_SEG_M = 300.0
 
 /** One grid node: the three reducers of the per-segment delta (node k-1 → k), plus the lap count. */
@@ -77,16 +84,18 @@ data class PerRouteAggregate(
      * Raceable [LiveSegment]s for [pick], from this grid: contiguous runs of covered nodes (count≥1),
      * each built from the pick's reducer (EMA / min-clamped / last). Runs shorter than [minSegM] are
      * dropped. The caller bridges the gaps (count==0 / dropped) with the Ghost-Pace fill via
-     * [RouteGhost.build]. Same run set for every pick (count is shared) — only the curve differs.
+     * [RouteGhost.build]. AVERAGE needs ≥ [AGG_MIN_LAPS] laps per node (a single noisy lap is not a
+     * smoothed mean); BEST/LAST race at ≥ 1 (a single recorded ride is what they represent).
      */
     fun toLiveSegments(pick: GhostPick, minSegM: Double = AGG_MIN_SEG_M): List<LiveSegment> {
         val out = ArrayList<LiveSegment>()
+        val minLaps = if (pick == GhostPick.AVERAGE) AGG_MIN_LAPS else 1
         // node[k].count = laps covering the INCOMING segment (k-1→k); node 0 has none, so scan k≥1.
         var k = 1
         while (k < nodes.size) {
-            if (nodes[k].count < 1) { k++; continue }
+            if (nodes[k].count < minLaps) { k++; continue }
             val firstK = k
-            while (k + 1 < nodes.size && nodes[k + 1].count >= 1) k++
+            while (k + 1 < nodes.size && nodes[k + 1].count >= minLaps) k++
             buildRunSegment(firstK - 1, k, pick, minSegM)?.let { out.add(it) }
             k++
         }

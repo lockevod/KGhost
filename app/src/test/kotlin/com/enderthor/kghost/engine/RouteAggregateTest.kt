@@ -142,11 +142,15 @@ class RouteAggregateTest {
     }
 
     // A node-pair is raceable after a single lap (count >= 1).
-    @Test fun `a pair is raceable after one lap`() {
+    @Test fun `AVERAGE needs two laps to race while BEST and LAST race after one`() {
         val key = "loop"
         val l = lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0, 75.0 to 15.0, 100.0 to 20.0)
         val one = updateAggregate(null, key, "Loop", 1000.0, l)
-        assertTrue(one.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).isNotEmpty())
+        // One lap: AVERAGE is not yet a smoothed mean (a single noisy lap would lurch) → not raceable;
+        // BEST/LAST race the one recorded ride (that single ride is exactly what they represent).
+        assertTrue(one.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).isEmpty())
+        assertTrue(one.toLiveSegments(GhostPick.BEST, minSegM = 0.0).isNotEmpty())
+        assertTrue(one.toLiveSegments(GhostPick.LAST, minSegM = 0.0).isNotEmpty())
         val two = updateAggregate(one, key, "Loop", 1000.0, l)
         val segs = two.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0)
         assertTrue(segs.isNotEmpty())
@@ -174,21 +178,26 @@ class RouteAggregateTest {
         // Hand-inject a glitch min into node 1 (count stays, ema stays ~5).
         val poisoned = agg.copy(nodes = agg.nodes.mapIndexed { i, n -> if (i == 1) n.copy(minDtS = 0.1) else n })
         val bestSeg = poisoned.toLiveSegments(GhostPick.BEST, minSegM = 0.0).first()
-        // node1 BEST delta is clamped to dtS / BEST_MAX_SPEEDUP (= 5 / 1.5 ≈ 3.33), NOT 0.1.
+        // node1 BEST delta is clamped to dtS / BEST_MAX_SPEEDUP (= 5 / 2.0 = 2.5), NOT 0.1.
         assertEquals(5.0 / BEST_MAX_SPEEDUP, bestSeg.ghost.timeAt(25.0), 1e-6)
     }
 
-    @Test fun `a node is raceable with one lap (all modes)`() {
-        val agg = updateAggregate(null, "k", "K", 1000.0, lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0))
-        // One lap → node1,node2 count==1 → raceable in every mode (minSegM=0 to bypass the length filter).
-        assertTrue(agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).isNotEmpty())
-        assertTrue(agg.toLiveSegments(GhostPick.BEST, minSegM = 0.0).isNotEmpty())
-        assertTrue(agg.toLiveSegments(GhostPick.LAST, minSegM = 0.0).isNotEmpty())
+    @Test fun `BEST keeps a genuine fast lap (clamp only bites a bigger outlier)`() {
+        // node1 averages 6 s/seg; inject a REAL fast lap min of 3.5 s (~1.7x). At BEST_MAX_SPEEDUP=2.0
+        // the floor is 6/2.0=3.0, so the genuine 3.5 passes through unchanged — a tighter 1.5 would
+        // have clamped it to 4.0 (slower than a lap the rider actually did).
+        val l = lap(0.0 to 0.0, 25.0 to 6.0, 50.0 to 12.0)
+        val agg = updateAggregate(updateAggregate(null, "k", "K", 1000.0, l), "k", "K", 1000.0, l)
+        val genuine = agg.copy(nodes = agg.nodes.mapIndexed { i, n -> if (i == 1) n.copy(minDtS = 3.5) else n })
+        val bestSeg = genuine.toLiveSegments(GhostPick.BEST, minSegM = 0.0).first()
+        assertEquals(3.5, bestSeg.ghost.timeAt(25.0), 1e-6)
     }
 
     @Test fun `runs shorter than the minimum segment length are dropped`() {
         // A ~50 m covered run (nodes 1..2) is dropped at the default 300 m min; kept at minSegM 0.
-        val agg = updateAggregate(null, "k", "K", 1000.0, lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0))
+        // Two laps so AVERAGE (>= AGG_MIN_LAPS) is raceable — the test is about length, not count.
+        val l = lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0)
+        val agg = updateAggregate(updateAggregate(null, "k", "K", 1000.0, l), "k", "K", 1000.0, l)
         assertTrue(agg.toLiveSegments(GhostPick.AVERAGE).isEmpty())          // default AGG_MIN_SEG_M
         assertTrue(agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).isNotEmpty())
     }
@@ -240,10 +249,10 @@ class RouteAggregateTest {
         )
 
     @Test fun `toLiveSegments builds one segment per contiguous covered run`() {
-        // counts 1,1,1,0,0 over nodes 0..4. The race scan considers nodes k>=1 (count >= 1 means the
-        // INCOMING segment k-1->k is covered): nodes 1,2 qualify → the run is built from firstK-1 = 0,
-        // so the segment is [0,50] with deltas dt[1],dt[2] = 5,5 → 10 s. Node 0's own count is irrelevant.
-        val agg = aggOf(100.0, 0.0 to 1, 5.0 to 1, 5.0 to 1, 15.0 to 0, 20.0 to 0)
+        // counts 2,2,2,0,0 over nodes 0..4. The race scan considers nodes k>=1 (count >= AGG_MIN_LAPS
+        // for AVERAGE means the INCOMING segment k-1->k is covered): nodes 1,2 qualify → the run is
+        // built from firstK-1 = 0, so the segment is [0,50] with deltas dt[1],dt[2] = 5,5 → 10 s.
+        val agg = aggOf(100.0, 0.0 to 2, 5.0 to 2, 5.0 to 2, 15.0 to 0, 20.0 to 0)
         val segs = agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0)
         assertEquals(1, segs.size)
         assertEquals(0.0, segs[0].routeStartM, 1e-9)
@@ -258,8 +267,8 @@ class RouteAggregateTest {
     }
 
     @Test fun `toLiveSegments races a lone covered node`() {
-        // With the count >= 1 gate a single covered node-pair (node 1) is raceable: segment [0,25].
-        val agg = aggOf(100.0, 0.0 to 1, 5.0 to 1, 5.0 to 0, 15.0 to 0, 20.0 to 0)
+        // A single covered node-pair (node 1, count >= AGG_MIN_LAPS for AVERAGE) is raceable: segment [0,25].
+        val agg = aggOf(100.0, 0.0 to 0, 5.0 to 2, 5.0 to 0, 15.0 to 0, 20.0 to 0)
         val segs = agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0)
         assertEquals(1, segs.size)
         assertEquals(0.0, segs[0].routeStartM, 1e-9)
