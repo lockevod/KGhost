@@ -1341,66 +1341,36 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Resolve the active profile once: mode/pick/target may all be per-profile overrides.
                     val eff = resolveProfile(activeConfig.value, activeProfileId)
                     val pick = eff.ghostPick
-                    val matched = if (pick == GhostPick.AVERAGE) {
-                        // AVERAGE races the per-route EMA aggregate where it is raceable, and the rider's
-                        // BEST everywhere else. Keyed on the DECODED-POLYLINE length — deterministic for a
-                        // route file, unlike state.routeDistance which can be NaN on early emissions and
-                        // drift across recalcs; an unstable length would round to a different key on a
-                        // later ride and silently orphan the aggregate. The ride-end save keys on the same
-                        // rm.path.totalM.
-                        val key = routeKeyOf(state.name, path.totalM)
-                        // load/save are blocking filesystem IO (the save fsyncs+renames); run them on
-                        // Dispatchers.IO, not this match coroutine's Default (CPU) pool. The seed COMPUTE
-                        // (routeLaps + seedAggregateFromLaps) stays on Default.
-                        var agg = withContext(Dispatchers.IO) { aggregateStore().load(key) }
-                        val justSeeded = agg == null
-                        if (agg == null) {
-                            // No (valid) aggregate yet → SEED from recorded history so AVERAGE races from ride 1 and the
-                            // expensive match becomes a one-time seed. Fold the candidate tracks' route laps, oldest first.
-                            val lapStartMs = System.currentTimeMillis()
-                            val laps = SegmentMatcher.routeLaps(path, tracks.sortedBy { it.startedAtEpoch }, SegmentMatcher.Params(maxTracks = maxTracks))
-                            val lapMs = System.currentTimeMillis() - lapStartMs
-                            if (laps.isNotEmpty()) {
-                                val seeded = seedAggregateFromLaps(key, state.name, path.totalM, laps)
-                                // saveIfAbsent (not save): if a ride-end EMA update created an aggregate for
-                                // this key after the load above, don't clobber it — and RACE that persisted
-                                // one (re-load), not the unsaved seed, so in-memory matches disk.
-                                agg = withContext(Dispatchers.IO) {
-                                    if (aggregateStore().saveIfAbsent(seeded)) seeded
-                                    else aggregateStore().load(key) ?: seeded
-                                }
-                                Timber.i("KVP avg: seeded aggregate $key from ${laps.size} history lap(s) — routeLaps ${lapMs}ms")
+                    // ALL picks (AVERAGE/BEST/LAST) race the one persisted per-route grid. Keyed on the
+                    // DECODED-POLYLINE length — deterministic for a route file, unlike state.routeDistance
+                    // which can be NaN on early emissions and drift across recalcs; an unstable length would
+                    // round to a different key on a later ride and silently orphan the aggregate. The
+                    // ride-end save keys on the same rm.path.totalM.
+                    val key = routeKeyOf(state.name, path.totalM)
+                    // load/save are blocking filesystem IO (the save fsyncs+renames); run them on
+                    // Dispatchers.IO, not this match coroutine's Default (CPU) pool. The seed COMPUTE
+                    // (routeLaps + seedAggregateFromLaps) stays on Default.
+                    var agg = withContext(Dispatchers.IO) { aggregateStore().load(key) }
+                    val justSeeded = agg == null
+                    if (agg == null) {
+                        // First match of this route → seed the grid from recorded history (one-time, O(n)).
+                        val lapStartMs = System.currentTimeMillis()
+                        val laps = SegmentMatcher.routeLaps(path, tracks.sortedBy { it.startedAtEpoch }, SegmentMatcher.Params(maxTracks = maxTracks))
+                        val lapMs = System.currentTimeMillis() - lapStartMs
+                        if (laps.isNotEmpty()) {
+                            val seeded = seedAggregateFromLaps(key, state.name, path.totalM, laps)
+                            agg = withContext(Dispatchers.IO) {
+                                if (aggregateStore().saveIfAbsent(seeded)) seeded
+                                else aggregateStore().load(key) ?: seeded
                             }
+                            Timber.i("KVP grid: seeded $key from ${laps.size} history lap(s) — routeLaps ${lapMs}ms")
                         }
-                        val avgSegs = agg?.toLiveSegments(GhostPick.AVERAGE).orEmpty()
-                        val covered = avgSegs.map { it.routeStartM to it.routeEndM }
-                        // On the SEED ride, SKIP the BEST match. The seed already covers what history covers,
-                        // so BEST would scan every candidate at full resolution only to skip it all (covered)
-                        // — minutes of pure waste before the ghost engages (matchMs ~258 s observed). Race the
-                        // seeded average alone now; any uncovered stretch falls back to Ghost-Pace this one
-                        // ride, and BEST refines on LATER rides (the aggregate then loads instantly, so its
-                        // BEST pass is cheap). Still run BEST if the seed yielded nothing raceable, so the
-                        // ride is never ghostless.
-                        val bestSegs = if (justSeeded && avgSegs.isNotEmpty()) {
-                            emptyList()
-                        } else {
-                            SegmentMatcher.match(
-                                path, tracks, GhostPick.BEST, SegmentMatcher.Params(maxTracks = maxTracks),
-                                coveredRanges = covered,
-                            )
-                        }
-                        if (avgSegs.isEmpty()) {
-                            Timber.i("KVP avg: no raceable aggregate for '${state.name}' yet — racing BEST while it warms up")
-                        } else if (justSeeded) {
-                            Timber.i("KVP avg: seeded — racing the aggregate on ${avgSegs.size} stretch(es); BEST deferred to the next ride (skipped the cold full-scan)")
-                        } else {
-                            Timber.i("KVP avg: racing the aggregate on ${avgSegs.size} stretch(es), BEST on the rest (slice skipped on covered)")
-                        }
-                        // The aggregate wins where it is raceable; BEST pieces are TRIMMED around it (not
-                        // dropped whole) so partial overlap can't discard a long recorded stretch.
-                        RouteGhost.overlay(avgSegs, bestSegs)
+                    }
+                    val matched = agg?.toLiveSegments(pick).orEmpty()
+                    if (matched.isEmpty()) {
+                        Timber.i("KVP grid: no raceable $pick for '${state.name}' yet — Ghost-Pace until it warms up")
                     } else {
-                        SegmentMatcher.match(path, tracks, pick, SegmentMatcher.Params(maxTracks = maxTracks))
+                        Timber.i("KVP grid: racing $pick on ${matched.size} stretch(es)${if (justSeeded) " (just seeded)" else ""}")
                     }
                     // Build the ONE continuous whole-route ghost (recorded stretches + VP-pace fills).
                     // Fill pace = the always-present VP target (default 12 km/h), so the ghost always

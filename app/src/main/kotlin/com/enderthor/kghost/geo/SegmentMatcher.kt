@@ -114,6 +114,7 @@ object SegmentMatcher {
     /** Production default: see [SeedStrategy]. */
     @Volatile internal var seedStrategy: SeedStrategy = SeedStrategy.CAN_START
 
+    @Deprecated("Race path now uses the persisted RouteAggregate grid for all picks (see RouteAggregate.toLiveSegments). Unused; delete with extractTrackSlice/coveredRunsToIntervals once grid racing is validated on-device.")
     fun match(
         route: PolylinePath,
         tracks: List<RecordedTrack>,
