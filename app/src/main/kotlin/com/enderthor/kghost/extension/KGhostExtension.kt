@@ -243,6 +243,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          * pick at an exact self-intersection still needs a heading/bearing check — tracked separately.)
          */
         private const val BOOTSTRAP_SLACK_M = 30.0
+        /** Fallback timeout (ms): if GPS has not provided an on-route fix within this window after the
+         *  first on-route position is seen, accept the Karoo map-match position for the D0 bootstrap.
+         *  Chosen well below [GPS_ALERT_S] so the race can still start in poor GPS conditions while
+         *  avoiding the common case where GPS locks quickly (a few seconds) and delivers the correct D0. */
+        private const val D0_GPS_FALLBACK_MS = 30_000L
 
         /**
          * Route projector (GPS → polyline). The Karoo's own map-match (`routeLen − remaining`) can lock
@@ -477,6 +482,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     @Volatile private var gpsAlertFired: Boolean = false
     // Previous tick's moving state (route mode) — drives the stationary→moving re-stamp edge.
     @Volatile private var wasMoving: Boolean = false
+    // Wall-clock (ms) of the first tick where an on-route position was available — used to time
+    // out the GPS-required D0 bootstrap: after D0_GPS_FALLBACK_MS without a GPS fix, the Karoo
+    // position is accepted so the race can still start in poor GPS conditions.
+    @Volatile private var onRouteSinceMs: Long = 0L
     // First-fix D0 confirmation candidate (position + odometer at that position).
     @Volatile private var d0CandPos: Double? = null
     @Volatile private var d0CandOdo: Double? = null
@@ -504,6 +513,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         lastBufferedRouteDist = Double.NEGATIVE_INFINITY
         gpsAlertFired = false
         wasMoving = false
+        onRouteSinceMs = 0L
         d0CandPos = null
         d0CandOdo = null
         prevSegStartM = null
@@ -1849,6 +1859,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 firstMoveElapsedS = null
                                 lastGoodRouteDistM = null
                                 distMAtLastGoodM = null
+                                onRouteSinceMs = 0L
                                 d0CandPos = null
                                 d0CandOdo = null
                                 rideDistAtRouteStartM = distM
@@ -2174,14 +2185,20 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // permanently and make the ghost appear to start far ahead of the rider. Wait for the
                         // GPS projector to supply a reliable on-route position before confirming D0.
                         if (lastGoodRouteDistM == null && routeStartDistM == null) {
-                            if (!routeDistFromGps) {
-                                val nowMs = System.currentTimeMillis()
+                            val nowMs = System.currentTimeMillis()
+                            if (onRouteSinceMs == 0L) onRouteSinceMs = nowMs
+                            val gpsTimedOut = nowMs - onRouteSinceMs >= D0_GPS_FALLBACK_MS
+                            if (!routeDistFromGps && !gpsTimedOut) {
                                 if (nowMs - lastDiagLogMs >= diagLogMs) {
                                     lastDiagLogMs = nowMs
-                                    Timber.d("KVP tick route: Karoo-only position (${"%.0f".format(routeDist)}m) — D0 bootstrap waiting for GPS")
+                                    val waitedS = (nowMs - onRouteSinceMs) / 1000
+                                    Timber.d("KVP tick route: Karoo-only position (${"%.0f".format(routeDist)}m) — D0 bootstrap waiting for GPS (${waitedS}s / ${D0_GPS_FALLBACK_MS / 1000}s)")
                                 }
                                 holdGap()
                                 return@runCatching
+                            }
+                            if (!routeDistFromGps) {
+                                Timber.w("KVP tick route: GPS fallback for D0 bootstrap after ${D0_GPS_FALLBACK_MS / 1000}s — using Karoo position ${"%.0f".format(routeDist)}m")
                             }
                             val candPos = d0CandPos
                             val candOdo = d0CandOdo
