@@ -389,17 +389,16 @@ class SegmentMatcherTest {
         assertTrue(lap.first()[1] <= lap.last()[1]) // time non-decreasing
     }
 
-    @Test fun `routeLaps decimates a dense track to ~50 m for the seed`() {
-        // A DENSE track: ~11 m between points (distanceM = i*11) over the route's middle ~1 km.
-        val dense = RecordedTrack(
-            id = "dense", startedAtEpoch = 1_000L,
-            points = (0..90).map { i -> pt(0.004 + i * 0.0001, i * 11.0, i * 2.2).toDto() },
-        )
-        val lap = SegmentMatcher.routeLaps(route, listOf(dense), params).first()
-        // 91 raw points (~11 m apart), but the seed keeps ~one per SEED_DECIMATE_M (30 m) → the average
-        // routeDist gap is ~30 m, well above the raw ~11 m, proving decimation happened.
-        val avgGapM = (lap.last()[0] - lap.first()[0]) / (lap.size - 1)
-        assertTrue("decimated to ~30 m spacing (avg gap ${avgGapM}m, ${lap.size} pts)", avgGapM >= 22.0)
-        assertTrue("still ascending in routeDist", lap.zipWithNext().all { (a, b) -> b[0] >= a[0] })
+    @Test fun `routeLaps (single forward pass) keeps on-route advancing points, drops a backward pass`() {
+        // Forward over the middle then an out-and-back RETURN (route-distance going down): the return
+        // pass must NOT be appended (it isn't a forward lap), so the lap stays strictly ascending.
+        val fwd = (0..12).map { i -> pt(0.004 + i * 0.0005, i * 55.0, i * 11.0) }
+        val back = (1..12).map { i -> pt(0.004 + (12 - i) * 0.0005, (12 + i) * 55.0, (12 + i) * 11.0) }
+        val track = RecordedTrack("oab", 1_000L, (fwd + back).map { it.toDto() })
+        val lap = SegmentMatcher.routeLaps(route, listOf(track), params).first()
+        assertTrue("strictly ascending in routeDist (no backward return pass)", lap.zipWithNext().all { (a, b) -> b[0] > a[0] })
+        assertTrue("time non-decreasing", lap.zipWithNext().all { (a, b) -> b[1] >= a[1] })
+        // Only the forward pass contributes (~13 points), not the 12 backward ones.
+        assertTrue("backward pass dropped (${lap.size} pts)", lap.size <= 13)
     }
 }

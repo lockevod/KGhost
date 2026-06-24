@@ -1357,7 +1357,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         if (agg == null) {
                             // No (valid) aggregate yet → SEED from recorded history so AVERAGE races from ride 1 and the
                             // expensive match becomes a one-time seed. Fold the candidate tracks' route laps, oldest first.
+                            val lapStartMs = System.currentTimeMillis()
                             val laps = SegmentMatcher.routeLaps(path, tracks.sortedBy { it.startedAtEpoch }, SegmentMatcher.Params(maxTracks = maxTracks))
+                            val lapMs = System.currentTimeMillis() - lapStartMs
                             if (laps.isNotEmpty()) {
                                 val seeded = seedAggregateFromLaps(key, state.name, path.totalM, laps)
                                 // saveIfAbsent (not save): if a ride-end EMA update created an aggregate for
@@ -1367,7 +1369,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     if (aggregateStore().saveIfAbsent(seeded)) seeded
                                     else aggregateStore().load(key) ?: seeded
                                 }
-                                Timber.i("KVP avg: seeded aggregate $key from ${laps.size} history lap(s)")
+                                Timber.i("KVP avg: seeded aggregate $key from ${laps.size} history lap(s) — routeLaps ${lapMs}ms")
                             }
                         }
                         val avgSegs = agg?.toLiveSegments().orEmpty()

@@ -230,14 +230,16 @@ object SegmentMatcher {
     }
 
     /**
-     * Per-track route-distance laps for the AVERAGE aggregate seed: for each candidate track, its
-     * `(routeDistM, trackTimeS)` series over each route interval it covers (one DoubleArray[2] per kept
-     * point, ascending in routeDist). Reuses the same coverage + slice extraction as [match]; the seed
-     * folds each returned lap via updateAggregate (origin-invariant, so the track's start point is moot).
+     * Per-track route-distance laps for the AVERAGE aggregate seed: for each candidate track, a
+     * `(routeDistM, elapsedS)` series ascending in routeDist (one point per kept track point, time
+     * re-based to 0 at the lap start). The seed folds each lap via updateAggregate (origin-invariant).
      *
-     * Path A: the routeM of each kept point is the EXACT value [extractTrackSlice] computed for the
-     * match path — the slice returns `(TrackPoint, routeM)` pairs and this just re-bases time to 0 at
-     * the slice start, so the lap's routeDist series is identical to what match() races on.
+     * Uses a CHEAP single forward pass ([seedLap]) — O(track points) per track — NOT the O(n²)
+     * best-chain-per-seed search [match] uses. Recorded tracks are already ~20 m-spaced, so decimating
+     * barely cuts the O(n²) (a 40 km × 10-track seed ran ~84 s); the win is dropping the n² entirely.
+     * The seed is averaged over many laps onto a 25 m grid, so the robustness of trying every seed
+     * (out-and-back disambiguation, longest-span selection) isn't worth the one-time cold-start cost.
+     * match()'s raced BEST ghost still uses the full [extractTrackSlice].
      */
     fun routeLaps(
         route: PolylinePath,
@@ -245,9 +247,8 @@ object SegmentMatcher {
         params: Params = Params(),
     ): List<List<DoubleArray>> {
         val out = ArrayList<List<DoubleArray>>()
-        // Cap to the most-recent maxTracks (backstop), then ALWAYS fold oldest-first so the seed EMA
-        // weights recent laps most — enforced regardless of the caller's ordering (the contract is
-        // oldest-first; the production caller already pre-caps + sorts, this just makes it robust).
+        // Cap to the most-recent maxTracks (backstop), then fold oldest-first so the seed EMA weights
+        // recent laps most — enforced regardless of caller order (the contract is oldest-first).
         val capped = if (tracks.size > params.maxTracks) {
             tracks.sortedByDescending { it.startedAtEpoch }.take(params.maxTracks)
         } else {
@@ -255,65 +256,54 @@ object SegmentMatcher {
         }
         val selected = capped.sortedBy { it.startedAtEpoch }
         for (track in selected) {
-            // Decimate to ~SEED_DECIMATE_M for the SEED only. The aggregate is a 25 m grid +
-            // interpolated + EMA-averaged over many laps, so coarse per-lap input barely moves it,
-            // while halving the point count cuts this O(n²) slice extraction ~quadratically (the
-            // cold-seed cost). The live BEST match keeps FULL resolution — only routeLaps decimates.
-            val modelPoints = decimateByDistance(track.points.map { it.toModel() }, SEED_DECIMATE_M)
+            val modelPoints = track.points.map { it.toModel() }
             if (modelPoints.size < 2) continue
-            val trackLL = modelPoints.map { LatLng(it.lat, it.lng) }
-            val trackPath = PolylinePath(trackLL)
-            val intervals = coveredRunsToIntervals(route, trackPath, params)
-            for (interval in intervals) {
-                val slice = extractTrackSlice(route, modelPoints, trackLL, interval, params.toleranceM)
-                    ?: continue
-                // time = the track point's own timeS, re-based to 0 at the slice start so the lap
-                // series is a clean (routeDist, elapsed) pair.
-                // NOTE: the first sample's routeM is the slice's first track point, which usually sits a
-                // few metres PAST the grid node at the interval start. updateAggregate can only fold a
-                // FULL grid segment (both endpoints inside the lap), so the first (partial) grid step of
-                // a covered run is not raceable until a lap covers it whole — the run effectively starts
-                // at most one 25 m step late. This is intentional: extrapolating a time back to the grid
-                // node would fabricate riding over un-ridden metres. It is symmetric with the LIVE lap
-                // (lapAggBuffer also starts at a continuous routeDist), so seeded and live agree.
-                val t0 = slice.first().first.timeS
-                val lap = slice.map { (tp, routeM) -> doubleArrayOf(routeM, tp.timeS - t0) }
-                if (lap.size >= 2) out.add(lap)
-            }
+            seedLap(route, modelPoints, params.toleranceM)?.let { out.add(it) }
         }
         return out
     }
 
     /**
-     * Seed decimation step (metres of track odometer). Tracks are recorded at ~10–20 m; for the
-     * history SEED we keep one point per ~30 m, which barely affects the 25 m-grid EMA aggregate but
-     * cuts the per-track O(n²) slice extraction on the one-time cold seed.
+     * One forward pass over a track for the seed: project each point onto the route (windowed around
+     * the previous kept routeDist, allocation-free), keep only points that are ON the route
+     * (`perp < tol`) AND advance in route-distance AND don't move time backward. Emits
+     * `(routeDistM, timeS − t0)`. O(points). null if fewer than 2 points are kept.
      *
-     * Why 30 and not 50: coverage detection projects route samples onto the decimated trackPath's
-     * CHORDS, which bow off a curve by sagitta ≈ step²/(8·R). At 50 m a hairpin of R≈9 m bows ~35 m =
-     * the coverage tolerance → the apex stretch could silently drop from the SEED (self-heals on the
-     * first live lap, but degrades cold completeness on switchbacks/MTB). At 30 m that worst case is
-     * ~12 m, comfortably inside the 35 m budget, while still cutting the point count enough to matter.
+     * vs [extractTrackSlice]: no best-chain-per-seed search, so a track ridden BACKWARD or an
+     * out-and-back's return pass yields no forward lap (correct — it isn't one), and a loop ridden
+     * twice in one recording contributes only its first pass (the second runs backward in routeM and
+     * is rejected by the advance check). For an averaged seed that's the desired, cheap behaviour. The
+     * first (partial) grid step is left for updateAggregate's re-baseline (same start-quantization as
+     * the live lap, so seeded and live agree). Monotonic in both routeDist and time so the fold's
+     * guards are satisfied.
      */
-    private const val SEED_DECIMATE_M = 30.0
-
-    /**
-     * Keeps one point per [stepM] of the track's own odometer (`distanceM`), endpoints always kept.
-     * Used only by [routeLaps] (the seed) — see [SEED_DECIMATE_M].
-     */
-    private fun decimateByDistance(points: List<TrackPoint>, stepM: Double): List<TrackPoint> {
-        if (points.size <= 2) return points
-        val out = ArrayList<TrackPoint>(points.size / 2 + 2)
-        out.add(points.first())
-        var lastKeptDist = points.first().distanceM
-        for (i in 1 until points.size - 1) {
-            if (points[i].distanceM - lastKeptDist >= stepM) {
-                out.add(points[i])
-                lastKeptDist = points[i].distanceM
+    private fun seedLap(route: PolylinePath, points: List<TrackPoint>, toleranceM: Double): List<DoubleArray>? {
+        val lap = ArrayList<DoubleArray>(points.size)
+        val projOut = DoubleArray(2)
+        var prevRouteM = Double.NaN
+        var t0 = Double.NaN
+        for (tp in points) {
+            val along: Double
+            val perp: Double
+            if (prevRouteM.isNaN() ||
+                !route.nearestProjectionNearInto(tp.lat, tp.lng, prevRouteM, sliceBackWindowM, sliceFwdWindowM, projOut)
+            ) {
+                val p = route.nearestProjection(LatLng(tp.lat, tp.lng))
+                along = p.distanceAlongM
+                perp = p.perpDistM
+            } else {
+                along = projOut[0]
+                perp = projOut[1]
             }
+            if (perp >= toleranceM) continue // off-route blip → skip, keep scanning
+            if (!prevRouteM.isNaN() && along <= prevRouteM + routeAdvanceEpsilonM) continue // not advancing
+            if (t0.isNaN()) t0 = tp.timeS
+            val elapsed = tp.timeS - t0
+            if (lap.isNotEmpty() && elapsed < lap.last()[1]) continue // time went backward (glitch) → drop
+            lap.add(doubleArrayOf(along, elapsed))
+            prevRouteM = along
         }
-        out.add(points.last())
-        return out
+        return if (lap.size >= 2) lap else null
     }
 
     /**
