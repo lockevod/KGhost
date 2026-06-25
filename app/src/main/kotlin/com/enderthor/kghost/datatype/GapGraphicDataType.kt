@@ -166,7 +166,7 @@ class GapGraphicDataType(
             // seed has already completed synchronously before this launch, so there is no concurrent
             // access to the renderer.
             try {
-                // Wall-clock (ms) of the last frame we actually emitted. Makes the heartbeat
+                // Monotonic (elapsedRealtime ms) of the last frame we actually emitted. Makes the heartbeat
                 // IDLE-ONLY: it re-emits only when no change frame went out in the last HEARTBEAT_MS,
                 // so it no longer collides with the ~1 Hz change emits (which the host would drop with
                 // "ignoring updateView, too soon") while still guaranteeing a post-throttle frame when

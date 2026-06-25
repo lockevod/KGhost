@@ -28,28 +28,30 @@ object MapGlide {
     const val GLIDE_MS = 800.0
 
     /**
+     * All timestamps are MONOTONIC (SystemClock.elapsedRealtime) intervals, NOT wall-clock epochs —
+     * only their differences and ordering are used, so a Karoo wall-clock correction can't disturb them.
      * @param prevDistM  ghost route distance published one tick ago (NaN if only one sample so far).
-     * @param prevWallMs wall-clock of that previous publish.
+     * @param prevMonoMs monotonic stamp of that previous publish.
      * @param curDistM   most recently published ghost route distance (NaN ⇒ nothing to show).
-     * @param curWallMs  wall-clock of the most recent publish.
-     * @param nowMs      current wall-clock.
+     * @param curMonoMs  monotonic stamp of the most recent publish.
+     * @param nowMs      current monotonic stamp.
      * @return the interpolated ghost route distance to draw, in [prevDistM, curDistM]; never ahead
      *         of [curDistM]. NaN when there is nothing trustworthy to show.
      */
     fun interpDistM(
         prevDistM: Double,
-        prevWallMs: Long,
+        prevMonoMs: Long,
         curDistM: Double,
-        curWallMs: Long,
+        curMonoMs: Long,
         nowMs: Long,
     ): Double {
         if (!curDistM.isFinite()) return Double.NaN
         // Only one sample (or a degenerate/zero interval): show the latest, no glide to interpolate.
-        if (!prevDistM.isFinite() || curWallMs <= prevWallMs) return curDistM
+        if (!prevDistM.isFinite() || curMonoMs <= prevMonoMs) return curDistM
         // Glide over a fixed short window after the sample landed, then hold at cur (frac clamps to 1).
         // Normalising by GLIDE_MS rather than the full inter-tick span is the whole fix: the marker
         // reaches cur quickly and sits there, so it no longer trails ~a full tick behind the field.
-        val frac = ((nowMs - curWallMs).toDouble() / GLIDE_MS).coerceIn(0.0, 1.0)
+        val frac = ((nowMs - curMonoMs).toDouble() / GLIDE_MS).coerceIn(0.0, 1.0)
         return prevDistM + (curDistM - prevDistM) * frac
     }
 }

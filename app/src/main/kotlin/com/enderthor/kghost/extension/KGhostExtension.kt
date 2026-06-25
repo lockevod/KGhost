@@ -408,7 +408,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private data class LapAggTarget(val key: String, val name: String, val lenM: Double)
     @Volatile private var lapAggTarget: LapAggTarget? = null
 
-    /** An immutable GPS fix snapshot (lat, lng, the wall-clock ms it was taken, and the rider's heading
+    /** An immutable GPS fix snapshot (lat, lng, the MONOTONIC ms — SystemClock.elapsedRealtime, for
+     *  freshness only, never an epoch — it was taken at, and the rider's heading
      *  in degrees [0,360) or NaN if the fix carried none — used to disambiguate the D0 bootstrap pass). */
     private data class GpsFix(val lat: Double, val lng: Double, val ms: Long, val headingDeg: Double)
     // Latest TRUSTED GPS fix from the location stream, as ONE immutable object. Read by the recorder
@@ -427,7 +428,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private var lastDistToDestM: Double = Double.NaN
     @Volatile
     private var lastOnRoute: Boolean = false
-    // Wall-clock (ms) of the last time the route-remaining VALUE actually changed (not every emission).
+    // Monotonic (SystemClock.elapsedRealtime ms) of the last time the route-remaining VALUE actually
+    // changed (not every emission). Interval-only — compare ONLY against elapsedRealtime, never an epoch.
     // Drives route-position staleness: while moving, if remaining stops changing the route fix is lost
     // (independent of the whole-ride odometer). 0 until the first change.
     @Volatile
@@ -487,7 +489,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     @Volatile private var d0CandOdo: Double? = null
     // Start-distance of the recorded stretch the rider was on last tick — edge-triggers the segment alert.
     @Volatile private var prevSegStartM: Double? = null
-    // Wall-clock (ms) when remaining first fell below ROUTE_END_EPS_M (debounces the finish); 0 above.
+    // Monotonic (elapsedRealtime ms) when remaining first fell below ROUTE_END_EPS_M (debounces the
+    // finish); 0 above. Interval-only — compare ONLY against elapsedRealtime, never an epoch.
     @Volatile private var routeEndSinceMs: Long = 0L
     // The final gap captured once at the route end, re-published so it stops inflating; null until finish.
     @Volatile private var finishedGap: GapState? = null
@@ -559,13 +562,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
      * Immutable snapshot the 1 Hz tick hands to the ~5 Hz map loop. [ghostDistM] is the EXACT ghost
      * route distance the tick published into the gap field this tick (so map and field are driven by
      * the same value); the loop glides BETWEEN consecutive snapshots via [MapGlide] (lag, never lead)
-     * keyed on [wallMs]. No clock/curve here any more — the loop interpolates published values, it does
+     * keyed on [monoMs]. No clock/curve here any more — the loop interpolates published values, it does
      * not re-derive the ghost, so it can never run ahead of the field.
      */
     private data class MapGhostState(
         val ghostDistM: Double,
         val path: PolylinePath,
-        val wallMs: Long,
+        val monoMs: Long,   // SystemClock.elapsedRealtime — interval-only (glide), never an epoch
     )
 
     // Route mode state. When non-null AND [RouteMode.segments] is non-empty the tick runs the
@@ -650,7 +653,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private var mapEmitter: Emitter<MapEffect>? = null
     @Volatile
     private var lastGhostMarker: GhostMarker? = null
-    // Wall-clock (ms) of the last ShowSymbols we emitted. Drives the GHOST_HEARTBEAT_MS re-assert so a
+    // Monotonic (elapsedRealtime ms) of the last ShowSymbols we emitted. Drives the GHOST_HEARTBEAT_MS re-assert so a
     // host map redraw (zoom/pan) can't permanently drop a stationary ghost. Guarded by mapLock.
     private var lastGhostEmitMs: Long = 0L
     // Icon resource of the currently shown ghost symbol (0 = nothing shown). Re-emitting the same
@@ -1127,13 +1130,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun startMapLoop() {
         if (mapLoopJob?.isActive == true) return
         mapLoopJob = scope.launch(Dispatchers.Default) {
-            // The two most recent published ghost distances + their wall-clocks. [MapGlide] interpolates
+            // The two most recent published ghost distances + their monotonic stamps. [MapGlide] interpolates
             // strictly between them so the marker trails the field's published ghost by ≤ one tick and
             // never leads it. Reset on hide so a re-show doesn't glide across the blank.
             var prevDistM = Double.NaN
-            var prevWallMs = 0L
+            var prevMonoMs = 0L
             var curDistM = Double.NaN
-            var curWallMs = 0L
+            var curMonoMs = 0L
             var lastMapLogMs = 0L
             val mapLogMs = 2500L
             while (isActive) {
@@ -1151,15 +1154,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     continue
                 }
                 // A new tick published a distance? Shift current → previous so we glide from the value
-                // the field last showed to the value it shows now. Keyed on wallMs (monotonic per tick).
-                if (s2.wallMs != curWallMs) {
+                // the field last showed to the value it shows now. Keyed on monoMs (monotonic per tick).
+                if (s2.monoMs != curMonoMs) {
                     prevDistM = curDistM
-                    prevWallMs = curWallMs
+                    prevMonoMs = curMonoMs
                     curDistM = s2.ghostDistM
-                    curWallMs = s2.wallMs
+                    curMonoMs = s2.monoMs
                 }
                 val nowMs = SystemClock.elapsedRealtime()
-                val ghostDistM = MapGlide.interpDistM(prevDistM, prevWallMs, curDistM, curWallMs, nowMs)
+                val ghostDistM = MapGlide.interpDistM(prevDistM, prevMonoMs, curDistM, curMonoMs, nowMs)
                 val marker = GhostMapPresenter.marker(ghostDistM, s2.path, fresh = true)
                 publishGhostMarker(marker)
                 // Instrumentation (throttled): the MAP side the per-tick "KVP tick route" never captured.
