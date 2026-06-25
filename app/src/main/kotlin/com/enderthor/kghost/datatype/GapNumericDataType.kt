@@ -111,7 +111,7 @@ class GapNumericDataType(
 
         val viewJob = scope.launch {
             try {
-                // Wall-clock (ms) of the last frame we actually emitted. Makes the heartbeat
+                // Monotonic (elapsedRealtime ms) of the last frame we actually emitted. Makes the heartbeat
                 // IDLE-ONLY: it re-emits only when no change frame went out in the last HEARTBEAT_MS,
                 // so it no longer collides with the ~1 Hz change emits (which the host would drop with
                 // "ignoring updateView, too soon") while still guaranteeing a post-throttle frame when
@@ -146,9 +146,10 @@ class GapNumericDataType(
                 }
                 merge(changes, heartbeat)
                     .collect { (liveState, gapDisplay, isHeartbeat) ->
-                        val now = System.currentTimeMillis()
+                        val now = android.os.SystemClock.elapsedRealtime()
                         // Drop the periodic heartbeat if a real frame already went out recently — this
-                        // is what removes the every-3 s "too soon" collisions during a ride.
+                        // is what removes the every-3 s "too soon" collisions during a ride. Monotonic
+                        // clock so a Karoo wall-clock jump-back can't wedge the heartbeat off forever.
                         if (isHeartbeat && now - lastEmitMs < HEARTBEAT_MS) return@collect
                         // In preview (profile editor gallery) render a synthetic demo state so the
                         // field shows a meaningful sample instead of the inactive `---` placeholder.
