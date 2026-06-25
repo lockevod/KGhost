@@ -1,5 +1,6 @@
 package com.enderthor.kghost.extension
 
+import android.os.SystemClock
 import com.enderthor.kghost.BuildConfig
 import com.enderthor.kghost.FileLogTree
 import com.enderthor.kghost.R
@@ -1055,7 +1056,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 if (next != null) Timber.d("KVP ghost: no mapEmitter, skip")
                 return
             }
-            val now = System.currentTimeMillis()
+            val now = SystemClock.elapsedRealtime()
             // Resolve the icon for the desired marker up front so an icon/size change can both force a
             // re-emit AND trigger a Hide+Show (a bare same-id re-emit only moves, doesn't swap drawable).
             val cfg = activeConfig.value
@@ -1157,7 +1158,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     curDistM = s2.ghostDistM
                     curWallMs = s2.wallMs
                 }
-                val nowMs = System.currentTimeMillis()
+                val nowMs = SystemClock.elapsedRealtime()
                 val ghostDistM = MapGlide.interpDistM(prevDistM, prevWallMs, curDistM, curWallMs, nowMs)
                 val marker = GhostMapPresenter.marker(ghostDistM, s2.path, fresh = true)
                 publishGhostMarker(marker)
@@ -1301,7 +1302,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // than a frame. Default is fine; loadTopCandidates does file IO but never overlaps a save
             // in practice (save runs at ride-end, matching at route-load).
             matchJob = scope.launch(Dispatchers.Default) {
-                val matchStartMs = System.currentTimeMillis()
+                val matchStartMs = SystemClock.elapsedRealtime()
                 runCatching {
                     val path = PolylinePath(Polyline.decode(routePolyline))
                     val bbox = BBox.around(path.points) ?: run {
@@ -1332,7 +1333,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Timing: loadTopCandidates does file IO + parse; the match below is O(track points).
                     // A multi-minute total here = the route ghost can't engage until it finishes (the
                     // rider sees no map ghost meanwhile). Surfaces whether the delay is load vs match.
-                    Timber.i("KVP match: loaded ${tracks.size} candidate track(s) in ${System.currentTimeMillis() - matchStartMs}ms (routeLen=${"%.0f".format(path.totalM)})")
+                    Timber.i("KVP match: loaded ${tracks.size} candidate track(s) in ${SystemClock.elapsedRealtime() - matchStartMs}ms (routeLen=${"%.0f".format(path.totalM)})")
                     // A superseding route should cancel this stale match promptly: bail before the
                     // expensive match if we've been cancelled.
                     currentCoroutineContext().ensureActive()
@@ -1352,9 +1353,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     val justSeeded = agg == null
                     if (agg == null) {
                         // First match of this route → seed the grid from recorded history (one-time, O(n)).
-                        val lapStartMs = System.currentTimeMillis()
+                        val lapStartMs = SystemClock.elapsedRealtime()
                         val laps = SegmentMatcher.routeLaps(path, tracks.sortedBy { it.startedAtEpoch }, SegmentMatcher.Params(maxTracks = maxTracks))
-                        val lapMs = System.currentTimeMillis() - lapStartMs
+                        val lapMs = SystemClock.elapsedRealtime() - lapStartMs
                         if (laps.isNotEmpty()) {
                             val seeded = seedAggregateFromLaps(key, state.name, path.totalM, laps)
                             agg = withContext(Dispatchers.IO) {
@@ -1394,7 +1395,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             "route mode ON: ${matched.size} segment(s), routeGhost=${routeGhost != null} " +
                                 "on '${state.name}' karooLen=${"%.0f".format(state.routeDistance)} " +
                                 "polyLen=${"%.0f".format(path.totalM)} delta=${"%.0f".format(state.routeDistance - path.totalM)} " +
-                                "matchMs=${System.currentTimeMillis() - matchStartMs}",
+                                "matchMs=${SystemClock.elapsedRealtime() - matchStartMs}",
                         )
                     }
                 }.onFailure { e ->
@@ -1543,9 +1544,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // LOC_BEARING (deg, 0..360) when present — used only to disambiguate the D0 bootstrap
                     // pass on a self-overlapping route. NaN when the fix carries no heading.
                     val hdg = dp.values[DataType.Field.LOC_BEARING]?.takeIf { it.isFinite() } ?: Double.NaN
-                    lastFix = GpsFix(lat, lng, System.currentTimeMillis(), hdg)
+                    lastFix = GpsFix(lat, lng, SystemClock.elapsedRealtime(), hdg)
                 }
-                val nowMs = System.currentTimeMillis()
+                val nowMs = SystemClock.elapsedRealtime()
                 if (trusted != lastLocTrusted || nowMs - lastLocLogMs >= 5_000L) {
                     lastLocTrusted = trusted
                     lastLocLogMs = nowMs
@@ -1569,7 +1570,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 // keeps it fresh. A stationary rider's unchanged remaining is handled by the movement
                 // gate at the read site, not here.
                 if (newRemaining.isFinite() && newRemaining != lastDistToDestM) {
-                    lastDestChangeMs = System.currentTimeMillis()
+                    lastDestChangeMs = SystemClock.elapsedRealtime()
                 }
                 lastDistToDestM = newRemaining
                 lastOnRoute = dp?.values?.get(DataType.Field.ON_ROUTE) == 1.0
@@ -1598,6 +1599,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // reset by resetRideAnchor() at a genuine ride end, and on a genuine route change inside the tick.
         // Throttle for the per-tick route-mode diagnostic log (≤ ~once per DIAG_LOG_MS); local — a reset on
         // reconnect just costs one extra diag line.
+        // Throttle stamp on the MONOTONIC clock (SystemClock.elapsedRealtime), NOT wall-clock: the
+        // Karoo serves a cached pre-GPS time and corrects it mid-ride, which can move the wall clock
+        // BACKWARD by days/weeks. A throttle on wall-clock (now - last >= interval) then goes permanently
+        // negative and silences every diag line for the rest of the ride — exactly when (cold start /
+        // GPS settle) the logs matter most. elapsedRealtime never goes backward.
         var lastDiagLogMs = 0L
         val diagLogMs = 2500L
 
@@ -1803,7 +1809,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // vs a route with no buildable ghost curve). Same throttle as the route snapshot
                     // (~2.5 s). [gap] is null when the field is blanked (sustained GPS loss).
                     fun logVp(reason: String, gap: GapState?) {
-                        val nowMs = System.currentTimeMillis()
+                        val nowMs = SystemClock.elapsedRealtime()
                         if (nowMs - lastDiagLogMs >= diagLogMs) {
                             lastDiagLogMs = nowMs
                             Timber.d(
@@ -2020,11 +2026,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 mapGhostState = if (cfg.showGhostOnMap) {
                                     // Same published ghost distance the field uses (rejoin: estimated rider
                                     // position, but the ghost is whole-route time-based, so it glides on).
-                                    MapGhostState(gap.ghostProgressM, rm.path, System.currentTimeMillis())
+                                    MapGhostState(gap.ghostProgressM, rm.path, SystemClock.elapsedRealtime())
                                 } else {
                                     null
                                 }
-                                val nowMs = System.currentTimeMillis()
+                                val nowMs = SystemClock.elapsedRealtime()
                                 if (nowMs - lastDiagLogMs >= diagLogMs) {
                                     lastDiagLogMs = nowMs
                                     Timber.d("KVP tick route: off-route/rejoin (onRoute=$lastOnRoute rejoin=$lastRejoinActive) — ${if (estimatedRoutePos != null) "rejoin-estimated routeDist=${"%.0f".format(estimatedRoutePos)}" else "frozen routeDist=${"%.0f".format(frozenPos)}"} gapT=${"%.0f".format(gap.gapTimeS)}s (ghost kept)")
@@ -2033,7 +2039,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             }
                             // No anchor / no good position yet: hold --- and hide the ghost; leave D0/anchor
                             // null so they're set from the FIRST real on-route fix — not a fabricated start.
-                            val nowMs = System.currentTimeMillis()
+                            val nowMs = SystemClock.elapsedRealtime()
                             if (nowMs - lastDiagLogMs >= diagLogMs) {
                                 lastDiagLogMs = nowMs
                                 Timber.d("KVP tick route: no on-route position yet (onRoute=$lastOnRoute rejoin=$lastRejoinActive remaining=${remainingM.takeIf { it.isFinite() }?.let { "%.0f".format(it) } ?: "null"}) — ghost/gap held")
@@ -2065,7 +2071,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             // position is unused (the race-not-started branch holds ---), so a per-tick
                             // polyline scan while parked at the start line is pure battery waste.
                             if (firstMoveElapsedS == null || fix == null ||
-                                System.currentTimeMillis() - fix.ms > GPS_FIX_FRESH_MS ||
+                                SystemClock.elapsedRealtime() - fix.ms > GPS_FIX_FRESH_MS ||
                                 !fix.lat.isFinite() || !fix.lng.isFinite()
                             ) {
                                 return@run null
@@ -2159,7 +2165,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         //    remaining the rejoin gate missed by a tick, or a transient scale skew at the start.
                         // Either way hold --- until a plausible value arrives; firstMove gates the race anyway.
                         if (routeStartDistM == null && !routeDistFromGps && (remainingM < 1.0 || remainingM > karooLenM)) {
-                            val nowMs = System.currentTimeMillis()
+                            val nowMs = SystemClock.elapsedRealtime()
                             if (nowMs - lastDiagLogMs >= diagLogMs) {
                                 lastDiagLogMs = nowMs
                                 Timber.d("KVP tick route: implausible remaining=${"%.0f".format(remainingM)} (karooLen=${"%.0f".format(karooLenM)}) — D0 held until it settles")
@@ -2183,7 +2189,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             if (!consistent) {
                                 d0CandPos = routeDist
                                 d0CandOdo = distM
-                                val nowMs = System.currentTimeMillis()
+                                val nowMs = SystemClock.elapsedRealtime()
                                 if (nowMs - lastDiagLogMs >= diagLogMs) {
                                     lastDiagLogMs = nowMs
                                     Timber.d("KVP tick route: first fix at ${"%.0f".format(routeDist)}m (${if (routeDistFromGps) "GPS" else "Karoo"}) — awaiting confirmation")
@@ -2237,7 +2243,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // Debounce on the Karoo end signal (remaining < EPS) regardless of corroboration, so a
                         // sustained remaining≈0 with GPS+odometer both dead still finishes via the give-up path.
                         if (routeStartDistM != null && ghostStartElapsedS != null && remainingM < ROUTE_END_EPS_M) {
-                            val nowMs = System.currentTimeMillis()
+                            val nowMs = SystemClock.elapsedRealtime()
                             if (routeEndSinceMs == 0L) routeEndSinceMs = nowMs
                             val held = nowMs - routeEndSinceMs
                             // Corroborated (GPS/odo near end) → normal debounce. Uncorroborated → only after a
@@ -2328,10 +2334,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // climb routePosStaleS → false "GPS lost" at 60 s → blank the gap for the rest of the
                         // ride DESPITE a valid GPS fix every tick. So: whenever the position came from GPS
                         // (fresh by construction), the route position IS fresh — re-stamp every such tick.
-                        if (routeDistFromGps || (moving && !wasMoving)) lastDestChangeMs = System.currentTimeMillis()
+                        if (routeDistFromGps || (moving && !wasMoving)) lastDestChangeMs = SystemClock.elapsedRealtime()
                         wasMoving = moving
                         val routePosStaleS = if (moving && lastDestChangeMs > 0L) {
-                            ((System.currentTimeMillis() - lastDestChangeMs) / 1000.0).coerceAtLeast(0.0)
+                            ((SystemClock.elapsedRealtime() - lastDestChangeMs) / 1000.0).coerceAtLeast(0.0)
                         } else {
                             0.0
                         }
@@ -2356,7 +2362,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val moveStart = firstMoveElapsedS
                         if (ghostStartElapsedS == null) {
                             if (moveStart == null) {
-                                val nowMs = System.currentTimeMillis()
+                                val nowMs = SystemClock.elapsedRealtime()
                                 if (nowMs - lastDiagLogMs >= diagLogMs) {
                                     lastDiagLogMs = nowMs
                                     Timber.d("KVP tick route: on route at ${"%.0f".format(effRouteDist)}m, D0=${"%.0f".format(d0)} — waiting for first movement (race not started)")
@@ -2424,7 +2430,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             lastBufferedRouteDist = effRouteDist
                         }
                         run {
-                            val nowMs = System.currentTimeMillis()
+                            val nowMs = SystemClock.elapsedRealtime()
                             // The rich state-snapshot line — INCLUDING the computed gap (the thing you study).
                             // Periodic (throttled to diagLogMs ~2.5 s); the precise MOMENTS — anchor, GPS
                             // lost/recover, segment in/out, mode/config change — are logged on-edge elsewhere,
@@ -2457,7 +2463,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         mapGhostState = if (cfg.showGhostOnMap) {
                             // The EXACT ghost distance the gap field just used this tick → map and field
                             // are driven by the same value; the loop glides between consecutive snapshots.
-                            MapGhostState(gap.ghostProgressM, rm.path, System.currentTimeMillis())
+                            MapGhostState(gap.ghostProgressM, rm.path, SystemClock.elapsedRealtime())
                         } else {
                             null
                         }
