@@ -39,6 +39,11 @@ object CorridorSeeder {
      *  every <= 12 m along each segment makes any node within radius of the ridden line match. */
     const val ANCHOR_SPACING_M = 12.0
 
+    /** A straight-line jump (m) between two consecutive recorded points longer than this is a GPS
+     *  dropout / decimation gap, not riding — skip it (don't fabricate interpolated anchors across
+     *  terrain the rider never rode in a straight line; that would spread a made-up pace to many nodes). */
+    const val DROPOUT_GAP_M = 200.0
+
     private data class Sample(
         val lat: Double, val lng: Double,
         val bearingDeg: Double, val timePerM: Double,
@@ -78,6 +83,12 @@ object CorridorSeeder {
                 var timePerM = dt / d
                 if (speed < AGG_MIN_SPEED_MS) timePerM = 1.0 / AGG_MIN_SPEED_MS
                 if (!timePerM.isFinite()) continue
+                // Anchor count/placement is based on the GEODESIC CHORD between the two recorded points,
+                // not the odometer delta d: d follows the road's curves and on a GPS-dropout segment can be
+                // huge while the chord is what we actually interpolate along. A chord longer than
+                // DROPOUT_GAP_M is a dropout/gap → skip (its pace is real but the straight-line path is not).
+                val chord = Polyline.haversineM(LatLng(a.lat, a.lng), LatLng(b.lat, b.lng))
+                if (chord > DROPOUT_GAP_M) continue
                 val bearing = Polyline.bearingDeg(LatLng(a.lat, a.lng), LatLng(b.lat, b.lng))
                 // Densify: place anchors ALONG the segment at <= ANCHOR_SPACING_M, each carrying this
                 // segment's pace + bearing, so coverage does NOT depend on the track's native point
@@ -86,7 +97,7 @@ object CorridorSeeder {
                 // f runs (0,1]: the END point (f=1) is always emitted, so a node sitting exactly on a 25 m
                 // boundary still matches the segment ENDING there (nearest-per-track dedup makes that exact
                 // 0 m hit win); the START (f=0, owned by the previous segment) is never emitted.
-                val subAnchors = kotlin.math.max(1, kotlin.math.ceil(d / ANCHOR_SPACING_M).toInt())
+                val subAnchors = kotlin.math.max(1, kotlin.math.ceil(chord / ANCHOR_SPACING_M).toInt())
                 for (sIdx in 1..subAnchors) {
                     val f = sIdx.toDouble() / subAnchors
                     val sLat = a.lat + f * (b.lat - a.lat)
