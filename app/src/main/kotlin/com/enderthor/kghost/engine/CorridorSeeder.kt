@@ -44,6 +44,11 @@ object CorridorSeeder {
      *  terrain the rider never rode in a straight line; that would spread a made-up pace to many nodes). */
     const val DROPOUT_GAP_M = 200.0
 
+    /** Max odometer-to-chord ratio before a segment is treated as curving away from its straight a→b
+     *  line (hairpin / doubled-back). Above this, interpolated chord anchors would be mis-located, so we
+     *  anchor the END point only instead of densifying across a chord the rider didn't actually ride. */
+    const val CURVE_RATIO_MAX = 1.5
+
     private data class Sample(
         val lat: Double, val lng: Double,
         val bearingDeg: Double, val timePerM: Double,
@@ -97,7 +102,10 @@ object CorridorSeeder {
                 // f runs (0,1]: the END point (f=1) is always emitted, so a node sitting exactly on a 25 m
                 // boundary still matches the segment ENDING there (nearest-per-track dedup makes that exact
                 // 0 m hit win); the START (f=0, owned by the previous segment) is never emitted.
-                val subAnchors = kotlin.math.max(1, kotlin.math.ceil(chord / ANCHOR_SPACING_M).toInt())
+                // If the road's odometer distance far exceeds the straight chord (hairpin / doubled-back
+                // segment), the interpolated chord points are mis-located — anchor the real END point only.
+                val subAnchors = if (d > chord * CURVE_RATIO_MAX) 1
+                    else kotlin.math.max(1, kotlin.math.ceil(chord / ANCHOR_SPACING_M).toInt())
                 for (sIdx in 1..subAnchors) {
                     val f = sIdx.toDouble() / subAnchors
                     val sLat = a.lat + f * (b.lat - a.lat)
