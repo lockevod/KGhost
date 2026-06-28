@@ -39,6 +39,12 @@ object CorridorSeeder {
      *  every <= 12 m along each segment makes any node within radius of the ridden line match. */
     const val ANCHOR_SPACING_M = 12.0
 
+    /** Max candidate tracks the seed folds, ranked by route overlap. Far above a normal rider's
+     *  overlapping-track count (so a no-op for typical use), it bounds seed parse cost + the stored id
+     *  set on dense areas where hundreds of rides cross a route's bbox. Much larger than the old top-12
+     *  cap, so it does NOT reintroduce the coverage starvation that the corridor model fixed. */
+    const val MAX_CANDIDATES = 250
+
     /** A straight-line jump (m) between two consecutive recorded points longer than this is a GPS
      *  dropout / decimation gap, not riding — skip it (don't fabricate interpolated anchors across
      *  terrain the rider never rode in a straight line; that would spread a made-up pace to many nodes). */

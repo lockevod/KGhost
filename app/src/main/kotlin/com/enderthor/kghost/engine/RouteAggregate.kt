@@ -82,12 +82,13 @@ data class AggregateNode(
 )
 
 /**
- * Per-route exponential-moving-average ghost: the recency-weighted mean of recent laps of one loaded
- * route, sampled on a fixed [stepM] grid over route distance `[0, routeLenM]`.
+ * Per-route pace grid: per-segment time reducers (EMA mean / min / last) on a fixed [stepM] grid over
+ * route distance `[0, routeLenM]`, consumed by [toLiveSegments] to build the AVERAGE / BEST / LAST ghosts.
  *
- * Persisted independently of the recorded track files (see [com.enderthor.kghost.geo.AggregateStore]),
- * so it survives the track-library prune — that is the whole reason it is an O(1) running mean rather
- * than an average recomputed from the surviving tracks (which the prune caps at three per route).
+ * Built by [com.enderthor.kghost.engine.CorridorSeeder] from the rider's overlapping history (matched by
+ * cell + bearing) and persisted by [com.enderthor.kghost.geo.AggregateStore]. It is REBUILT from the
+ * current candidate set whenever that set changes enough (see [shouldReseed]); it is NOT an O(1) running
+ * mean updated per ride (the historical per-ride [updateAggregate] fold is no longer wired).
  *
  * Pure data + pure transforms; no Android, no filesystem — unit-tested directly.
  */

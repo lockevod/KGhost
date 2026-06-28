@@ -1296,7 +1296,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     val eff = resolveProfile(activeConfig.value, activeProfileId)
                     val pick = eff.ghostPick
                     val key = routeKeyOf(state.name, path.totalM)
-                    val nowIds = trackStore().candidateIdsFor(bbox)
+                    val nowIds = trackStore().candidateIdsFor(bbox, CorridorSeeder.MAX_CANDIDATES)
                     var agg = withContext(Dispatchers.IO) { aggregateStore().load(key) }
                     // Re-seed when the candidate SET changed enough (symmetric difference), not when its
                     // COUNT changed — auto-tidy churns the set at constant size, which a count gate misses.
@@ -1306,7 +1306,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val seedStartMs = SystemClock.elapsedRealtime()
                         // Parse the overlapping history ONLY when (re)seeding — one-time per cold/changed
                         // route, off Main. Store the no-parse id SET so the next load can diff against it.
-                        val tracks = trackStore().loadCandidates(bbox)
+                        val tracks = trackStore().loadTopCandidates(bbox, CorridorSeeder.MAX_CANDIDATES)
                         val seeded = CorridorSeeder.seed(key, state.name, path, tracks).copy(seededTrackIds = nowIds.toList())
                         agg = withContext(Dispatchers.IO) { aggregateStore().save(seeded); seeded }
                         Timber.i(
