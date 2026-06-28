@@ -43,4 +43,42 @@ class GhostIntegratorTest {
         assertEquals(104.0, g.ghostTime, 1e-6)
         assertEquals(14.0, g.gapTimeS, 1e-6)
     }
+
+    @Test fun `first tick at a non-zero distance anchors the gap to zero`() {
+        val g = newInt(); val src = pace(0.2, 1e9)
+        g.onTick(500.0, 0.0, 500.0, 90.0, 120.0, src) // race already 500 m / 120 s in
+        assertEquals(120.0, g.ghostTime, 1e-6)         // anchored to elapsed, NOT 0
+        assertEquals(0.0, g.gapTimeS, 1e-6)
+    }
+
+    @Test fun `an odometer reset re-baselines instead of freezing`() {
+        val g = newInt(); val src = pace(0.2, 1e9)
+        g.onTick(0.0, 0.0, 0.0, 90.0, 0.0, src)
+        g.onTick(1000.0, 0.0, 1000.0, 90.0, 200.0, src) // ghostTime 200
+        g.onTick(0.0, 0.0, 0.0, 90.0, 205.0, src)        // reset → re-anchor ghostTime=205
+        g.onTick(50.0, 0.0, 50.0, 90.0, 215.0, src)      // +50 m at 0.2 → 215, NOT frozen at 200
+        assertEquals(215.0, g.ghostTime, 1e-6)
+    }
+
+    @Test fun `gap distance never reports ahead while the rider is behind (end clamp)`() {
+        val g = newInt(); val src = pace(0.2, 1e9)
+        g.onTick(0.0, 0.0, 0.0, 90.0, 0.0, src)
+        g.onTick(100.0, 0.0, 100.0, 90.0, 30.0, src)  // crumb at 100 m / ghostTime 20
+        g.onTick(110.0, 0.0, 110.0, 90.0, 33.0, src)  // +10 m (< decimate) → live point lags the crumb
+        assertTrue(g.gapTimeS < 0.0)                  // rider behind (ghostTime 22 < elapsed 33)
+        assertTrue(g.gapDistM <= 0.0)                 // must NOT read +10 (the old end-clamp bug)
+    }
+
+    @Test fun `no NaN map-ghost immediately after restore (resumed stopped)`() {
+        val g = newInt(); val src = pace(0.2, 1e9)
+        g.restore(ghostTime = 100.0, lastRiderDist = 500.0)
+        g.onTick(500.0, 41.0, 2.0, 90.0, 100.0, src)  // resumed stopped: Δd = 0
+        assertTrue(!g.ghostLat.isNaN() && !g.ghostLng.isNaN())
+        assertEquals(41.0, g.ghostLat, 1e-9)          // seeded at the resume position
+    }
+
+    @Test fun `constructor rejects a non-positive VP pace`() {
+        try { GhostIntegrator(GhostPick.AVERAGE, vpTimePerM = 0.0); org.junit.Assert.fail("expected IAE") }
+        catch (e: IllegalArgumentException) { /* expected */ }
+    }
 }
