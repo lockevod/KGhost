@@ -111,6 +111,48 @@ class CorridorSeederTest {
         assertTrue(agg.nodes.all { it.count == 0 })
     }
 
+    @Test fun `a coarse-spaced track still covers the 25 m nodes (densify)`() {
+        val r = route(240.0)
+        // Points every 60 m (coarse / imported). A single END anchor per 60 m would leave the 25 m nodes
+        // between them > 18 m from any anchor → uncovered; densify must cover them.
+        val pts = (0..4).map { i -> TrackPointDto(0.0, i * 60.0 * degPerM, i * 60.0, i * 12.0) } // 5 s / 25 m
+        val agg = CorridorSeeder.seed("k", "K", r, listOf(RecordedTrack("coarse", 1L, pts)))
+        // Node 4 = 100 m sits between track points 60 m and 120 m — only densified anchors reach it.
+        assertTrue("node 100 m must be covered by densify", agg.nodes[4].count >= 1)
+        assertEquals(5.0, agg.nodes[4].dtS, 1e-6)
+    }
+
+    @Test fun `a long GPS-dropout gap is skipped, not bridged`() {
+        val r = route(400.0)
+        // Ride 0..50 m, a 300 m straight jump (dropout) to 350 m, then 350..400 m.
+        val pts = listOf(
+            TrackPointDto(0.0, 0.0, 0.0, 0.0),
+            TrackPointDto(0.0, 25.0 * degPerM, 25.0, 5.0),
+            TrackPointDto(0.0, 50.0 * degPerM, 50.0, 10.0),
+            TrackPointDto(0.0, 350.0 * degPerM, 350.0, 70.0), // 300 m chord jump (> DROPOUT_GAP_M) → skipped
+            TrackPointDto(0.0, 375.0 * degPerM, 375.0, 75.0),
+            TrackPointDto(0.0, 400.0 * degPerM, 400.0, 80.0),
+        )
+        val agg = CorridorSeeder.seed("k", "K", r, listOf(RecordedTrack("gap", 1L, pts)))
+        assertEquals(0, agg.nodes[8].count)  // 200 m, inside the skipped gap
+        assertTrue(agg.nodes[1].count >= 1)  // 25 m, first ridden stretch
+        assertTrue(agg.nodes[15].count >= 1) // 375 m, last ridden stretch
+    }
+
+    @Test fun `a curve-collapse segment (odometer much greater than chord) anchors the END only`() {
+        val r = route(200.0)
+        // Odometer 1500 m but straight chord ~150 m (rider looped away and returned near 150 m). The
+        // interpolated chord points would be mis-located, so only the real END (150 m) is anchored — the
+        // chord interior (75 m) must NOT be painted.
+        val pts = listOf(
+            TrackPointDto(0.0, 0.0, 0.0, 0.0),
+            TrackPointDto(0.0, 150.0 * degPerM, 1500.0, 300.0),
+        )
+        val agg = CorridorSeeder.seed("k", "K", r, listOf(RecordedTrack("curve", 1L, pts)))
+        assertEquals(0, agg.nodes[3].count)  // 75 m (chord interior) NOT fabricated
+        assertTrue(agg.nodes[6].count >= 1)  // 150 m (real END) covered
+    }
+
     @Test fun `seed leaves seededTrackIds to the caller`() {
         val r = route(200.0)
         val agg = CorridorSeeder.seed("k", "K", r, listOf(eastTrack("a", 1L, 200.0, 5.0), eastTrack("b", 2L, 200.0, 5.0)))
