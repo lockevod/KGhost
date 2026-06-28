@@ -319,15 +319,34 @@ class RouteAggregateTest {
         assertTrue(agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).isNotEmpty())
     }
 
-    @Test fun `schema is v3 and seededTrackCount round-trips`() {
-        assertEquals(3, AGG_SCHEMA_VERSION)
+    @Test fun `schema is v4 and seededTrackIds round-trips`() {
+        assertEquals(4, AGG_SCHEMA_VERSION)
         val agg = PerRouteAggregate(
             routeKey = "k", routeName = "K", routeLenM = 100.0,
             schemaVersion = AGG_SCHEMA_VERSION,
             nodes = listOf(AggregateNode(), AggregateNode(dtS = 5.0, count = 2, minDtS = 5.0, lastDtS = 5.0)),
-            seededTrackCount = 7,
+            seededTrackIds = listOf("a", "b", "c"),
         )
-        assertEquals(7, agg.seededTrackCount)
-        assertEquals(0, PerRouteAggregate("k", "K", 100.0, nodes = emptyList()).seededTrackCount)
+        assertEquals(listOf("a", "b", "c"), agg.seededTrackIds)
+        assertTrue(PerRouteAggregate("k", "K", 100.0, nodes = emptyList()).seededTrackIds.isEmpty())
+    }
+
+    @Test fun `shouldReseed gates on the candidate set symmetric difference, not its count`() {
+        fun aggOf(ids: List<String>) = PerRouteAggregate("k", "K", 100.0, schemaVersion = AGG_SCHEMA_VERSION,
+            nodes = emptyList(), seededTrackIds = ids)
+        // No cache or empty seed → always reseed.
+        assertTrue(shouldReseed(null, setOf("a")))
+        // Same set → no reseed.
+        assertEquals(false, shouldReseed(aggOf(listOf("a", "b")), setOf("a", "b")))
+        // Sparse seed (< RESEED_MIN_DELTA tracks) → ANY change reseeds.
+        assertTrue(shouldReseed(aggOf(listOf("a", "b")), setOf("a", "b", "c")))
+        // Warmed seed of 10, churned by ONE (symDiff 2 < 5) → NO reseed yet (amortised).
+        val ten = (1..10).map { "t$it" }
+        assertEquals(false, shouldReseed(aggOf(ten), (2..11).map { "t$it" }.toSet()))
+        // Warmed seed of 10 churned by FIVE in / five out (symDiff 10 >= 5) → reseed. THIS is the
+        // auto-tidy freeze case: the COUNT stayed 10 the whole time, only the SET moved.
+        assertTrue(shouldReseed(aggOf(ten), (6..15).map { "t$it" }.toSet()))
+        // Shrink (prune) → reseed.
+        assertTrue(shouldReseed(aggOf(ten), (1..4).map { "t$it" }.toSet()))
     }
 }

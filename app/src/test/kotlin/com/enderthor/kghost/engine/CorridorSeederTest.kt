@@ -111,9 +111,9 @@ class CorridorSeederTest {
         assertTrue(agg.nodes.all { it.count == 0 })
     }
 
-    @Test fun `seededTrackCount records the input size`() {
+    @Test fun `seed leaves seededTrackIds to the caller`() {
         val r = route(200.0)
         val agg = CorridorSeeder.seed("k", "K", r, listOf(eastTrack("a", 1L, 200.0, 5.0), eastTrack("b", 2L, 200.0, 5.0)))
-        assertEquals(2, agg.seededTrackCount)
+        assertTrue(agg.seededTrackIds.isEmpty())
     }
 }
