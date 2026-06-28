@@ -25,7 +25,6 @@ import com.enderthor.kghost.engine.learnProfile
 import com.enderthor.kghost.engine.StalenessLogic
 import com.enderthor.kghost.engine.GhostPaceSource
 import com.enderthor.kghost.engine.toInfo
-import com.enderthor.kghost.engine.AGG_STEP_M
 import com.enderthor.kghost.engine.AGG_MIN_LAPS
 import com.enderthor.kghost.engine.CorridorSeeder
 import com.enderthor.kghost.geo.AggregateStore
@@ -391,22 +390,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     @Volatile private var aggregateStoreDir: File? = null
     private val recorder = TrackRecorder()
 
-    // ── Average-ghost lap capture ───────────────────────────────────────────────────────────────
-    // This ride's route progress as (routeDistM, riderTimeFromStartS) samples, decimated to one per
-    // ~25 m of route advance. Written by the tick COROUTINE (Dispatchers.Default), read once at ride-end
-    // by finishAndSaveRecording(). Safe because the Idle handler runs stopTickAndJoin() (cancelAndJoin)
-    // BEFORE finishAndSaveRecording(), so the join establishes a happens-before edge from the last tick
-    // write to the read — there is no concurrent access on that path. The synchronizedList only keeps
-    // the list internally consistent on the onDestroy teardown (non-joining cancel); it is not what
-    // makes the ride-end read correct. @Volatile on the target below is the cross-thread publish.
-    private val lapAggBuffer = java.util.Collections.synchronizedList(ArrayList<DoubleArray>())
-
-    /** The route this lap's samples fold into at ride-end — one immutable value so key/name/length can
-     *  never be observed out of sync. null ⇒ the lap does NOT contribute (no route, or the rider joined
-     *  mid-route so the time origin would be offset). */
-    private data class LapAggTarget(val key: String, val name: String, val lenM: Double)
-    @Volatile private var lapAggTarget: LapAggTarget? = null
-
     /** An immutable GPS fix snapshot (lat, lng, the MONOTONIC ms — SystemClock.elapsedRealtime, for
      *  freshness only, never an epoch — it was taken at, and the rider's heading
      *  in degrees [0,360) or NaN if the fix carried none — used to disambiguate the D0 bootstrap pass). */
@@ -473,8 +456,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // The rider's last TRUSTWORTHY route distance (the monotone rail) + the odometer captured with it.
     @Volatile private var lastGoodRouteDistM: Double? = null
     @Volatile private var distMAtLastGoodM: Double? = null
-    // Highest route distance already captured into the average-ghost buffer this route.
-    @Volatile private var lastBufferedRouteDist: Double = Double.NEGATIVE_INFINITY
     // One-shot "GPS lost" alert guard (re-armed when GPS recovers).
     @Volatile private var gpsAlertFired: Boolean = false
     // Previous tick's moving state (route mode) — drives the stationary→moving re-stamp edge.
@@ -508,7 +489,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         ghostStartElapsedS = null
         lastGoodRouteDistM = null
         distMAtLastGoodM = null
-        lastBufferedRouteDist = Double.NEGATIVE_INFINITY
         gpsAlertFired = false
         wasMoving = false
         routeStartDistFromGps = false
@@ -1577,7 +1557,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
 
         // ② route-mode per-tick state. The per-ride/route ANCHOR (projectorRoute/Polyline, routeStartDistM
         // (D0), rideDistAtRouteStartM, firstMoveElapsedS, vpFirstMoveElapsedS, emptyWindowTicks,
-        // ghostStartElapsedS, lastGoodRouteDistM, distMAtLastGoodM, lastBufferedRouteDist, gpsAlertFired,
+        // ghostStartElapsedS, lastGoodRouteDistM, distMAtLastGoodM, gpsAlertFired,
         // wasMoving, d0CandPos/Odo, prevSegStartM, routeEndSinceMs, finishedGap) lives in INSTANCE FIELDS
         // (declared above) so it SURVIVES a mid-ride host reconnect that cancels+relaunches this tick. It is
         // reset by resetRideAnchor() at a genuine ride end, and on a genuine route change inside the tick.
@@ -1847,11 +1827,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 d0CandPos = null
                                 d0CandOdo = null
                                 rideDistAtRouteStartM = distM
-                                // New route ⇒ start a fresh average-ghost lap capture (the old route's
-                                // partial samples must not fold into this one's aggregate).
-                                lapAggBuffer.clear()
-                                lapAggTarget = null
-                                lastBufferedRouteDist = Double.NEGATIVE_INFINITY
                                 // Distrust the OLD route's remaining until destJob emits the NEW route's value:
                                 // routeDistanceM flips with the path (atomic in RouteMode) but lastDistToDestM is
                                 // a separate stream, so pairing new routeLen with old remaining for a tick would
@@ -1985,11 +1960,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                         lastGoodRouteDistM = frozenPos
                                         distMAtLastGoodM = distM
                                     }
-                                    // Average-ghost contribution gate — SAME decision as the normal anchor.
-                                    // Without setting it here, a rider who always starts slightly off the line
-                                    // (so the race anchors via THIS rejoin-fallback path) would NEVER feed the
-                                    // average and it would never build, undiagnosably.
-                                    lapAggTarget = LapAggTarget(routeKeyOf(rm.routeName, rm.path.totalM), rm.routeName, rm.path.totalM)
                                     Timber.i(
                                         "KVP race anchored (rejoin-fallback): firstMove=${"%.0f".format(moveStart)}s " +
                                             "D0=${"%.0f".format(d0)}m ghostStart=${"%.0f".format(ghostStartElapsedS!!)}s " +
@@ -2373,12 +2343,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 "KVP race anchored: firstMove=${"%.0f".format(moveStart)}s D0=${"%.0f".format(routeStartDistM!!)}m " +
                                     "ghostStart=${"%.0f".format(ghostStartElapsedS!!)}s @ routeDist=${"%.0f".format(effRouteDist)}m elapsed=${"%.0f".format(elapsedS)}s",
                             )
-                            // Average-ghost contribution: EVERY lap folds into the aggregate regardless of
-                            // where it started — the aggregate stores per-segment deltas (origin-invariant),
-                            // so a mid-route start just contributes the stretches it covers. Key + grid axis
-                            // use the DECODED-POLYLINE length — the same deterministic length the match-time
-                            // aggregate load keys on, so save and load can never round to different keys.
-                            lapAggTarget = LapAggTarget(routeKeyOf(rm.routeName, rm.path.totalM), rm.routeName, rm.path.totalM)
                         }
                         // ghostElapsed = (elapsedS − firstMove) + rg.timeAt(D0): ghost at D0 at race start,
                         // then advances on real elapsed time (frozen only on pause — ELAPSED_TIME stops).
@@ -2400,18 +2364,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         if (!spurious) {
                             lastGoodRouteDistM = effRouteDist
                             distMAtLastGoodM = distM
-                        }
-                        // Average-ghost lap capture: one sample per ~AGG_STEP_M of forward route progress,
-                        // on the SAME fair-start clock as the live gap (riderTime = elapsedS − firstMove), so
-                        // the stored average lines up with how the live race is measured. Only on
-                        // trustworthy ticks and only when a race is anchored (lapAggTarget != null — set on
-                        // EVERY anchored lap now; the aggregate is origin-invariant so any start contributes).
-                        // moveStart is non-null here — the race is anchored.
-                        if (!spurious && lapAggTarget != null &&
-                            effRouteDist > lastBufferedRouteDist + AGG_STEP_M
-                        ) {
-                            lapAggBuffer.add(doubleArrayOf(effRouteDist, elapsedS - moveStart!!))
-                            lastBufferedRouteDist = effRouteDist
                         }
                         run {
                             val nowMs = SystemClock.elapsedRealtime()
@@ -2606,11 +2558,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun finishAndSaveRecording() {
         val started = recordingStartedEpoch
         val track = recorder.build(id = started.toString(), startedAtEpoch = started)
-        // Reset the average-ghost lap capture now. The tick is already stopped+joined (the Idle handler
-        // does stopTickAndJoin() before this), so there is no concurrent writer; clearing here resets
-        // capture for the next ride. (No fold happens here any more — the corridor seed is the source.)
-        lapAggBuffer.clear()
-        lapAggTarget = null
         if (track == null) {
             // Too few decimated points (a very short / stationary ride) → nothing recorded, so this ride
             // won't become a future ghost. Logged so "my ride didn't become a ghost" is diagnosable.
