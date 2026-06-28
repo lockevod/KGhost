@@ -27,6 +27,7 @@ import com.enderthor.kghost.engine.GhostPaceSource
 import com.enderthor.kghost.engine.toInfo
 import com.enderthor.kghost.engine.AGG_STEP_M
 import com.enderthor.kghost.engine.updateAggregate
+import com.enderthor.kghost.engine.AGG_MIN_LAPS
 import com.enderthor.kghost.engine.seedAggregateFromLaps
 import com.enderthor.kghost.geo.AggregateStore
 import com.enderthor.kghost.geo.BBox
@@ -1366,6 +1367,39 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 else aggregateStore().load(key) ?: seeded
                             }
                             Timber.i("KVP grid: seeded $key from ${laps.size} history lap(s) — routeLaps ${lapMs}ms")
+                            // SEED DIAGNOSTIC (gated on the opt-in file log, one-time per cold route): explains
+                            // WHY a route ends up mostly Ghost-Pace. AVERAGE only shows a true mean where ≥2
+                            // recorded laps overlap a node; if most nodes are count==1 the route has effectively
+                            // one full recording and the rest are partial overlaps. We log (a) the per-node count
+                            // histogram + covered fractions of the seeded grid, and (b) per CANDIDATE track how
+                            // many laps it yielded and how many nodes it folds ALONE — so we can see whether a
+                            // partial/variant track under-folds against the real (looping, road-snapped) polyline.
+                            if (FileLogTree.enabled) {
+                                val g = agg
+                                if (g != null) {
+                                    val n = g.nodes.size
+                                    val ge1 = g.nodes.count { it.count >= 1 }
+                                    val ge2 = g.nodes.count { it.count >= AGG_MIN_LAPS }
+                                    val hist = g.nodes.groupingBy { it.count }.eachCount().toSortedMap()
+                                    Timber.i(
+                                        "KVP seed diag: nodes=%d covered(≥1)=%d (%d%%) avg-raceable(≥%d)=%d (%d%%) counts=%s",
+                                        n, ge1, if (n > 0) ge1 * 100 / n else 0,
+                                        AGG_MIN_LAPS, ge2, if (n > 0) ge2 * 100 / n else 0, hist,
+                                    )
+                                    tracks.sortedBy { it.startedAtEpoch }.forEach { t ->
+                                        val tl = SegmentMatcher.routeLaps(
+                                            path, listOf(t), SegmentMatcher.Params(maxTracks = maxTracks),
+                                        )
+                                        val solo = seedAggregateFromLaps(key, state.name, path.totalM, tl)
+                                        val cov = solo.nodes.count { it.count >= 1 }
+                                        Timber.i(
+                                            "KVP seed cand: %s src=%s pts=%d laps=%d folds=%d node(s) (%d%%)",
+                                            t.id, t.source, t.points.size, tl.size, cov,
+                                            if (n > 0) cov * 100 / n else 0,
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                     val matched = agg?.toLiveSegments(pick).orEmpty()
