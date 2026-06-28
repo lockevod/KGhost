@@ -275,6 +275,13 @@ class TrackStore(private val dir: File) {
     }
 
     /**
+     * Cheap count of stored tracks whose path cells overlap [routeBBox], WITHOUT parsing any track
+     * file. Used to decide whether a persisted corridor seed is stale enough to recompute.
+     */
+    fun candidateCount(routeBBox: BBox): Int =
+        synchronized(indexLock) { candidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION).size }
+
+    /**
      * Returns the parsed candidate tracks RANKED by ROUTE OVERLAP and capped at [maxTracks], parsing
      * ONLY the chosen files.
      *
