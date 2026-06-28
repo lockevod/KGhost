@@ -26,7 +26,6 @@ import com.enderthor.kghost.engine.StalenessLogic
 import com.enderthor.kghost.engine.GhostPaceSource
 import com.enderthor.kghost.engine.toInfo
 import com.enderthor.kghost.engine.AGG_STEP_M
-import com.enderthor.kghost.engine.updateAggregate
 import com.enderthor.kghost.engine.AGG_MIN_LAPS
 import com.enderthor.kghost.engine.CorridorSeeder
 import com.enderthor.kghost.geo.AggregateStore
@@ -34,7 +33,6 @@ import com.enderthor.kghost.geo.BBox
 import com.enderthor.kghost.geo.LatLng
 import com.enderthor.kghost.geo.Polyline
 import com.enderthor.kghost.geo.PolylinePath
-import com.enderthor.kghost.geo.SegmentMatcher
 import com.enderthor.kghost.geo.TrackRecorder
 import com.enderthor.kghost.geo.TrackStore
 import com.enderthor.kghost.geo.TrackStorage
@@ -2608,11 +2606,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun finishAndSaveRecording() {
         val started = recordingStartedEpoch
         val track = recorder.build(id = started.toString(), startedAtEpoch = started)
-        // Snapshot + clear the average-ghost lap capture now. The tick is already stopped+joined (the
-        // Idle handler does stopTickAndJoin() before this), so there is no concurrent writer; the copy
-        // gives the IO update below a stable view and resets capture for the next ride.
-        val lapTarget = lapAggTarget
-        val lapSamples: List<DoubleArray> = synchronized(lapAggBuffer) { ArrayList(lapAggBuffer) }
+        // Reset the average-ghost lap capture now. The tick is already stopped+joined (the Idle handler
+        // does stopTickAndJoin() before this), so there is no concurrent writer; clearing here resets
+        // capture for the next ride. (No fold happens here any more — the corridor seed is the source.)
         lapAggBuffer.clear()
         lapAggTarget = null
         if (track == null) {
@@ -2644,23 +2640,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 }
             }
         }
-        // Fold this lap into the per-route average-ghost aggregate, INDEPENDENT of the track save (so it
-        // survives the track-library prune). Any anchored lap with enough samples updates it (the key is
-        // set at the anchor for every lap; the aggregate is origin-invariant, so any start contributes).
-        if (lapTarget != null && lapSamples.size >= 2) {
-            scope.launch(Dispatchers.IO) {
-                withContext(NonCancellable) {
-                    runCatching {
-                        // Atomic load-modify-save: no concurrent seed/save can interleave between the
-                        // read and the write of this key (would otherwise be a lost update).
-                        aggregateStore().update(lapTarget.key) { existing ->
-                            updateAggregate(existing, lapTarget.key, lapTarget.name, lapTarget.lenM, lapSamples)
-                        }
-                        Timber.i("KVP avg: updated aggregate ${lapTarget.key} (${lapSamples.size} samples)")
-                    }.onFailure { Timber.w(it, "KVP avg: aggregate update failed for ${lapTarget.key}") }
-                }
-            }
-        }
+        // No per-ride aggregate fold: the corridor model is the single source. The just-saved track
+        // enters the next re-seed of any route crossing these cells (lazy, on history growth). Staleness
+        // until then is ~3.6 % median per-node and non-accumulating — see the corridor design spec.
         recorder.reset()
         // Done with this ride's epoch; clear it so a fresh ride re-stamps in startTick(). stopTick()
         // also clears it, but reset here too so the non-Idle save paths stay correct.
