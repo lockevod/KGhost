@@ -28,7 +28,7 @@ import com.enderthor.kghost.engine.toInfo
 import com.enderthor.kghost.engine.AGG_STEP_M
 import com.enderthor.kghost.engine.updateAggregate
 import com.enderthor.kghost.engine.AGG_MIN_LAPS
-import com.enderthor.kghost.engine.seedAggregateFromLaps
+import com.enderthor.kghost.engine.CorridorSeeder
 import com.enderthor.kghost.geo.AggregateStore
 import com.enderthor.kghost.geo.BBox
 import com.enderthor.kghost.geo.LatLng
@@ -1313,93 +1313,42 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         if (lastMatchedPolyline == mine) clearRouteMode()
                         return@launch
                     }
-                    // Route-length-adaptive candidate cap (RouteGraph buckets its sampling by distance the
-                    // same way). The matcher is O(track points) per track via its spatial grid, so a long
-                    // road route with a realistic history matches fast — but each candidate track is itself
-                    // long, so a pathological history (many overlapping 100 km+ rides) could spike GC /
-                    // Default-pool contention at route-load and delay ② activating. Capping the candidate
-                    // count on long routes bounds that without touching match accuracy (it only limits how
-                    // many historical rides are considered, which on a long route is naturally few anyway).
-                    // Candidate cap for the one-time SEED (routeLaps). All three picks now race the
-                    // persisted per-route grid, seeded once from history — there is no live per-ride
-                    // match anymore — so this only bounds how many history tracks the cold seed folds.
-                    // loadTopCandidates returns the MOST route-overlapping tracks first, so the few kept
-                    // are the most relevant; more candidates = better seed coverage for all reducers
-                    // (min/last/EMA), so keep a healthy count. (On a warmed route the grid loads from
-                    // disk and the seed is skipped entirely, so the cap then costs nothing.)
-                    val maxTracks = when {
-                        path.totalM > 120_000 -> 8
-                        path.totalM > 40_000 -> 10
-                        else -> 12
-                    }
-                    // Pre-cap candidates by ROUTE OVERLAP (relevance), parsing only the top tracks.
-                    val tracks = trackStore().loadTopCandidates(bbox, maxTracks)
-                    // Timing: loadTopCandidates does file IO + parse; the match below is O(track points).
-                    // A multi-minute total here = the route ghost can't engage until it finishes (the
-                    // rider sees no map ghost meanwhile). Surfaces whether the delay is load vs match.
-                    Timber.i("KVP match: loaded ${tracks.size} candidate track(s) in ${SystemClock.elapsedRealtime() - matchStartMs}ms (routeLen=${"%.0f".format(path.totalM)})")
-                    // A superseding route should cancel this stale match promptly: bail before the
-                    // expensive match if we've been cancelled.
+                    // Corridor seed: fold the rider's WHOLE overlapping history by cell+bearing (not
+                    // forward laps of this exact route), so AVERAGE reflects pace on these roads across
+                    // all rides. loadCandidates returns EVERY overlapping track (no top-N cap) — the
+                    // seed is O(track points), one-time per cold/invalidated route, off Main.
+                    val tracks = trackStore().loadCandidates(bbox)
+                    Timber.i("KVP match: loaded ${tracks.size} overlapping track(s) in ${SystemClock.elapsedRealtime() - matchStartMs}ms (routeLen=${"%.0f".format(path.totalM)})")
                     currentCoroutineContext().ensureActive()
-                    // Resolve the active profile once: mode/pick/target may all be per-profile overrides.
                     val eff = resolveProfile(activeConfig.value, activeProfileId)
                     val pick = eff.ghostPick
-                    // ALL picks (AVERAGE/BEST/LAST) race the one persisted per-route grid. Keyed on the
-                    // DECODED-POLYLINE length — deterministic for a route file, unlike state.routeDistance
-                    // which can be NaN on early emissions and drift across recalcs; an unstable length would
-                    // round to a different key on a later ride and silently orphan the aggregate. The
-                    // ride-end save keys on the same rm.path.totalM.
                     val key = routeKeyOf(state.name, path.totalM)
-                    // load/save are blocking filesystem IO (the save fsyncs+renames); run them on
-                    // Dispatchers.IO, not this match coroutine's Default (CPU) pool. The seed COMPUTE
-                    // (routeLaps + seedAggregateFromLaps) stays on Default.
+                    val overlapNow = tracks.size
                     var agg = withContext(Dispatchers.IO) { aggregateStore().load(key) }
-                    val justSeeded = agg == null
-                    if (agg == null) {
-                        // First match of this route → seed the grid from recorded history (one-time, O(n)).
-                        val lapStartMs = SystemClock.elapsedRealtime()
-                        val laps = SegmentMatcher.routeLaps(path, tracks.sortedBy { it.startedAtEpoch }, SegmentMatcher.Params(maxTracks = maxTracks))
-                        val lapMs = SystemClock.elapsedRealtime() - lapStartMs
-                        if (laps.isNotEmpty()) {
-                            val seeded = seedAggregateFromLaps(key, state.name, path.totalM, laps)
-                            agg = withContext(Dispatchers.IO) {
-                                if (aggregateStore().saveIfAbsent(seeded)) seeded
-                                else aggregateStore().load(key) ?: seeded
-                            }
-                            Timber.i("KVP grid: seeded $key from ${laps.size} history lap(s) — routeLaps ${lapMs}ms")
-                            // SEED DIAGNOSTIC (gated on the opt-in file log, one-time per cold route): explains
-                            // WHY a route ends up mostly Ghost-Pace. AVERAGE only shows a true mean where ≥2
-                            // recorded laps overlap a node; if most nodes are count==1 the route has effectively
-                            // one full recording and the rest are partial overlaps. We log (a) the per-node count
-                            // histogram + covered fractions of the seeded grid, and (b) per CANDIDATE track how
-                            // many laps it yielded and how many nodes it folds ALONE — so we can see whether a
-                            // partial/variant track under-folds against the real (looping, road-snapped) polyline.
-                            if (FileLogTree.enabled) {
-                                val g = agg
-                                if (g != null) {
-                                    val n = g.nodes.size
-                                    val ge1 = g.nodes.count { it.count >= 1 }
-                                    val ge2 = g.nodes.count { it.count >= AGG_MIN_LAPS }
-                                    val hist = g.nodes.groupingBy { it.count }.eachCount().toSortedMap()
-                                    Timber.i(
-                                        "KVP seed diag: nodes=%d covered(≥1)=%d (%d%%) avg-raceable(≥%d)=%d (%d%%) counts=%s",
-                                        n, ge1, if (n > 0) ge1 * 100 / n else 0,
-                                        AGG_MIN_LAPS, ge2, if (n > 0) ge2 * 100 / n else 0, hist,
-                                    )
-                                    tracks.sortedBy { it.startedAtEpoch }.forEach { t ->
-                                        val tl = SegmentMatcher.routeLaps(
-                                            path, listOf(t), SegmentMatcher.Params(maxTracks = maxTracks),
-                                        )
-                                        val solo = seedAggregateFromLaps(key, state.name, path.totalM, tl)
-                                        val cov = solo.nodes.count { it.count >= 1 }
-                                        Timber.i(
-                                            "KVP seed cand: %s src=%s pts=%d laps=%d folds=%d node(s) (%d%%)",
-                                            t.id, t.source, t.points.size, tl.size, cov,
-                                            if (n > 0) cov * 100 / n else 0,
-                                        )
-                                    }
-                                }
-                            }
+                    // Lazy re-seed: recompute when history on these roads grew meaningfully since the
+                    // cached seed. Staleness costs ~3.6 % median per-node and does NOT accumulate, so a
+                    // generous threshold avoids re-parsing the whole overlapping set every ride.
+                    val grew = agg != null &&
+                        overlapNow >= kotlin.math.max(agg!!.seededTrackCount + 5, (agg!!.seededTrackCount * 1.2).toInt())
+                    // Did this match (re)seed the grid? Drives the "(just seeded)" suffix on the racing log.
+                    val justSeeded = agg == null || grew
+                    if (agg == null || grew) {
+                        val seedStartMs = SystemClock.elapsedRealtime()
+                        val seeded = CorridorSeeder.seed(key, state.name, path, tracks)
+                        agg = withContext(Dispatchers.IO) { aggregateStore().save(seeded); seeded }
+                        Timber.i(
+                            "KVP grid: corridor-seeded $key from ${tracks.size} track(s) in ${SystemClock.elapsedRealtime() - seedStartMs}ms${if (grew) " (re-seed: history grew)" else ""}",
+                        )
+                        if (FileLogTree.enabled) {
+                            val n = seeded.nodes.size
+                            val ge1 = seeded.nodes.count { it.count >= 1 }
+                            val ge2 = seeded.nodes.count { it.count >= AGG_MIN_LAPS }
+                            val hist = seeded.nodes.groupingBy { it.count }.eachCount().toSortedMap()
+                            Timber.i(
+                                "KVP seed diag: nodes=%d covered(≥1)=%d (%d%%) avg(≥2)=%d (%d%%) counts=%s",
+                                n, ge1, if (n > 0) ge1 * 100 / n else 0,
+                                ge2, if (n > 0) ge2 * 100 / n else 0, hist,
+                            )
                         }
                     }
                     val matched = agg?.toLiveSegments(pick).orEmpty()
