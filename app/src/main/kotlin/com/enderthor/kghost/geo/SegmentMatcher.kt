@@ -269,16 +269,14 @@ object SegmentMatcher {
     private const val SEED_MAX_GAP_M = 500.0
 
     /**
-     * Seed-only projection windows — WIDER than the live [sliceFwdWindowM]/[sliceBackWindowM] used by
-     * [extractTrackSlice]. The seed runs OFFLINE over a whole, already-ordered track at once, so the
-     * narrow live window (whose job is to stop tick-to-tick GPS pass-flips on a self-looping route) is
-     * unnecessary; a wider forward window lets a GENUINE repeat that wanders a little — GPS noise, a
-     * slightly different line/lane, the route sampling spacing — keep tracking the route instead of
-     * falling out after a short stretch. On real history this roughly TRIPLES the mid-route coverage
-     * AVERAGE gets from existing recordings (a near-repeat that the 250 m window credited for ~6 % of
-     * the route is credited for ~58 % of it). Kept MODERATE, not global: too wide a forward window on a
-     * loop lets the advance test snap onto a LATER pass and fabricate coverage. [SEED_MAX_GAP_M] stays
-     * at 500 m, so a genuine long off-route excursion still SPLITS rather than bridging.
+     * Seed-only projection windows for the LEGACY [routeLaps]/[seedLaps] path. NOTE: as of the corridor
+     * pace model the PRODUCTION seed is [com.enderthor.kghost.engine.CorridorSeeder], not [seedLaps] —
+     * [routeLaps]/[seedLaps]/[extractTrackSlice] and these windows are now exercised only by their unit
+     * tests. Kept for reference and those differential tests; the "tripled mid-route coverage" this
+     * widening once gave AVERAGE no longer applies to the shipped path (CorridorSeeder supersedes it).
+     * (Historically: wider than the live [sliceFwdWindowM]/[sliceBackWindowM] so an offline whole-track
+     * pass lets a genuine near-repeat that wanders a little keep tracking the route instead of falling
+     * out after a short stretch; kept MODERATE so a loop's advance test can't snap onto a later pass.)
      */
     private const val seedFwdWindowM = 600.0
     private const val seedBackWindowM = 50.0
