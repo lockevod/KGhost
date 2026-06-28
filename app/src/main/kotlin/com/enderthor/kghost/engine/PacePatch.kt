@@ -1,5 +1,6 @@
 package com.enderthor.kghost.engine
 
+import com.enderthor.kghost.geo.Polyline
 import com.enderthor.kghost.geo.RecordedTrack
 import kotlin.math.cos
 import kotlin.math.floor
@@ -14,19 +15,26 @@ class PacePatch private constructor(
     private val refLat: Double,
     private val reducers: Map<Long, Reducer>,
 ) {
-    private class Reducer { var ema = 0.0; var min = 0.0; var last = 0.0; var count = 0; val seen = HashSet<String>() }
+    private class Reducer { var ema = 0.0; var min = 0.0; var last = 0.0; var count = 0; var bearing = 0.0; val seen = HashSet<String>() }
 
     private val latStep = TrackSamples.MATCH_RADIUS_M / 111_320.0
     private val lngStep = TrackSamples.MATCH_RADIUS_M / kotlin.math.max(1.0, 111_320.0 * cos(Math.toRadians(refLat)))
 
     fun pace(lat: Double, lng: Double, bearingDeg: Double, pick: GhostPick): Double? {
         val ci = floor(lat / latStep).toInt(); val cj = floor(lng / lngStep).toInt(); val bb = bearingBin(bearingDeg)
-        var best: Reducer? = null; var bestCount = 0
-        for (di in -1..1) for (dj in -1..1) for (db in -1..1) {
-            val r = reducers[pack(ci + di, cj + dj, ((bb + db) % BEARING_BINS + BEARING_BINS) % BEARING_BINS)] ?: continue
-            if (r.count > bestCount) { best = r; bestCount = r.count }
-        }
-        val r = best ?: return null
+        // Prefer the rider's OWN cell+bin (no distance loss); fall to the 3×3×3 neighbourhood only when it is
+        // empty, and there reject any reducer whose real bearing is > BEARING_TOL_DEG from the rider's heading
+        // (the ±1 bin window alone is ~135° wide — too loose; the 1D model gated at a precise 45°).
+        val r = reducers[pack(ci, cj, bb)] ?: run {
+            var best: Reducer? = null; var bestCount = 0
+            for (di in -1..1) for (dj in -1..1) for (db in -1..1) {
+                if (di == 0 && dj == 0 && db == 0) continue
+                val rr = reducers[pack(ci + di, cj + dj, ((bb + db) % BEARING_BINS + BEARING_BINS) % BEARING_BINS)] ?: continue
+                if (Polyline.bearingDiffDeg(rr.bearing, bearingDeg) > TrackSamples.BEARING_TOL_DEG) continue
+                if (rr.count > bestCount) { best = rr; bestCount = rr.count }
+            }
+            best
+        } ?: return null
         return when (pick) {
             GhostPick.AVERAGE -> if (r.count >= AGG_MIN_LAPS) r.ema else r.last
             GhostPick.LAST -> r.last
@@ -61,6 +69,7 @@ class PacePatch private constructor(
                     }
                     r.min = if (r.count == 0) tpm else min(r.min, tpm)
                     r.last = tpm
+                    r.bearing = s.bearingDeg
                     r.count++
                 }
             }
