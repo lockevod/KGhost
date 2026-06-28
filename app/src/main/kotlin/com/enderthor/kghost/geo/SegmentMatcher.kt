@@ -265,8 +265,23 @@ object SegmentMatcher {
     }
 
     /** Route-distance jump (m) above which [seedLaps] treats a windowed-projection miss as a long
-     *  off-route excursion and SPLITS the lap rather than bridging it (2 × [sliceFwdWindowM]). */
+     *  off-route excursion and SPLITS the lap rather than bridging it. */
     private const val SEED_MAX_GAP_M = 500.0
+
+    /**
+     * Seed-only projection windows — WIDER than the live [sliceFwdWindowM]/[sliceBackWindowM] used by
+     * [extractTrackSlice]. The seed runs OFFLINE over a whole, already-ordered track at once, so the
+     * narrow live window (whose job is to stop tick-to-tick GPS pass-flips on a self-looping route) is
+     * unnecessary; a wider forward window lets a GENUINE repeat that wanders a little — GPS noise, a
+     * slightly different line/lane, the route sampling spacing — keep tracking the route instead of
+     * falling out after a short stretch. On real history this roughly TRIPLES the mid-route coverage
+     * AVERAGE gets from existing recordings (a near-repeat that the 250 m window credited for ~6 % of
+     * the route is credited for ~58 % of it). Kept MODERATE, not global: too wide a forward window on a
+     * loop lets the advance test snap onto a LATER pass and fabricate coverage. [SEED_MAX_GAP_M] stays
+     * at 500 m, so a genuine long off-route excursion still SPLITS rather than bridging.
+     */
+    private const val seedFwdWindowM = 600.0
+    private const val seedBackWindowM = 50.0
 
     /**
      * One forward pass over a track for the seed → ZERO OR MORE laps. Project each point onto the route
@@ -296,7 +311,7 @@ object SegmentMatcher {
             val along: Double
             val perp: Double
             if (prevRouteM.isNaN() ||
-                !route.nearestProjectionNearInto(tp.lat, tp.lng, prevRouteM, sliceBackWindowM, sliceFwdWindowM, projOut)
+                !route.nearestProjectionNearInto(tp.lat, tp.lng, prevRouteM, seedBackWindowM, seedFwdWindowM, projOut)
             ) {
                 val p = route.nearestProjection(LatLng(tp.lat, tp.lng))
                 along = p.distanceAlongM
