@@ -274,10 +274,11 @@ class TrackStore(private val dir: File) {
         return loadByIds(ids)
     }
 
-    /** Stored-track ids whose path cells overlap [routeBBox], WITHOUT parsing any track file — the
-     *  no-parse candidate set the corridor re-seed gate diffs against. */
-    fun candidateIdsFor(routeBBox: BBox): Set<String> =
-        synchronized(indexLock) { candidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION) }
+    /** Up to [maxTracks] stored-track ids whose path cells overlap [routeBBox], RANKED by route overlap,
+     *  WITHOUT parsing any track file — the no-parse candidate set the corridor re-seed gate diffs
+     *  against (and the exact set [loadTopCandidates] parses for the same [maxTracks]). */
+    fun candidateIdsFor(routeBBox: BBox, maxTracks: Int): Set<String> =
+        synchronized(indexLock) { rankCandidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION, maxTracks).toSet() }
 
     /**
      * Returns the parsed candidate tracks RANKED by ROUTE OVERLAP and capped at [maxTracks], parsing
