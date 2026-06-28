@@ -1304,10 +1304,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Lazy re-seed: recompute when history on these roads grew meaningfully since the
                     // cached seed. Staleness costs ~3.6 % median per-node and does NOT accumulate, so a
                     // generous threshold avoids re-parsing the whole overlapping set every ride.
-                    // Re-seed when history grew. While the seed is still SPARSE (< 5 tracks) re-seed on ANY
-                    // growth so a cold/new route starts racing on the very next ride (the per-ride fold that
-                    // used to do this is gone); once warmed, require +5 / +20 % to amortise the parse.
-                    val grew = agg != null && overlapNow > agg!!.seededTrackCount && (
+                    // Re-seed when the overlapping history CHANGED. Growth: while sparse (< 5 tracks) on ANY
+                    // growth so a cold/new route races on the next ride (the per-ride fold that did this is
+                    // gone); once warmed, require +5 / +20 % to amortise the parse. Shrink (prune/archive
+                    // removed tracks): re-seed once so a warmed aggregate doesn't freeze on a stale set.
+                    val grew = agg != null && overlapNow != agg!!.seededTrackCount && (
+                        overlapNow < agg!!.seededTrackCount ||
                         agg!!.seededTrackCount < 5 ||
                         overlapNow >= kotlin.math.max(agg!!.seededTrackCount + 5, (agg!!.seededTrackCount * 1.2).toInt())
                     )
@@ -1323,7 +1325,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val seeded = CorridorSeeder.seed(key, state.name, path, tracks).copy(seededTrackCount = overlapNow)
                         agg = withContext(Dispatchers.IO) { aggregateStore().save(seeded); seeded }
                         Timber.i(
-                            "KVP grid: corridor-seeded $key from ${tracks.size} track(s) (overlap=$overlapNow) in ${SystemClock.elapsedRealtime() - seedStartMs}ms${if (grew) " (re-seed: history grew)" else ""}",
+                            "KVP grid: corridor-seeded $key from ${tracks.size} track(s) (overlap=$overlapNow) in ${SystemClock.elapsedRealtime() - seedStartMs}ms${if (grew) " (re-seed: history changed)" else ""}",
                         )
                         if (FileLogTree.enabled) {
                             val n = seeded.nodes.size
