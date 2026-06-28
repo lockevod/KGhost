@@ -6,13 +6,18 @@ package com.enderthor.kghost.engine
  * reroutes / shortcuts / loops are irrelevant. A decimated breadcrumb places the map-ghost marker.
  *
  * gapTimeS = ghostTime − riderElapsed  (positive → rider faster than historical-self over ground covered)
- * gapDistM = riderDist − D_ghost       (D_ghost = breadcrumb distance where cumGhostTime == riderElapsed)
+ * gapDistM = riderDist − D_ghost       (D_ghost = path distance where cumGhostTime == riderElapsed)
+ *
+ * The gap is ANCHORED at the first tick (ghostTime := elapsedS) so the race starts at 0 regardless of the
+ * first tick's distance/elapsed origin; an odometer reset re-anchors the same way.
  */
 class GhostIntegrator(
     @Suppress("unused") private val pick: GhostPick,
     private val vpTimePerM: Double,
     private val decimateM: Double = 20.0,
 ) {
+    init { require(vpTimePerM.isFinite() && vpTimePerM > 0.0) { "vpTimePerM must be finite > 0, was $vpTimePerM" } }
+
     var ghostTime = 0.0; private set
     var gapTimeS = 0.0; private set
     var gapDistM = 0.0; private set
@@ -28,18 +33,27 @@ class GhostIntegrator(
     /** [paceAt] = the pace lookup (lat, lng, bearing) -> s/m or null (→ VP-fill). */
     fun onTick(riderDist: Double, lat: Double, lng: Double, bearingDeg: Double, elapsedS: Double,
                paceAt: (Double, Double, Double) -> Double?) {
-        if (lastRiderDist.isNaN()) { lastRiderDist = riderDist; push(riderDist, lat, lng) }
+        val fresh = lastRiderDist.isNaN()
+        val reset = !fresh && (riderDist - lastRiderDist) < -RESET_DROP_M
+        if (fresh || reset) {
+            // Anchor the gap to 0 at this tick; do NOT accrue the unknown pre-roll. (#5, #6)
+            lastRiderDist = riderDist
+            ghostTime = elapsedS
+            bcDist.clear(); bcTime.clear(); bcLat.clear(); bcLng.clear()
+        }
+        if (bcDist.isEmpty()) push(riderDist, lat, lng) // seed: fresh, reset, OR post-restore (#7a)
         val dd = riderDist - lastRiderDist
         if (dd > 0.0) {
             ghostTime += (paceAt(lat, lng, bearingDeg) ?: vpTimePerM) * dd
             lastRiderDist = riderDist
-            if (bcDist.isEmpty() || riderDist - bcDist.last() >= decimateM) push(riderDist, lat, lng)
+            if (riderDist - bcDist.last() >= decimateM) push(riderDist, lat, lng)
         }
         gapTimeS = ghostTime - elapsedS
-        place(elapsedS, riderDist)
+        place(elapsedS, riderDist, lat, lng)
     }
 
-    /** Restore scalar state on resume (Component 3). Breadcrumb restarts empty; the marker re-seeds. */
+    /** Restore scalar state on resume (Component 3). Breadcrumb restarts empty; it (and the ghost marker)
+     *  re-seed on the next [onTick] from the resume position — never leaving the marker NaN. */
     fun restore(ghostTime: Double, lastRiderDist: Double) {
         this.ghostTime = ghostTime; this.lastRiderDist = lastRiderDist
         bcDist.clear(); bcTime.clear(); bcLat.clear(); bcLng.clear()
@@ -49,17 +63,34 @@ class GhostIntegrator(
         bcDist.add(dist); bcTime.add(ghostTime); bcLat.add(lat); bcLng.add(lng)
     }
 
-    private fun place(elapsedS: Double, riderDist: Double) {
-        if (bcTime.isEmpty()) { gapDistM = 0.0; return }
+    private fun place(elapsedS: Double, riderDist: Double, lat: Double, lng: Double) {
+        if (bcTime.isEmpty()) { gapDistM = 0.0; ghostLat = lat; ghostLng = lng; return } // #7a: never NaN
         var lo = 0; var hi = bcTime.size
         while (lo < hi) { val m = (lo + hi) ushr 1; if (bcTime[m] < elapsedS) lo = m + 1 else hi = m }
-        if (lo >= bcTime.size) { gapDistM = riderDist - bcDist.last(); ghostLat = bcLat.last(); ghostLng = bcLng.last(); return }
+        if (lo >= bcTime.size) {
+            // elapsedS is past the latest crumb's ghost-time. The target sits between the last crumb and the
+            // LIVE point (riderDist, ghostTime) — interpolate there so the sign tracks gapTimeS. (#7c)
+            if (elapsedS <= ghostTime) {
+                val t0 = bcTime.last(); val d0 = bcDist.last(); val la0 = bcLat.last(); val ln0 = bcLng.last()
+                val f = if (ghostTime > t0) ((elapsedS - t0) / (ghostTime - t0)).coerceIn(0.0, 1.0) else 1.0
+                gapDistM = riderDist - (d0 + f * (riderDist - d0))
+                ghostLat = la0 + f * (lat - la0); ghostLng = ln0 + f * (lng - ln0)
+            } else {
+                // Rider BEHIND → ghost is ahead, off the known path → clamp to the rider's position (sign-safe).
+                gapDistM = 0.0; ghostLat = lat; ghostLng = lng
+            }
+            return
+        }
         if (lo == 0) { gapDistM = riderDist - bcDist[0]; ghostLat = bcLat[0]; ghostLng = bcLng[0]; return }
         val t0 = bcTime[lo - 1]; val t1 = bcTime[lo]
         val f = if (t1 > t0) (elapsedS - t0) / (t1 - t0) else 0.0
-        val dGhost = bcDist[lo - 1] + f * (bcDist[lo] - bcDist[lo - 1])
-        gapDistM = riderDist - dGhost
+        gapDistM = riderDist - (bcDist[lo - 1] + f * (bcDist[lo] - bcDist[lo - 1]))
         ghostLat = bcLat[lo - 1] + f * (bcLat[lo] - bcLat[lo - 1])
         ghostLng = bcLng[lo - 1] + f * (bcLng[lo] - bcLng[lo - 1])
+    }
+
+    private companion object {
+        /** A backward Δd larger than this (m) is an odometer reset (lap/new activity), not a GPS glitch. */
+        const val RESET_DROP_M = 100.0
     }
 }
