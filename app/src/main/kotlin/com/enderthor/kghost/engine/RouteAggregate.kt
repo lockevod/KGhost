@@ -35,9 +35,11 @@ const val AGG_SCHEMA_VERSION = 2
  *  vs an easy-ride-heavy average; a tighter 1.5 would clamp a legitimately fast lap. Self-anchored. */
 const val BEST_MAX_SPEEDUP = 2.0
 
-/** AVERAGE needs at least this many laps on a node before it is raceable — one lap is not yet a
- *  smoothed mean (a single noisy GPS lap would lurch). BEST/LAST race at ≥1 (a single recorded ride
- *  is exactly what they represent). */
+/** Laps on a node below which AVERAGE has no smoothed mean yet and FALLS BACK to the LAST reducer
+ *  (the single recorded lap) rather than dropping the node to Ghost-Pace. At ≥ this many laps AVERAGE
+ *  uses the EMA mean. This is NO LONGER a raceability gate — every pick races covered nodes at count≥1;
+ *  it only selects EMA-vs-last for AVERAGE. (Gating AVERAGE at ≥2 left a route with only ONE full
+ *  recorded lap almost entirely in Ghost-Pace mid-route, since that lone lap never lifts a node past 1.) */
 const val AGG_MIN_LAPS = 2
 
 /** Minimum raceable run length (m). A contiguous raceable run shorter than this is dropped (isolated
@@ -84,18 +86,19 @@ data class PerRouteAggregate(
      * Raceable [LiveSegment]s for [pick], from this grid: contiguous runs of covered nodes (count≥1),
      * each built from the pick's reducer (EMA / min-clamped / last). Runs shorter than [minSegM] are
      * dropped. The caller bridges the gaps (count==0 / dropped) with the Ghost-Pace fill via
-     * [RouteGhost.build]. AVERAGE needs ≥ [AGG_MIN_LAPS] laps per node (a single noisy lap is not a
-     * smoothed mean); BEST/LAST race at ≥ 1 (a single recorded ride is what they represent).
+     * [RouteGhost.build]. ALL picks race at count≥1; AVERAGE uses the EMA mean on a node with
+     * ≥ [AGG_MIN_LAPS] laps and FALLS BACK to the LAST reducer (the single recorded lap) below that —
+     * so a route with only one full recording still races end-to-end instead of sitting in Ghost-Pace.
      */
     fun toLiveSegments(pick: GhostPick, minSegM: Double = AGG_MIN_SEG_M): List<LiveSegment> {
         val out = ArrayList<LiveSegment>()
-        val minLaps = if (pick == GhostPick.AVERAGE) AGG_MIN_LAPS else 1
         // node[k].count = laps covering the INCOMING segment (k-1→k); node 0 has none, so scan k≥1.
+        // Every pick is raceable at count≥1 (AVERAGE's EMA-vs-last choice is per-node in nodeDelta).
         var k = 1
         while (k < nodes.size) {
-            if (nodes[k].count < minLaps) { k++; continue }
+            if (nodes[k].count < 1) { k++; continue }
             val firstK = k
-            while (k + 1 < nodes.size && nodes[k + 1].count >= minLaps) k++
+            while (k + 1 < nodes.size && nodes[k + 1].count >= 1) k++
             buildRunSegment(firstK - 1, k, pick, minSegM)?.let { out.add(it) }
             k++
         }
@@ -103,11 +106,13 @@ data class PerRouteAggregate(
     }
 
     /** The pick's per-segment delta at node [k]. BEST is clamped to a plausible multiple of the average
-     *  there (no glitch spike, no node-to-node jump); AVERAGE/LAST are the raw reducers. */
+     *  there (no glitch spike, no node-to-node jump); LAST is the raw last-good reducer; AVERAGE is the
+     *  EMA mean once a node has ≥ [AGG_MIN_LAPS] laps and falls back to LAST (the lone recorded lap)
+     *  below that — at count==1 the two are identical anyway, so the fallback only ever helps coverage. */
     private fun nodeDelta(k: Int, pick: GhostPick): Double {
         val n = nodes[k]
         return when (pick) {
-            GhostPick.AVERAGE -> n.dtS
+            GhostPick.AVERAGE -> if (n.count >= AGG_MIN_LAPS) n.dtS else n.lastDtS
             GhostPick.LAST -> n.lastDtS
             GhostPick.BEST -> maxOf(n.minDtS, n.dtS / BEST_MAX_SPEEDUP)
         }
