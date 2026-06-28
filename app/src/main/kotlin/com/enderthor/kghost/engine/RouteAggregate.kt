@@ -27,7 +27,7 @@ const val AGG_MAX_SPEED_MS = 30.0
 
 /** Persisted-aggregate schema version. Bump when the node/aggregate layout changes so old blobs are
  *  discarded (and re-seeded) instead of mis-read. */
-const val AGG_SCHEMA_VERSION = 3
+const val AGG_SCHEMA_VERSION = 4
 
 /** BEST reducer plausibility cap: a node's "best" may be at most this many times faster than its own
  *  recency-weighted average there. Clips a GPS-glitch segment (which as a raw min would spike the
@@ -46,6 +46,26 @@ const val AGG_MIN_LAPS = 2
  *  noise); ported from SegmentMatcher.minSegmentM. The run set is per-pick (AVERAGE gates at
  *  AGG_MIN_LAPS, BEST/LAST at 1). */
 const val AGG_MIN_SEG_M = 300.0
+
+/** Symmetric-difference size (added ∪ removed candidate ids) that triggers a WARMED re-seed; a seed
+ *  with fewer than this many tracks re-seeds on ANY change (cold/sparse routes warm up fast). */
+const val RESEED_MIN_DELTA = 5
+
+/**
+ * Whether the corridor grid must be (re)seeded: no cache, an empty seed, or the overlapping candidate
+ * id SET changed enough. Gating on the symmetric difference of the id SET (not its COUNT) is essential
+ * — auto-tidy archives an old near-duplicate as each new ride is added, churning the set at a CONSTANT
+ * size, so a count-equality gate would freeze a warmed aggregate on its first seed forever. Pure;
+ * [nowIds] is the no-parse candidate id set from TrackStore.
+ */
+fun shouldReseed(cached: PerRouteAggregate?, nowIds: Set<String>): Boolean {
+    if (cached == null) return true
+    val seeded = cached.seededTrackIds.toSet()
+    if (seeded == nowIds) return false
+    if (seeded.size < RESEED_MIN_DELTA) return true
+    val symDiff = (seeded - nowIds).size + (nowIds - seeded).size
+    return symDiff >= kotlin.math.max(RESEED_MIN_DELTA, (seeded.size * 0.2).toInt())
+}
 
 /** One grid node: the three reducers of the per-segment delta (node k-1 → k), plus the lap count. */
 @Serializable
@@ -81,8 +101,10 @@ data class PerRouteAggregate(
     val schemaVersion: Int = 0,
     /** Node `k` (index) represents route distance `k * stepM`. Size = floor(routeLenM/stepM) + 1. */
     val nodes: List<AggregateNode>,
-    /** Tracks the corridor seed folded; drives the lazy re-seed when history grows. 0 = legacy/absent. */
-    val seededTrackCount: Int = 0,
+    /** Stored-track ids the corridor seed folded (the no-parse candidate set at seed time). The lazy
+     *  re-seed gates on the SYMMETRIC DIFFERENCE of this set vs the current candidate set — NOT on its
+     *  size — because auto-tidy churns the set at a constant size, which a count gate would never see. */
+    val seededTrackIds: List<String> = emptyList(),
 ) {
     /**
      * Raceable [LiveSegment]s for [pick], from this grid: contiguous runs of covered nodes (count≥1),

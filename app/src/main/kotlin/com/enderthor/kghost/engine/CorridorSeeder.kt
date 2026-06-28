@@ -60,7 +60,7 @@ object CorridorSeeder {
         val nodeCount = (floor(route.totalM / stepM) + 1).toInt().coerceAtLeast(1)
         val nodes = Array(nodeCount) { AggregateNode() }
         if (route.points.size < 2) {
-            return PerRouteAggregate(routeKey, routeName, route.totalM, stepM, AGG_SCHEMA_VERSION, nodes.asList(), tracks.size)
+            return PerRouteAggregate(routeKey, routeName, route.totalM, stepM, AGG_SCHEMA_VERSION, nodes.asList())
         }
 
         val refLat = route.points.first().lat
@@ -155,7 +155,6 @@ object CorridorSeeder {
             stepM = stepM,
             schemaVersion = AGG_SCHEMA_VERSION,
             nodes = nodes.asList(),
-            seededTrackCount = tracks.size,
         )
     }
 }
