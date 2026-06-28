@@ -1,5 +1,7 @@
 package com.enderthor.kghost.engine
 
+import kotlinx.serialization.Serializable
+
 /**
  * Which stored ghost to race when multiple past tracks cover the same stretch.
  *
@@ -8,6 +10,7 @@ package com.enderthor.kghost.engine
  * (mean of recent laps of the loaded route — see [RouteAggregate]); the extension only falls back to
  * the matcher (as BEST) while the aggregate is still warming up.
  */
+@Serializable
 enum class GhostPick { BEST, LAST, AVERAGE }
 
 /**
