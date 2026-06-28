@@ -1291,18 +1291,16 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         if (lastMatchedPolyline == mine) clearRouteMode()
                         return@launch
                     }
-                    // Corridor seed: fold the rider's WHOLE overlapping history by cell+bearing (not
-                    // forward laps of this exact route), so AVERAGE reflects pace on these roads across
-                    // all rides. loadCandidates returns EVERY overlapping track (no top-N cap) — the
-                    // seed is O(track points), one-time per cold/invalidated route, off Main.
-                    val tracks = trackStore().loadCandidates(bbox)
-                    Timber.i("KVP match: loaded ${tracks.size} overlapping track(s) in ${SystemClock.elapsedRealtime() - matchStartMs}ms (routeLen=${"%.0f".format(path.totalM)})")
                     currentCoroutineContext().ensureActive()
                     val eff = resolveProfile(activeConfig.value, activeProfileId)
                     val pick = eff.ghostPick
                     val key = routeKeyOf(state.name, path.totalM)
-                    val overlapNow = tracks.size
                     var agg = withContext(Dispatchers.IO) { aggregateStore().load(key) }
+                    // Cheap, NO-PARSE count of overlapping tracks (index ids only). Gates whether we pay the
+                    // full parse + seed. seededTrackCount below is stored from this SAME metric so the
+                    // comparison is apples-to-apples (loadCandidates may drop unparseable files, candidateCount
+                    // does not).
+                    val overlapNow = trackStore().candidateCount(bbox)
                     // Lazy re-seed: recompute when history on these roads grew meaningfully since the
                     // cached seed. Staleness costs ~3.6 % median per-node and does NOT accumulate, so a
                     // generous threshold avoids re-parsing the whole overlapping set every ride.
@@ -1312,10 +1310,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     val justSeeded = agg == null || grew
                     if (agg == null || grew) {
                         val seedStartMs = SystemClock.elapsedRealtime()
-                        val seeded = CorridorSeeder.seed(key, state.name, path, tracks)
+                        // Parse the overlapping history ONLY when (re)seeding — one-time per cold/grown route,
+                        // off Main. (No track-count cap: the seed is O(track points) and the parse happens at
+                        // most once per route until history grows; a pathological many-overlapping-rides
+                        // history is the only unbounded case and is not realistic here.)
+                        val tracks = trackStore().loadCandidates(bbox)
+                        val seeded = CorridorSeeder.seed(key, state.name, path, tracks).copy(seededTrackCount = overlapNow)
                         agg = withContext(Dispatchers.IO) { aggregateStore().save(seeded); seeded }
                         Timber.i(
-                            "KVP grid: corridor-seeded $key from ${tracks.size} track(s) in ${SystemClock.elapsedRealtime() - seedStartMs}ms${if (grew) " (re-seed: history grew)" else ""}",
+                            "KVP grid: corridor-seeded $key from ${tracks.size} track(s) (overlap=$overlapNow) in ${SystemClock.elapsedRealtime() - seedStartMs}ms${if (grew) " (re-seed: history grew)" else ""}",
                         )
                         if (FileLogTree.enabled) {
                             val n = seeded.nodes.size
