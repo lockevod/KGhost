@@ -1304,8 +1304,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Lazy re-seed: recompute when history on these roads grew meaningfully since the
                     // cached seed. Staleness costs ~3.6 % median per-node and does NOT accumulate, so a
                     // generous threshold avoids re-parsing the whole overlapping set every ride.
-                    val grew = agg != null &&
+                    // Re-seed when history grew. While the seed is still SPARSE (< 5 tracks) re-seed on ANY
+                    // growth so a cold/new route starts racing on the very next ride (the per-ride fold that
+                    // used to do this is gone); once warmed, require +5 / +20 % to amortise the parse.
+                    val grew = agg != null && overlapNow > agg!!.seededTrackCount && (
+                        agg!!.seededTrackCount < 5 ||
                         overlapNow >= kotlin.math.max(agg!!.seededTrackCount + 5, (agg!!.seededTrackCount * 1.2).toInt())
+                    )
                     // Did this match (re)seed the grid? Drives the "(just seeded)" suffix on the racing log.
                     val justSeeded = agg == null || grew
                     if (agg == null || grew) {
