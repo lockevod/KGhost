@@ -80,14 +80,20 @@ class CorridorSeederTest {
         assertEquals(50.0, agg.nodes[5].dtS, 1e-6)
     }
 
-    @Test fun `a GPS spike segment is rejected`() {
+    @Test fun `a GPS spike segment contributes no bogus fast pace`() {
         val r = route(200.0)
+        // Segment 100->125 m is a teleport: 25 m in 0.1 s = 250 m/s > AGG_MAX_SPEED_MS; everything else
+        // is a genuine 5 s / 25 m. The spike segment must be rejected, so its ~0.01 s/25 m pace appears
+        // on NO node; covered nodes show the real 5 s pace (a node by the spike is fed by the adjacent
+        // valid segment, which is spatially correct — the rider rode that spot at a real pace).
         val pts = (0..8).map { i ->
             val t = if (i <= 4) i * 5.0 else (4 * 5.0 + 0.1) + (i - 5) * 5.0
             TrackPointDto(lat = 0.0, lng = i * 25.0 * degPerM, distanceM = i * 25.0, timeS = t)
         }
         val agg = CorridorSeeder.seed("k", "K", r, listOf(RecordedTrack("sp", 1L, pts)))
-        assertEquals(0, agg.nodes[5].count)
+        for (node in agg.nodes) {
+            if (node.count >= 1) assertEquals(5.0, node.dtS, 1e-6)
+        }
     }
 
     @Test fun `one pass is raceable and AVERAGE falls back to LAST`() {

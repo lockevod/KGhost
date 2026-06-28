@@ -16,6 +16,10 @@ import kotlin.math.min
  * is almost always a single recording -> permanent LAST/GP). See
  * docs/superpowers/specs/2026-06-28-corridor-pace-model-design.md.
  *
+ * Each track segment is anchored not just at its END point but densified into anchors placed ALONG
+ * the segment at <= [ANCHOR_SPACING_M], so corridor coverage is independent of the track's native
+ * point spacing (coarse / imported / fast-descent tracks no longer leave 25 m nodes uncovered).
+ *
  * Pure (no Android / no IO). The output is identical in shape to the old seed, so [toLiveSegments],
  * [RouteGhost], the tick and the picks are unchanged.
  */
@@ -28,6 +32,12 @@ object CorridorSeeder {
     /** Max heading difference (deg) between a sample and the route's local bearing. Separates
      *  uphill/downhill without losing recall (97 % vs 98 % direction-agnostic on real data). */
     const val BEARING_TOL_DEG = 45.0
+
+    /** Max along-segment spacing (m) of the interpolated pace anchors. Decoupling coverage from the
+     *  track's native point spacing: a single END-only anchor needs point spacing <= ~36 m (2×radius)
+     *  to keep 25 m nodes covered, which the 20 m decimation FLOOR does not guarantee; placing anchors
+     *  every <= 12 m along each segment makes any node within radius of the ridden line match. */
+    const val ANCHOR_SPACING_M = 12.0
 
     private data class Sample(
         val lat: Double, val lng: Double,
@@ -68,16 +78,22 @@ object CorridorSeeder {
                 var timePerM = dt / d
                 if (speed < AGG_MIN_SPEED_MS) timePerM = 1.0 / AGG_MIN_SPEED_MS
                 if (!timePerM.isFinite()) continue
-                // Anchor the segment's pace at its END point: node k then matches the segment that
-                // ENDS at k*stepM (the incoming segment k-1→k), mirroring the live aggregate's node
-                // semantics (node[k] = delta of segment k-1→k). Anchoring at the midpoint instead would
-                // let a node also grab the NEXT segment within radius — e.g. a node could inherit pace
-                // from a segment just past a rejected GPS-spike segment, miscounting it as covered.
-                val sLat = b.lat
-                val sLng = b.lng
                 val bearing = Polyline.bearingDeg(LatLng(a.lat, a.lng), LatLng(b.lat, b.lng))
-                grid.getOrPut(cellKey(ci(sLat), cj(sLng))) { ArrayList() }
-                    .add(Sample(sLat, sLng, bearing, timePerM, track.id, track.startedAtEpoch))
+                // Densify: place anchors ALONG the segment at <= ANCHOR_SPACING_M, each carrying this
+                // segment's pace + bearing, so coverage does NOT depend on the track's native point
+                // spacing (imported / smart-recording / fast-descent tracks can be 40-60 m apart, which a
+                // single END-only anchor + 18 m radius would leave 25 m nodes uncovered → false Ghost-Pace).
+                // f runs (0,1]: the END point (f=1) is always emitted, so a node sitting exactly on a 25 m
+                // boundary still matches the segment ENDING there (nearest-per-track dedup makes that exact
+                // 0 m hit win); the START (f=0, owned by the previous segment) is never emitted.
+                val subAnchors = kotlin.math.max(1, kotlin.math.ceil(d / ANCHOR_SPACING_M).toInt())
+                for (sIdx in 1..subAnchors) {
+                    val f = sIdx.toDouble() / subAnchors
+                    val sLat = a.lat + f * (b.lat - a.lat)
+                    val sLng = a.lng + f * (b.lng - a.lng)
+                    grid.getOrPut(cellKey(ci(sLat), cj(sLng))) { ArrayList() }
+                        .add(Sample(sLat, sLng, bearing, timePerM, track.id, track.startedAtEpoch))
+                }
             }
         }
 
