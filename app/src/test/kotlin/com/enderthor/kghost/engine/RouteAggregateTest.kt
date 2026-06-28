@@ -318,4 +318,16 @@ class RouteAggregateTest {
         assertEquals(2, agg.nodes[1].count)
         assertTrue(agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).isNotEmpty())
     }
+
+    @Test fun `schema is v3 and seededTrackCount round-trips`() {
+        assertEquals(3, AGG_SCHEMA_VERSION)
+        val agg = PerRouteAggregate(
+            routeKey = "k", routeName = "K", routeLenM = 100.0,
+            schemaVersion = AGG_SCHEMA_VERSION,
+            nodes = listOf(AggregateNode(), AggregateNode(dtS = 5.0, count = 2, minDtS = 5.0, lastDtS = 5.0)),
+            seededTrackCount = 7,
+        )
+        assertEquals(7, agg.seededTrackCount)
+        assertEquals(0, PerRouteAggregate("k", "K", 100.0, nodes = emptyList()).seededTrackCount)
+    }
 }

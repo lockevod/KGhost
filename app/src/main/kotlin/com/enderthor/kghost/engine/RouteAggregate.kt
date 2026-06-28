@@ -27,7 +27,7 @@ const val AGG_MAX_SPEED_MS = 30.0
 
 /** Persisted-aggregate schema version. Bump when the node/aggregate layout changes so old blobs are
  *  discarded (and re-seeded) instead of mis-read. */
-const val AGG_SCHEMA_VERSION = 2
+const val AGG_SCHEMA_VERSION = 3
 
 /** BEST reducer plausibility cap: a node's "best" may be at most this many times faster than its own
  *  recency-weighted average there. Clips a GPS-glitch segment (which as a raw min would spike the
@@ -81,6 +81,8 @@ data class PerRouteAggregate(
     val schemaVersion: Int = 0,
     /** Node `k` (index) represents route distance `k * stepM`. Size = floor(routeLenM/stepM) + 1. */
     val nodes: List<AggregateNode>,
+    /** Tracks the corridor seed folded; drives the lazy re-seed when history grows. 0 = legacy/absent. */
+    val seededTrackCount: Int = 0,
 ) {
     /**
      * Raceable [LiveSegment]s for [pick], from this grid: contiguous runs of covered nodes (count≥1),
