@@ -9,7 +9,7 @@ package com.enderthor.kghost.engine
  * gapDistM = riderDist − D_ghost       (D_ghost = path distance where cumGhostTime == riderElapsed)
  *
  * The gap is ANCHORED at the first tick (ghostTime := elapsedS) so the race starts at 0 regardless of the
- * first tick's distance/elapsed origin; an odometer reset re-anchors the same way.
+ * first tick's distance/elapsed origin; a backward step (coast/GPS-recovery correction) just re-baselines.
  */
 class GhostIntegrator(
     @Suppress("unused") private val pick: GhostPick,
@@ -33,20 +33,23 @@ class GhostIntegrator(
     /** [paceAt] = the pace lookup (lat, lng, bearing) -> s/m or null (→ VP-fill). */
     fun onTick(riderDist: Double, lat: Double, lng: Double, bearingDeg: Double, elapsedS: Double,
                paceAt: (Double, Double, Double) -> Double?) {
-        val fresh = lastRiderDist.isNaN()
-        val reset = !fresh && (riderDist - lastRiderDist) < -RESET_DROP_M
-        if (fresh || reset) {
-            // Anchor the gap to 0 at this tick; do NOT accrue the unknown pre-roll. (#5, #6)
-            lastRiderDist = riderDist
-            ghostTime = elapsedS
+        if (lastRiderDist.isNaN()) {
+            // First tick: anchor the gap to 0 (do NOT accrue the unknown pre-roll).
+            lastRiderDist = riderDist; ghostTime = elapsedS
             bcDist.clear(); bcTime.clear(); bcLat.clear(); bcLng.clear()
         }
-        if (bcDist.isEmpty()) push(riderDist, lat, lng) // seed: fresh, reset, OR post-restore (#7a)
+        if (bcDist.isEmpty()) push(riderDist, lat, lng) // seed: fresh OR post-restore (never NaN ghost)
         val dd = riderDist - lastRiderDist
         if (dd > 0.0) {
             ghostTime += (paceAt(lat, lng, bearingDeg) ?: vpTimePerM) * dd
             lastRiderDist = riderDist
             if (riderDist - bcDist.last() >= decimateM) push(riderDist, lat, lng)
+        } else if (dd < 0.0) {
+            // Backward step = a non-monotonic coast/GPS-recovery correction (the odometer source is
+            // CoastingEstimator.effectiveDistanceM, which snaps back when the raw fix returns). Re-baseline
+            // to the corrected position and KEEP ghostTime + the accrued lead; accrue nothing this tick.
+            // (A true odometer reset = a new activity, which gets a fresh integrator — never reached here.)
+            lastRiderDist = riderDist
         }
         gapTimeS = ghostTime - elapsedS
         place(elapsedS, riderDist, lat, lng)
@@ -87,10 +90,5 @@ class GhostIntegrator(
         gapDistM = riderDist - (bcDist[lo - 1] + f * (bcDist[lo] - bcDist[lo - 1]))
         ghostLat = bcLat[lo - 1] + f * (bcLat[lo] - bcLat[lo - 1])
         ghostLng = bcLng[lo - 1] + f * (bcLng[lo] - bcLng[lo - 1])
-    }
-
-    private companion object {
-        /** A backward Δd larger than this (m) is an odometer reset (lap/new activity), not a GPS glitch. */
-        const val RESET_DROP_M = 100.0
     }
 }
