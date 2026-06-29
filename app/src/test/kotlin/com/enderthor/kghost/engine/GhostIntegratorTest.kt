@@ -51,13 +51,15 @@ class GhostIntegratorTest {
         assertEquals(0.0, g.gapTimeS, 1e-6)
     }
 
-    @Test fun `an odometer reset re-baselines instead of freezing`() {
+    @Test fun `a backward coast correction re-baselines without wiping the lead or freezing`() {
         val g = newInt(); val src = pace(0.2, 1e9)
         g.onTick(0.0, 0.0, 0.0, 90.0, 0.0, src)
-        g.onTick(1000.0, 0.0, 1000.0, 90.0, 200.0, src) // ghostTime 200
-        g.onTick(0.0, 0.0, 0.0, 90.0, 205.0, src)        // reset → re-anchor ghostTime=205
-        g.onTick(50.0, 0.0, 50.0, 90.0, 215.0, src)      // +50 m at 0.2 → 215, NOT frozen at 200
-        assertEquals(215.0, g.ghostTime, 1e-6)
+        g.onTick(8000.0, 0.0, 8000.0, 90.0, 1500.0, src)   // ghostTime = 1600 (8000 m * 0.2 s/m)
+        val ghostBefore = g.ghostTime
+        g.onTick(7100.0, 0.0, 7100.0, 90.0, 1510.0, src)   // GPS recovers: distance snaps back 900 m
+        assertEquals(ghostBefore, g.ghostTime, 1e-9)        // lead NOT wiped (old reset set it to 1510)
+        g.onTick(7200.0, 0.0, 7200.0, 90.0, 1525.0, src)   // forward +100 m at 0.2 → +20
+        assertEquals(ghostBefore + 20.0, g.ghostTime, 1e-6) // accrual resumed, NOT frozen
     }
 
     @Test fun `gap distance never reports ahead while the rider is behind (end clamp)`() {
