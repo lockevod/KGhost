@@ -50,4 +50,10 @@ class PacePatchTest {
         assertNotNull(patch.pace(qLat, qLng, 70.0, GhostPick.AVERAGE)) // matching heading → hit
         assertNull(patch.pace(qLat, qLng, 1.0, GhostPick.AVERAGE))     // 1 deg rider, 70 deg road → filtered out
     }
+
+    @Test fun `a non-finite heading yields no pace (VP-fill), not max-count`() {
+        val patch = PacePatch.build(listOf(
+            RecordedTrack("a", 1L, (0..8).map { i -> TrackPointDto(0.0, i * 25.0 * degPerM, i * 25.0, i * 5.0) })))
+        assertNull(patch.pace(0.0, 100.0 * degPerM, Double.NaN, GhostPick.AVERAGE))
+    }
 }

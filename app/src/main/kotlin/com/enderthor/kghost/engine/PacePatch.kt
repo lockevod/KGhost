@@ -15,12 +15,17 @@ class PacePatch private constructor(
     private val refLat: Double,
     private val reducers: Map<Long, Reducer>,
 ) {
-    private class Reducer { var ema = 0.0; var min = 0.0; var last = 0.0; var count = 0; var bearing = 0.0; val seen = HashSet<String>() }
+    private class Reducer {
+        var ema = 0.0; var min = 0.0; var last = 0.0; var count = 0
+        var sinB = 0.0; var cosB = 0.0
+        fun meanBearingDeg(): Double = (Math.toDegrees(kotlin.math.atan2(sinB, cosB)) + 360.0) % 360.0
+    }
 
     private val latStep = TrackSamples.MATCH_RADIUS_M / 111_320.0
     private val lngStep = TrackSamples.MATCH_RADIUS_M / kotlin.math.max(1.0, 111_320.0 * cos(Math.toRadians(refLat)))
 
     fun pace(lat: Double, lng: Double, bearingDeg: Double, pick: GhostPick): Double? {
+        if (!bearingDeg.isFinite()) return null // #7: no trustworthy direction → VP-fill, not max-count
         val ci = floor(lat / latStep).toInt(); val cj = floor(lng / lngStep).toInt(); val bb = bearingBin(bearingDeg)
         // Prefer the rider's OWN cell+bin (no distance loss); fall to the 3×3×3 neighbourhood only when it is
         // empty, and there reject any reducer whose real bearing is > BEARING_TOL_DEG from the rider's heading
@@ -30,7 +35,7 @@ class PacePatch private constructor(
             for (di in -1..1) for (dj in -1..1) for (db in -1..1) {
                 if (di == 0 && dj == 0 && db == 0) continue
                 val rr = reducers[pack(ci + di, cj + dj, ((bb + db) % BEARING_BINS + BEARING_BINS) % BEARING_BINS)] ?: continue
-                if (Polyline.bearingDiffDeg(rr.bearing, bearingDeg) > TrackSamples.BEARING_TOL_DEG) continue
+                if (Polyline.bearingDiffDeg(rr.meanBearingDeg(), bearingDeg) > TrackSamples.BEARING_TOL_DEG) continue
                 if (rr.count > bestCount) { best = rr; bestCount = rr.count }
             }
             best
@@ -55,12 +60,12 @@ class PacePatch private constructor(
             val latStep = TrackSamples.MATCH_RADIUS_M / 111_320.0
             val lngStep = TrackSamples.MATCH_RADIUS_M / kotlin.math.max(1.0, 111_320.0 * cos(Math.toRadians(refLat)))
             val map = HashMap<Long, Reducer>()
+            val seen = HashMap<Long, MutableSet<String>>() // build-local; not retained
             for (track in tracks.sortedBy { it.startedAtEpoch }) {
                 TrackSamples.forEach(track) { s ->
                     val key = pack(floor(s.lat / latStep).toInt(), floor(s.lng / lngStep).toInt(), bearingBin(s.bearingDeg))
+                    if (!seen.getOrPut(key) { HashSet() }.add(s.trackId)) return@forEach // one pass per track per (cell,bin)
                     val r = map.getOrPut(key) { Reducer() }
-                    if (s.trackId in r.seen) return@forEach // one pass per track per (cell,bin)
-                    r.seen.add(s.trackId)
                     val tpm = s.timePerM
                     r.ema = when {
                         r.count == 0 -> tpm
@@ -69,7 +74,8 @@ class PacePatch private constructor(
                     }
                     r.min = if (r.count == 0) tpm else min(r.min, tpm)
                     r.last = tpm
-                    r.bearing = s.bearingDeg
+                    r.sinB += kotlin.math.sin(Math.toRadians(s.bearingDeg))
+                    r.cosB += kotlin.math.cos(Math.toRadians(s.bearingDeg))
                     r.count++
                 }
             }
