@@ -528,6 +528,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // Ghost route distance captured at the finish freeze so the MARKER freezes WITH the number (else the
     // icon keeps gliding to the line while the number is held). Null = not frozen.
     @Volatile private var finishedGhostRouteDist: Double? = null
+    // The last ghost route distance drawn while R was RELIABLE. When the rider goes off the route (R
+    // unreliable) the marker HOLDS this frozen position instead of hiding — so the icon never disappears
+    // while a route is loaded (incl. a Karoo reroute/deviation), it just pauses where you left the line and
+    // snaps to the rejoin. Null until the first reliable draw (then the marker is simply not shown yet).
+    @Volatile private var lastReliableGhostRouteDist: Double? = null
 
     /** Resets all per-ride/route anchor state to its cold-start values. Called at a genuine ride END
      *  (the Idle handler) and in stopTick — NOT on a host reconnect, where the anchor must survive so the
@@ -557,6 +562,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         lastCheckpointMs = 0L
         pendingCheckpoint = null
         finishedGhostRouteDist = null
+        lastReliableGhostRouteDist = null
     }
 
     // ---- B2 ghost checkpoint (scalar resume state) ---------------------------------------------
@@ -1931,6 +1937,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 integLastRiderDist = 0.0
                                 finishedGap = null
                                 finishedGhostRouteDist = null
+                                lastReliableGhostRouteDist = null
                                 // No checkpoint delete here: the rebuild's restore is gated on routeHash, so a
                                 // DIFFERENT polyline can't restore the old route's lead — deterministic, with no
                                 // racy IO-delete-vs-flush-vs-rebuild ordering. The stale file is harmless (it
@@ -2146,6 +2153,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // finish-freeze mid-route.
                         val atFinish = riderR != null && markerReliable && routeLenM > 2 * ROUTE_END_NEAR_M &&
                             routeLenM - riderR <= ROUTE_END_NEAR_M && distM >= routeLenM - FINISH_ODO_MARGIN_M
+                        // Remember the last ghost position drawn while R was reliable — the marker HOLDS this
+                        // (frozen) when the rider goes off-route, instead of hiding, so the icon never disappears
+                        // while a route is loaded (incl. a Karoo reroute/deviation): it pauses where you left the
+                        // line and snaps to the rejoin. Still non-latching — R itself is only ever re-locked
+                        // UNAMBIGUOUSLY, so the icon never moves to a GUESSED pass.
+                        if (markerReliable && ghostRouteDist != null) lastReliableGhostRouteDist = ghostRouteDist
                         val gap: GapState
                         val markerDist: Double?
                         if (atFinish) {
@@ -2159,7 +2172,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             finishedGap = null
                             finishedGhostRouteDist = null
                             gap = liveGap
-                            markerDist = ghostRouteDist
+                            // Live position while reliable; the frozen last-reliable position while off-route.
+                            markerDist = if (markerReliable) ghostRouteDist else lastReliableGhostRouteDist
                         }
                         GapStateHolder.update(gap)
                         // SEG/GP tag: SEG when the rider is on recorded history this tick (patch has pace at
@@ -2168,11 +2182,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val onHistory = patch != null && gHdg.isFinite() &&
                             patch.pace(gLat, gLng, gHdg, eff.ghostPick) != null
                         if (onHistory) SegmentInfoHolder.set(B2_ON_HISTORY) else SegmentInfoHolder.clear()
-                        // Marker (BOTH cases, ROUTE frame) — [markerDist] is the live ghostRouteDist, or the
-                        // FROZEN position at the finish, so the icon and the number always agree. Icon only —
-                        // hidden when R is unknown OR UNRELIABLE (off-route past the grace with no unambiguous
-                        // re-lock: showing a stale/guessed position would be worse than nothing); the number carries.
-                        mapGhostState = if (cfg.showGhostOnMap && markerDist != null && markerReliable) {
+                        // Marker (BOTH cases, ROUTE frame) — [markerDist] is the live ghostRouteDist, the FROZEN
+                        // finish position, or (off-route) the frozen last-reliable position. Shown whenever we have
+                        // ANY of those, so while a route is loaded the icon never disappears — it only pauses.
+                        // Hidden only before the first reliable draw (no position yet) or with no route ghost.
+                        mapGhostState = if (cfg.showGhostOnMap && markerDist != null) {
                             MapGhostState(markerDist, rm.path, SystemClock.elapsedRealtime())
                         } else {
                             null
