@@ -312,6 +312,45 @@ class PolylinePath(val points: List<LatLng>) {
         return best
     }
 
+    /**
+     * GLOBAL re-acquire disambiguated by an ODOMETER PRIOR, for recovering the marker rail after the
+     * rider goes off the windowed line (a shortcut rejoin far ahead, or a rail that latched wrong).
+     * Scans the WHOLE route for segments with perp ≤ [maxPerpM] AND bearing within [maxHeadingDiffDeg]
+     * of [headingDeg], and returns the one whose `distanceAlongM` is CLOSEST to [anchorAlongM] (the
+     * odometer-expected route position), NOT the smallest perp. Bidirectional (can pull the rail back
+     * DOWN if it over-shot) and, on a same-direction self-overlap where both passes match perp+heading,
+     * the odometer prior picks the pass the rider has actually reached. Null if nothing qualifies
+     * (rider genuinely off-route → caller holds). Only meaningful while moving with a valid heading.
+     */
+    fun nearestProjectionByHeadingNearestAlongOrNull(
+        p: LatLng,
+        headingDeg: Double,
+        anchorAlongM: Double,
+        maxPerpM: Double,
+        maxHeadingDiffDeg: Double,
+    ): Projection? {
+        var best: Projection? = null
+        var bestDelta = Double.MAX_VALUE
+        for (i in 0 until points.size - 1) {
+            val a = points[i]; val b = points[i + 1]
+            if (Polyline.bearingDiffDeg(Polyline.bearingDeg(a, b), headingDeg) > maxHeadingDiffDeg) continue
+            val mPerDegLat = 111_320.0
+            val mPerDegLng = 111_320.0 * cos(Math.toRadians(a.lat))
+            val bx = (b.lng - a.lng) * mPerDegLng; val by = (b.lat - a.lat) * mPerDegLat
+            val px = (p.lng - a.lng) * mPerDegLng; val py = (p.lat - a.lat) * mPerDegLat
+            val segLen2 = bx * bx + by * by
+            val t = if (segLen2 == 0.0) 0.0 else ((px * bx + py * by) / segLen2).coerceIn(0.0, 1.0)
+            val fx = t * bx; val fy = t * by
+            val perp = sqrt((px - fx) * (px - fx) + (py - fy) * (py - fy))
+            if (perp <= maxPerpM) {
+                val along = cumulativeM[i] + t * (cumulativeM[i + 1] - cumulativeM[i])
+                val delta = kotlin.math.abs(along - anchorAlongM)
+                if (best == null || delta < bestDelta) { best = Projection(along, perp, i); bestDelta = delta }
+            }
+        }
+        return best
+    }
+
     private fun nearestProjectionInRange(p: LatLng, windowLoM: Double, windowHiM: Double): Projection {
         var best = Projection(0.0, Double.MAX_VALUE, 0)
         // Window the scan: only segments whose `[cumulativeM[i], cumulativeM[i+1]]` intersects
