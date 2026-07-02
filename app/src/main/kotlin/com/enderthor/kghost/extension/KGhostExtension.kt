@@ -2054,15 +2054,24 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 val baseOdo = distMAtLastGoodM
                                 val onLine = if (base != null && baseOdo != null) {
                                     // Primary: small odometer-propagated window — loop-safe by route-distance span.
-                                    // MUST perp-gate: nearestProjectionInWindowOrNull returns the nearest IN-window
-                                    // point at ANY perp, so WITHOUT this it never nulls for an interior base — the
-                                    // rider crawling off-route on a shortcut would just drag R along the skipped arc
-                                    // and the recovery below could never fire. Perp > MAX ⇒ off the line ⇒ null ⇒ hold
-                                    // ⇒ recovery re-acquires at the rejoin.
+                                    // Perp-gated (nearestProjectionInWindowOrNull returns the nearest IN-window point
+                                    // at ANY perp, so without a perp gate it never nulls for an interior base — the
+                                    // rider on a shortcut would drag R along the skipped arc and recovery could never
+                                    // fire). Perp > MAX ⇒ off the line ⇒ null ⇒ hold ⇒ recovery re-acquires at the
+                                    // rejoin. HEADING-gated too when a heading is available, so a hairpin/switchback's
+                                    // OPPOSITE leg inside the window can't win on perp alone (the last min-perp
+                                    // wrong-leg hole); falls back to perp-only when heading is NaN (stopped/pre-lock,
+                                    // where the rider isn't traversing a hairpin anyway).
                                     val fwd = (distM - baseOdo).coerceIn(0.0, ROUTE_PROJ_FWD_MAX_M) + ROUTE_PROJ_FWD_M
-                                    rm.path.nearestProjectionInWindowOrNull(LatLng(gLat, gLng), base, ROUTE_PROJ_BACK_M, fwd)
-                                        ?.takeIf { it.perpDistM <= ROUTE_PROJ_MAX_PERP_M }
-                                        ?.distanceAlongM?.takeIf { it.isFinite() && it <= routeLenM }
+                                    if (gHdg.isFinite()) {
+                                        rm.path.nearestProjectionByHeadingInWindowOrNull(
+                                            LatLng(gLat, gLng), gHdg, base, ROUTE_PROJ_BACK_M, fwd, ROUTE_PROJ_MAX_PERP_M, ROUTE_HEADING_TOL_DEG,
+                                        )?.distanceAlongM?.takeIf { it.isFinite() && it <= routeLenM }
+                                    } else {
+                                        rm.path.nearestProjectionInWindowOrNull(LatLng(gLat, gLng), base, ROUTE_PROJ_BACK_M, fwd)
+                                            ?.takeIf { it.perpDistM <= ROUTE_PROJ_MAX_PERP_M }
+                                            ?.distanceAlongM?.takeIf { it.isFinite() && it <= routeLenM }
+                                    }
                                 } else if (base == null && gHdg.isFinite()) {
                                     // Bootstrap: HEADING-gated global so a closed loop (start point == finish point)
                                     // can't coin-flip R onto the end.
