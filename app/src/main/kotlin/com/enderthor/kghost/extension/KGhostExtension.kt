@@ -2022,14 +2022,32 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             }
                         }
                         val riderR = lastGoodRouteDistM
+                        // Ghost's ROUTE position (drives the marker AND the behind-distance): the route distance
+                        // whose historical time is `rg.timeAt(R) − gapTimeS` — AHEAD ⇒ it trails you on the route,
+                        // BEHIND ⇒ it runs AHEAD to chase. rg saturates at routeLen (pin-at-finish).
+                        val ghostRouteDist = if (rg != null && riderR != null) {
+                            rg.distanceAt((rg.timeAt(riderR) - integ.gapTimeS).coerceAtLeast(0.0))
+                        } else {
+                            null
+                        }
                         // The live gap from the integrator. GapState's sign convention is mathematical (ahead ⇒
                         // gapTimeS<0, gapDistanceM>0); the integrator is the opposite (ahead ⇒ gapTimeS>0).
                         val fresh = coast.quality != CoastQuality.LONG_LOSS
+                        // (E) Distance gap while BEHIND: the integrator clamps gapDistM to 0 when the rider is
+                        // behind (the ghost is on un-ridden ground — no breadcrumb to measure), so take the
+                        // distance-behind from the ROUTE frame (how far the chase-ghost is ahead of you on the
+                        // route) → the field shows a real "X behind" that MATCHES the map marker instead of "0".
+                        // AHEAD keeps the integrator's teleport-proof breadcrumb distance.
+                        val gapDistM = if (integ.gapTimeS < 0.0 && ghostRouteDist != null && riderR != null) {
+                            -(ghostRouteDist - riderR).coerceAtLeast(0.0)
+                        } else {
+                            integ.gapDistM
+                        }
                         val liveGap = GapState(
                             gapTimeS = -integ.gapTimeS,
-                            gapDistanceM = integ.gapDistM,
+                            gapDistanceM = gapDistM,
                             progressM = riderDist,
-                            ghostProgressM = riderDist - integ.gapDistM,
+                            ghostProgressM = riderDist - gapDistM,
                             ahead = integ.gapTimeS > 0.0,
                             estimated = !fresh,
                             active = true,
@@ -2052,13 +2070,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val onHistory = patch != null && gHdg.isFinite() &&
                             patch.pace(gLat, gLng, gHdg, eff.ghostPick) != null
                         if (onHistory) SegmentInfoHolder.set(B2_ON_HISTORY) else SegmentInfoHolder.clear()
-                        // Marker (BOTH cases, ROUTE frame). Place the ghost at the ROUTE distance whose historical
-                        // time is `rg.timeAt(R) − gapTimeS`: AHEAD ⇒ ghost trails you; BEHIND ⇒ it runs AHEAD to
-                        // chase. Uses the LIVE integrator gap (not the frozen one) so a beaten ghost keeps gliding
-                        // to the line. rg saturates at routeLen (pin-at-finish). Icon only — hidden when R is
-                        // unknown; the number carries.
-                        mapGhostState = if (cfg.showGhostOnMap && rg != null && riderR != null) {
-                            val ghostRouteDist = rg.distanceAt((rg.timeAt(riderR) - integ.gapTimeS).coerceAtLeast(0.0))
+                        // Marker (BOTH cases, ROUTE frame) — same ghostRouteDist that fed the behind-distance, so
+                        // the icon and the number agree. Icon only — hidden when R is unknown; the number carries.
+                        mapGhostState = if (cfg.showGhostOnMap && ghostRouteDist != null) {
                             MapGhostState(ghostRouteDist, rm.path, SystemClock.elapsedRealtime())
                         } else {
                             null

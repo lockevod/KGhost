@@ -30,21 +30,31 @@ class PacePatch private constructor(
         // Prefer the rider's OWN cell+bin (no distance loss); fall to the 3×3×3 neighbourhood only when it is
         // empty, and there reject any reducer whose real bearing is > BEARING_TOL_DEG from the rider's heading
         // (the ±1 bin window alone is ~135° wide — too loose; the 1D model gated at a precise 45°).
-        val r = reducers[pack(ci, cj, bb)] ?: run {
-            var best: Reducer? = null; var bestCount = 0
-            for (di in -1..1) for (dj in -1..1) for (db in -1..1) {
-                if (di == 0 && dj == 0 && db == 0) continue
-                val rr = reducers[pack(ci + di, cj + dj, ((bb + db) % BEARING_BINS + BEARING_BINS) % BEARING_BINS)] ?: continue
-                if (Polyline.bearingDiffDeg(rr.meanBearingDeg(), bearingDeg) > TrackSamples.BEARING_TOL_DEG) continue
-                if (rr.count > bestCount) { best = rr; bestCount = rr.count }
-            }
-            best
-        } ?: return null
+        //
+        // The exact cell wins EVEN when it is statistically thin (count=1): a busier neighbour could be a
+        // PARALLEL road (same bearing, one cell over), whose pace must NOT bleed onto the rider's actual road
+        // — cell+bearing cannot tell a rich same-road neighbour from a rich parallel-road one, so the thin
+        // exact cell (the RIGHT road) is the safer estimate. (This is the deferred "(C)" — left as-is by
+        // design; "fixing" it regresses the parallel-road guard, see PacePatchTest.)
+        val r = reducers[pack(ci, cj, bb)] ?: richestNeighbour(ci, cj, bb, bearingDeg) ?: return null
         return when (pick) {
             GhostPick.AVERAGE -> if (r.count >= AGG_MIN_LAPS) r.ema else r.last
             GhostPick.LAST -> r.last
             GhostPick.BEST -> maxOf(r.min, r.ema / BEST_MAX_SPEEDUP)
         }
+    }
+
+    /** Richest (highest-count) reducer in the 3×3×3 cell/bin box around ([ci],[cj],[bb]), excluding the
+     *  centre, gated to ±BEARING_TOL_DEG of [bearingDeg] so a crossing/opposite road never matches. */
+    private fun richestNeighbour(ci: Int, cj: Int, bb: Int, bearingDeg: Double): Reducer? {
+        var best: Reducer? = null; var bestCount = 0
+        for (di in -1..1) for (dj in -1..1) for (db in -1..1) {
+            if (di == 0 && dj == 0 && db == 0) continue
+            val rr = reducers[pack(ci + di, cj + dj, ((bb + db) % BEARING_BINS + BEARING_BINS) % BEARING_BINS)] ?: continue
+            if (Polyline.bearingDiffDeg(rr.meanBearingDeg(), bearingDeg) > TrackSamples.BEARING_TOL_DEG) continue
+            if (rr.count > bestCount) { best = rr; bestCount = rr.count }
+        }
+        return best
     }
 
     companion object {
