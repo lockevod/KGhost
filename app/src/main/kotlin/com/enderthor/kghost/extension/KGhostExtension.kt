@@ -1930,18 +1930,23 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             projectorRoute = rm.path
                             projectorPolyline = rm.polyline
                             if (!sameRoute) {
-                                firstMoveElapsedS = null
+                                // CARRY the advantage/deficit across a reroute: the path-following ghost is
+                                // ROUTE-AGNOSTIC — it accrues historical time per ridden metre on the ACTUAL path —
+                                // so a new polyline does NOT restart the race. KEEP the integrator, its accrued lead,
+                                // and the race clock (firstMoveElapsedS); only the route-SPECIFIC marker anchor +
+                                // finish state re-bootstrap on the new line (the pace lookup/VP-fill and the route-
+                                // ghost curve follow rm.pacePatch / rm.routeGhost automatically from the next tick).
+                                // On the FIRST load these are all already null/fresh, so this is a normal cold start.
                                 lastGoodRouteDistM = null // the held rider route position that anchors the marker
+                                distMAtLastGoodM = null
+                                emptyWindowTicks = 0
                                 prevSegStartM = null
-                                integrator = null // rebuilt at first movement on the new route
-                                integLastRiderDist = 0.0
                                 finishedGap = null
                                 finishedGhostRouteDist = null
                                 lastReliableGhostRouteDist = null
-                                // No checkpoint delete here: the rebuild's restore is gated on routeHash, so a
-                                // DIFFERENT polyline can't restore the old route's lead — deterministic, with no
-                                // racy IO-delete-vs-flush-vs-rebuild ordering. The stale file is harmless (it
-                                // fails the routeHash match) and is overwritten by the new route's next write.
+                                // Checkpoint: restore is gated on routeKey (name+length), so a DIFFERENT route can't
+                                // restore a foreign lead; the carried integrator's next write stamps the new routeKey
+                                // + the carried lead, so a power-off on the new route resumes correctly.
                             }
                         }
                         val rg = rm.routeGhost
