@@ -27,11 +27,13 @@ import com.enderthor.kghost.engine.GhostPaceSource
 import com.enderthor.kghost.engine.toInfo
 import com.enderthor.kghost.engine.AGG_MIN_LAPS
 import com.enderthor.kghost.engine.CorridorSeeder
+import com.enderthor.kghost.engine.GhostCheckpoint
 import com.enderthor.kghost.engine.GhostIntegrator
 import com.enderthor.kghost.engine.PacePatch
 import com.enderthor.kghost.engine.SegmentInfo
 import com.enderthor.kghost.engine.shouldReseed
 import com.enderthor.kghost.geo.AggregateStore
+import com.enderthor.kghost.geo.atomicWriteText
 import com.enderthor.kghost.geo.BBox
 import com.enderthor.kghost.geo.LatLng
 import com.enderthor.kghost.geo.Polyline
@@ -274,6 +276,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          *  unused — so one shared instance avoids per-tick churn (the holder dedups on its fields). */
         private val B2_ON_HISTORY = SegmentInfo(0.0, 0.0, "SEG")
 
+        /** B2 ghost checkpoint filename (under filesDir) + how often to persist it + the odometer
+         *  proximity that lets a resumed ride (continuous distance) restore even when the process died
+         *  and minted a fresh recordingStartedEpoch (a genuinely new ride starts near 0 → rejected). */
+        private const val GHOST_CHECKPOINT_FILE = "ghost-checkpoint.json"
+        private const val CHECKPOINT_INTERVAL_MS = 5_000L
+        private const val CHECKPOINT_RESUME_MARGIN_M = 1_000.0
+
         /**
          * Recovery from a poisoned rail. The GPS window is centred on `lastGoodRouteDistM`; if a bad value
          * ever latched the rail too far AHEAD, the rider's true (lower) point sits below the back window and
@@ -490,6 +499,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // The last odometer distance handed to the integrator this ride — persisted in the checkpoint so a
     // mid-ride power-off resumes with the accrued lead (GhostIntegrator keeps lastRiderDist private).
     @Volatile private var integLastRiderDist: Double = 0.0
+    // The pick + VP-fill pace SNAPSHOTTED when the integrator was built — persisted in the checkpoint and
+    // required to match on restore (a different pick/target ⇒ a different race ⇒ start fresh, not resume).
+    @Volatile private var integPick: GhostPick? = null
+    @Volatile private var integVpTpm: Double = 0.0
+    // Monotonic (elapsedRealtime ms) of the last checkpoint write — throttles the ~5 s periodic persist.
+    @Volatile private var lastCheckpointMs: Long = 0L
 
     /** Resets all per-ride/route anchor state to its cold-start values. Called at a genuine ride END
      *  (the Idle handler) and in stopTick — NOT on a host reconnect, where the anchor must survive so the
@@ -515,6 +530,44 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         finishedGap = null
         integrator = null
         integLastRiderDist = 0.0
+        integPick = null
+        integVpTpm = 0.0
+        lastCheckpointMs = 0L
+    }
+
+    // ---- B2 ghost checkpoint (scalar resume state) ---------------------------------------------
+    // A tiny file persisted periodically so a mid-ride power-off / crash / service kill resumes the
+    // race WITH the accrued lead instead of restarting from a 0 gap. Deleted at a clean ride end, so a
+    // file present on the next start means the previous ride was interrupted → a candidate to resume.
+    private val ghostCheckpointFile: File get() = File(applicationContext.filesDir, GHOST_CHECKPOINT_FILE)
+
+    /** Reads the persisted checkpoint, or null if absent/corrupt (never throws). */
+    private fun loadGhostCheckpoint(): GhostCheckpoint? = runCatching {
+        val f = ghostCheckpointFile
+        if (!f.exists()) null
+        else jsonForStorage.decodeFromString(GhostCheckpoint.serializer(), f.readText())
+    }.getOrNull()
+
+    /** Persists the current integrator scalar state atomically. Cheap; call on IO. fsync off — a lost
+     *  checkpoint on a torn write just means resume-from-zero (safe), not corruption. */
+    private fun writeGhostCheckpoint() {
+        val integ = integrator ?: return
+        val pick = integPick ?: return
+        val cp = GhostCheckpoint(
+            rideEpoch = recordingStartedEpoch,
+            ghostTime = integ.ghostTime,
+            lastRiderDist = integLastRiderDist,
+            pick = pick,
+            vpTimePerM = integVpTpm,
+        )
+        runCatching {
+            atomicWriteText(ghostCheckpointFile, jsonForStorage.encodeToString(GhostCheckpoint.serializer(), cp), fsync = false)
+        }.onFailure { Timber.w(it, "ghost checkpoint write failed") }
+    }
+
+    /** Deletes the checkpoint at a clean ride end so the next ride starts fresh. */
+    private fun deleteGhostCheckpoint() {
+        runCatching { ghostCheckpointFile.delete() }
     }
 
     // Wall-clock epoch captured when the current Recording started. Used as the recorded track's
@@ -831,6 +884,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // freezes by receiving no emissions. Flag the pause so the map loop holds the ghost
                     // in place rather than extrapolating it forward by wall-clock.
                     ridePaused = true
+                    // Capture a fresh checkpoint on entering a pause: the tick stops emitting while paused,
+                    // so without this a power-off during a (possibly long) café stop would resume from the
+                    // last periodic write, up to CHECKPOINT_INTERVAL_MS stale. No-op before first movement.
+                    scope.launch(Dispatchers.IO) { writeGhostCheckpoint() }
                 }
                 is RideState.Idle -> {
                     ridePaused = false
@@ -846,6 +903,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // cold. NOT done on a reconnect (which never emits Idle while recording), so the anchor
                     // survives a mid-ride rebind. finishAndSaveRecording() already consumed the lap buffer.
                     resetRideAnchor()
+                    // Clean ride end → drop the checkpoint so the NEXT ride starts fresh (a file present on
+                    // start means the previous ride was interrupted, never reached Idle → a resume candidate).
+                    deleteGhostCheckpoint()
                     GapStateHolder.clear()
                     SegmentInfoHolder.clear()
                     publishGhostMarker(null)
@@ -1873,6 +1933,29 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             val vpTpm = (1.0 / eff.targetSpeedMs.coerceAtLeast(0.1)).coerceIn(0.05, 20.0)
                             integ = GhostIntegrator(eff.ghostPick, vpTimePerM = vpTpm, decimateM = 20.0)
                             integrator = integ
+                            integPick = eff.ghostPick
+                            integVpTpm = vpTpm
+                            lastCheckpointMs = 0L
+                            // Resume an interrupted ride WITH the accrued lead: restore the persisted
+                            // checkpoint iff the same pick + VP pace AND either the SAME recordingStartedEpoch
+                            // (an in-process tick relaunch / host reconnect) OR a CONTINUOUS odometer (a
+                            // power-off resume mints a fresh epoch but the ride's distance carries on — a
+                            // genuinely new ride starts near 0, far from a stale checkpoint's lastRiderDist).
+                            val cp = loadGhostCheckpoint()
+                            val riderDistNow = coast.effectiveDistanceM
+                            if (cp != null && cp.pick == eff.ghostPick && cp.vpTimePerM == vpTpm &&
+                                (cp.rideEpoch == recordingStartedEpoch ||
+                                    kotlin.math.abs(riderDistNow - cp.lastRiderDist) <= CHECKPOINT_RESUME_MARGIN_M)
+                            ) {
+                                integ.restore(cp.ghostTime, cp.lastRiderDist)
+                                integLastRiderDist = cp.lastRiderDist
+                                Timber.i(
+                                    "KVP B2 checkpoint RESTORED: ghostTime=${"%.0f".format(cp.ghostTime)}s " +
+                                        "lastRiderDist=${"%.0f".format(cp.lastRiderDist)}m " +
+                                        "riderNow=${"%.0f".format(riderDistNow)}m " +
+                                        "epochMatch=${cp.rideEpoch == recordingStartedEpoch} — lead resumed",
+                                )
+                            }
                         }
                         // Rider odometer + the trusted GPS fix (lat/lng/heading). A null/stale fix → NaN, and
                         // the integrator VP-fills (no history lookup) while the marker holds its last route pos.
@@ -1885,6 +1968,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             patch?.pace(la, ln, br, eff.ghostPick)
                         }
                         integLastRiderDist = riderDist
+                        // Persist the scalar race state ~every CHECKPOINT_INTERVAL_MS (off-Main) so a mid-ride
+                        // power-off / crash resumes with the lead. Throttled on the monotonic clock.
+                        run {
+                            val nowCp = SystemClock.elapsedRealtime()
+                            if (nowCp - lastCheckpointMs >= CHECKPOINT_INTERVAL_MS) {
+                                lastCheckpointMs = nowCp
+                                scope.launch(Dispatchers.IO) { writeGhostCheckpoint() }
+                            }
+                        }
                         // Publish the gap. GapState's sign convention is mathematical (ahead ⇒ gapTimeS<0,
                         // gapDistanceM>0); the integrator is the opposite (ahead ⇒ gapTimeS>0) — negate time.
                         val fresh = coast.quality != CoastQuality.LONG_LOSS
