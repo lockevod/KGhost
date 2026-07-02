@@ -27,6 +27,7 @@ import com.enderthor.kghost.engine.GhostPaceSource
 import com.enderthor.kghost.engine.toInfo
 import com.enderthor.kghost.engine.AGG_MIN_LAPS
 import com.enderthor.kghost.engine.CorridorSeeder
+import com.enderthor.kghost.engine.PacePatch
 import com.enderthor.kghost.engine.shouldReseed
 import com.enderthor.kghost.geo.AggregateStore
 import com.enderthor.kghost.geo.BBox
@@ -536,6 +537,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          * value.
          */
         val routeDistanceM: Double,
+        /**
+         * B2 path-following pace map for this route's area (2D `(cell,bearing)→pace`), built from the
+         * overlapping history at match time and published ATOMICALLY with the route so the tick never
+         * pairs a new route with a stale patch. Null when no history overlaps → the integrator VP-fills
+         * the whole route. Not persisted; rebuilt on every route load.
+         */
+        val pacePatch: PacePatch?,
     )
 
     /**
@@ -1302,11 +1310,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // COUNT changed — auto-tidy churns the set at constant size, which a count gate misses.
                     val needsSeed = shouldReseed(agg, nowIds)
                     val justSeeded = needsSeed
+                    // B2: parse the overlapping history on EVERY route load and build the path-following
+                    // PacePatch (in-memory only, never persisted → must be rebuilt each load). The SAME
+                    // track list also feeds the 1D CorridorSeeder when a (re)seed is needed, so we parse
+                    // once here, off Main, rather than twice.
+                    val tracks = trackStore().loadTopCandidates(bbox, CorridorSeeder.MAX_CANDIDATES)
+                    val pacePatch = PacePatch.build(tracks)
                     if (needsSeed) {
                         val seedStartMs = SystemClock.elapsedRealtime()
-                        // Parse the overlapping history ONLY when (re)seeding — one-time per cold/changed
-                        // route, off Main. Store the no-parse id SET so the next load can diff against it.
-                        val tracks = trackStore().loadTopCandidates(bbox, CorridorSeeder.MAX_CANDIDATES)
+                        // Store the no-parse id SET so the next load can diff against it.
                         val seeded = CorridorSeeder.seed(key, state.name, path, tracks).copy(seededTrackIds = nowIds.toList())
                         agg = withContext(Dispatchers.IO) { aggregateStore().save(seeded); seeded }
                         Timber.i(
@@ -1345,7 +1357,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // built under the OLD settings over the replacement's.
                     currentCoroutineContext().ensureActive()
                     if (lastMatchedPolyline == mine) {
-                        routeMode = RouteMode(path, mine, state.name, matched, routeGhost, state.routeDistance)
+                        routeMode = RouteMode(path, mine, state.name, matched, routeGhost, state.routeDistance, pacePatch)
                         // Diagnostic for the scale question: the Karoo's routeDistance (the scale that
                         // DISTANCE_TO_DESTINATION is measured against) vs the decoded-polyline length (the
                         // scale segments + the ghost curve live on). A large delta means routeDist needs
