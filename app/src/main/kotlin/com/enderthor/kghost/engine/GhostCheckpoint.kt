@@ -18,8 +18,10 @@ data class GhostCheckpoint(
     val pick: GhostPick,
     val vpTimePerM: Double,
     val savedAtEpoch: Long,
-    // Hash of the route polyline the lead was accrued on. Restore requires it to match the CURRENTLY loaded
-    // route → a mid-ride route change (different polyline) deterministically can't restore the old route's
-    // lead onto the new one, with no reliance on a racy delete. (rideEpoch is unchanged across a route change.)
-    val routeHash: Int,
+    // Stable identity (name + length via routeKeyOf) of the route the lead was accrued on. Restore requires
+    // it to match the CURRENTLY loaded route → a mid-ride route change deterministically can't restore the
+    // old route's lead onto the new one, with no reliance on a racy delete (rideEpoch is unchanged across a
+    // route change). Uses the SAME key the aggregate store uses, so it survives a host polyline re-encode
+    // between sessions (a raw-polyline hash would not, silently killing every resume).
+    val routeKey: String,
 )

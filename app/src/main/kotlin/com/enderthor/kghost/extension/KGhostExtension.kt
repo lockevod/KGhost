@@ -496,9 +496,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     @Volatile private var d0CandOdo: Double? = null
     // Start-distance of the recorded stretch the rider was on last tick — edge-triggers the segment alert.
     @Volatile private var prevSegStartM: Double? = null
-    // Monotonic (elapsedRealtime ms) when remaining first fell below ROUTE_END_EPS_M (debounces the
-    // finish); 0 above. Interval-only — compare ONLY against elapsedRealtime, never an epoch.
-    @Volatile private var routeEndSinceMs: Long = 0L
     // The final gap captured once at the route end, re-published so it stops inflating; null until finish.
     @Volatile private var finishedGap: GapState? = null
     // B2 path-following ghost race engine (accrues historical time per ridden metre on the ACTUAL path).
@@ -543,7 +540,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         d0CandPos = null
         d0CandOdo = null
         prevSegStartM = null
-        routeEndSinceMs = 0L
         finishedGap = null
         integrator = null
         integLastRiderDist = 0.0
@@ -1655,7 +1651,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // ② route-mode per-tick state. The per-ride/route ANCHOR (projectorRoute/Polyline, routeStartDistM
         // (D0), rideDistAtRouteStartM, firstMoveElapsedS, vpFirstMoveElapsedS, emptyWindowTicks,
         // ghostStartElapsedS, lastGoodRouteDistM, distMAtLastGoodM, gpsAlertFired,
-        // wasMoving, d0CandPos/Odo, prevSegStartM, routeEndSinceMs, finishedGap) lives in INSTANCE FIELDS
+        // wasMoving, d0CandPos/Odo, prevSegStartM, finishedGap) lives in INSTANCE FIELDS
         // (declared above) so it SURVIVES a mid-ride host reconnect that cancels+relaunches this tick. It is
         // reset by resetRideAnchor() at a genuine ride end, and on a genuine route change inside the tick.
         // Throttle for the per-tick route-mode diagnostic log (≤ ~once per DIAG_LOG_MS); local — a reset on
@@ -1964,23 +1960,33 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             // restore() takes the LEAD, re-anchored on the next tick (no whole-ride inflation).
                             val cp = loadGhostCheckpoint()
                             val riderDistNow = coast.effectiveDistanceM
-                            val recent = cp != null && System.currentTimeMillis() - cp.savedAtEpoch in 0..CHECKPOINT_MAX_AGE_MS
-                            // routeHash match is REQUIRED: it deterministically blocks restoring a previous
-                            // route's lead onto a new one (rideEpoch is unchanged across a route change), with
-                            // no dependence on delete ordering.
-                            if (cp != null && recent && cp.routeHash == rm.polyline.hashCode() &&
-                                cp.pick == eff.ghostPick && cp.vpTimePerM == vpTpm &&
-                                (cp.rideEpoch == recordingStartedEpoch ||
-                                    kotlin.math.abs(riderDistNow - cp.lastRiderDist) <= CHECKPOINT_RESUME_MARGIN_M)
-                            ) {
-                                integ.restore(cp.leadS, cp.lastRiderDist)
-                                integLastRiderDist = cp.lastRiderDist
-                                Timber.i(
-                                    "KVP B2 checkpoint RESTORED: lead=${"%.0f".format(cp.leadS)}s " +
-                                        "lastRiderDist=${"%.0f".format(cp.lastRiderDist)}m " +
-                                        "riderNow=${"%.0f".format(riderDistNow)}m " +
-                                        "epochMatch=${cp.rideEpoch == recordingStartedEpoch} — lead resumed",
-                                )
+                            val curKey = routeKeyOf(rm.routeName, rm.path.totalM)
+                            // routeKey match is REQUIRED: it deterministically blocks restoring a previous route's
+                            // lead onto a new one (rideEpoch is unchanged across a route change), with no dependence
+                            // on delete ordering; the stable name+length key also survives a host polyline re-encode.
+                            if (cp != null) {
+                                val recent = System.currentTimeMillis() - cp.savedAtEpoch in 0..CHECKPOINT_MAX_AGE_MS
+                                val keyMatch = cp.routeKey == curKey
+                                val paramMatch = cp.pick == eff.ghostPick && cp.vpTimePerM == vpTpm
+                                val continuous = cp.rideEpoch == recordingStartedEpoch ||
+                                    kotlin.math.abs(riderDistNow - cp.lastRiderDist) <= CHECKPOINT_RESUME_MARGIN_M
+                                if (recent && keyMatch && paramMatch && continuous) {
+                                    integ.restore(cp.leadS, cp.lastRiderDist)
+                                    integLastRiderDist = cp.lastRiderDist
+                                    Timber.i(
+                                        "KVP B2 checkpoint RESTORED: lead=${"%.0f".format(cp.leadS)}s " +
+                                            "lastRiderDist=${"%.0f".format(cp.lastRiderDist)}m " +
+                                            "riderNow=${"%.0f".format(riderDistNow)}m " +
+                                            "epochMatch=${cp.rideEpoch == recordingStartedEpoch} — lead resumed",
+                                    )
+                                } else {
+                                    // Rejected — log WHY so a silently-dead resume in the field is diagnosable.
+                                    Timber.i(
+                                        "KVP B2 checkpoint REJECTED: recent=$recent keyMatch=$keyMatch " +
+                                            "paramMatch=$paramMatch continuous=$continuous " +
+                                            "(cpKey=${cp.routeKey} curKey=$curKey ΔdistM=${"%.0f".format(riderDistNow - cp.lastRiderDist)})",
+                                    )
+                                }
                             }
                         }
                         // Rider odometer + the trusted GPS fix (lat/lng/heading). A null/stale fix → NaN, and
@@ -2009,7 +2015,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     pick = integPick!!,
                                     vpTimePerM = integVpTpm,
                                     savedAtEpoch = System.currentTimeMillis(),
-                                    routeHash = rm.polyline.hashCode(),
+                                    routeKey = routeKeyOf(rm.routeName, rm.path.totalM),
                                 )
                                 scope.launch(Dispatchers.IO) { flushGhostCheckpoint() }
                             }
@@ -2062,18 +2068,23 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     distMAtLastGoodM = distM
                                 } else if (base != null && gHdg.isFinite()) {
                                     // Recovery: after RECOVER_EMPTY_TICKS moving ticks off the window (a shortcut that
-                                    // rejoined beyond it, or a GPS gap), a HEADING-gated FORWARD global re-acquire over
-                                    // [base, routeLen] catches the true rejoin at ANY distance ahead while heading +
-                                    // forward-only keep it off the opposite pass — NO odometer cap, so a genuine
-                                    // shortcut is followed, not frozen behind.
+                                    // rejoined far ahead, or a rail that latched wrong), a GLOBAL perp+heading re-acquire
+                                    // anchored to the ODOMETER-EXPECTED position (base + metres ridden since). It is
+                                    // BIDIRECTIONAL — it can pull the rail back DOWN if it over-shot (a forward-only
+                                    // re-acquire could never escape a forward over-shoot) — and the odometer anchor picks
+                                    // the pass the rider has actually reached on a same-direction self-overlap. Retries
+                                    // every tick once armed (counter reset only on a successful re-acquire).
                                     val moving = speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS
-                                    if (moving) emptyWindowTicks++
+                                    if (moving && emptyWindowTicks < RECOVER_EMPTY_TICKS) emptyWindowTicks++
                                     if (emptyWindowTicks >= RECOVER_EMPTY_TICKS) {
-                                        emptyWindowTicks = 0
-                                        rm.path.nearestProjectionByHeadingInWindowOrNull(
-                                            LatLng(gLat, gLng), gHdg, base, 0.0, (routeLenM - base).coerceAtLeast(0.0),
-                                            ROUTE_PROJ_MAX_PERP_M, ROUTE_HEADING_TOL_DEG,
-                                        )?.let { lastGoodRouteDistM = it.distanceAlongM; distMAtLastGoodM = distM }
+                                        val odoExpected = base + (distM - (baseOdo ?: distM)).coerceAtLeast(0.0)
+                                        rm.path.nearestProjectionByHeadingNearestAlongOrNull(
+                                            LatLng(gLat, gLng), gHdg, odoExpected, ROUTE_PROJ_MAX_PERP_M, ROUTE_HEADING_TOL_DEG,
+                                        )?.let {
+                                            lastGoodRouteDistM = it.distanceAlongM
+                                            distMAtLastGoodM = distM
+                                            emptyWindowTicks = 0
+                                        }
                                     }
                                 }
                             }

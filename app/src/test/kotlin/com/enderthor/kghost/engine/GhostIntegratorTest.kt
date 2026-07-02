@@ -77,6 +77,22 @@ class GhostIntegratorTest {
         assertTrue(g.gapDistM <= 0.0)                 // must NOT read +10 (the old end-clamp bug)
     }
 
+    @Test fun `restore re-baselines the odometer so an un-checkpointed segment or a reset does not skew the lead`() {
+        val src = pace(0.2, 1e9)
+        // (a) rider rode 100 m past the last checkpoint before the cut: first resumed tick at 5100 vs
+        //     cp.lastRiderDist 5000 must still read exactly the lead (no +pace·100 overshoot).
+        val g1 = newInt()
+        g1.restore(leadS = 30.0, lastRiderDist = 5000.0)
+        g1.onTick(5100.0, 0.0, 5100.0, 90.0, 0.0, src)
+        assertEquals(30.0, g1.gapTimeS, 1e-6)
+        // (b) odometer RESET across the resume (new activity zeroed DISTANCE): riderDist 0 vs 5000 must
+        //     not blow up via a huge negative dd — the lead is preserved.
+        val g2 = newInt()
+        g2.restore(leadS = 30.0, lastRiderDist = 5000.0)
+        g2.onTick(0.0, 0.0, 0.0, 90.0, 0.0, src)
+        assertEquals(30.0, g2.gapTimeS, 1e-6)
+    }
+
     @Test fun `no NaN map-ghost immediately after restore (resumed stopped)`() {
         val g = newInt(); val src = pace(0.2, 1e9)
         g.restore(leadS = 100.0, lastRiderDist = 500.0)
