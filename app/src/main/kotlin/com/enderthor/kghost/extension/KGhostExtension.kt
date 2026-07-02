@@ -233,25 +233,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         private const val SEG_CLOSE_GAP_M = 1000.0
 
         /**
-         * Slack (m) for the odometric plausibility filter. Route progress can never exceed the physical
-         * distance ridden (the route is ≤ the path travelled), so when the Karoo's routeDist jumps beyond
-         * the odometer delta by more than this slack it is physically impossible — a loop snap to a later
-         * pass through the same streets (km 9 → km 20), or a backward re-correction. The slack only
-         * absorbs GPS noise in the two measurements; the real signal (a loop snap) is kilometres.
-         */
-        private const val REROUTE_JUMP_SLACK_M = 500.0
-
-        /**
-         * TIGHT tolerance (m) for the two-fix D0 bootstrap confirmation — much smaller than
-         * [REROUTE_JUMP_SLACK_M] (which absorbs reroute/scale skew on an ALREADY-trusted baseline). D0 is
-         * latched ONCE and is invariant for the whole route, so a wrong first pick poisons the entire
-         * ride. Requiring two consecutive fixes to agree this tightly makes an ambiguous/flipping
-         * self-overlap pick HOLD (--- one more tick) instead of confirming a coin-flip. (A *stable* wrong
-         * pick at an exact self-intersection still needs a heading/bearing check — tracked separately.)
-         */
-        private const val BOOTSTRAP_SLACK_M = 30.0
-
-        /**
          * Route projector (GPS → polyline). The Karoo's own map-match (`routeLen − remaining`) can lock
          * onto the WRONG pass of a self-overlapping route — especially when the route is loaded mid-ride —
          * placing the rider hundreds of metres off (confirmed in the field: perp≈0 yet routeDist ~250 m
@@ -312,23 +293,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          * GPS path is un-floored, so an on-line global point below the rail pulls it back to truth.
          */
         private const val RECOVER_EMPTY_TICKS = 5
-
-        /**
-         * First-fix window half-width (m) around the Karoo's own position. Before a trusted baseline exists
-         * we window the GPS projection around `karooRouteDist` instead of scanning the WHOLE polyline every
-         * tick (which a disagreeing self-overlap bootstrap would otherwise do at 1 Hz). Wide enough to still
-         * contain the GPS-correct pass even when the Karoo is off by a typical wrong-pass margin; a global
-         * scan is the last resort only if this window is empty.
-         */
-        private const val KAROO_SEED_WIN_M = 600.0
-
-        /**
-         * Max angle (deg) between the rider's heading and a route segment's bearing for that segment to be
-         * the rider's CURRENT pass at the D0 bootstrap. On a self-overlapping route the two passes share
-         * the road but run in opposite directions (~180° apart), so a generous 60° window cleanly selects
-         * the matching one while tolerating GPS-heading noise and the route not being perfectly aligned.
-         */
-        private const val BOOTSTRAP_HEADING_DIFF_DEG = 60.0
 
         /**
          * Remaining-to-destination (m) at/under which the rider is treated as having REACHED the route
@@ -480,18 +444,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // (Named exactly as the former locals so the tick body needs no edits; reset by resetRideAnchor().)
     @Volatile private var projectorRoute: PolylinePath? = null
     @Volatile private var projectorPolyline: String? = null
-    // D0 — rider's route position at route start (= along-route − distance ridden since this route began).
-    @Volatile private var routeStartDistM: Double? = null
-    // Ride odometer (m) when THIS route became active (baseline for "distance ridden since this route").
-    @Volatile private var rideDistAtRouteStartM: Double = 0.0
-    // Ride-elapsed (s) at first movement — the route ghost clock origin; re-nulled on a route change.
+    // Ride-elapsed (s) at first movement — the B2 race clock origin. Nulled at ride end/stop; PRESERVED
+    // across a reroute (the route-agnostic integrator carries the lead, so the clock must stay continuous).
     @Volatile private var firstMoveElapsedS: Double? = null
     // ① Ghost-Pace clock origin — set ONCE per ride, NEVER re-nulled on a route change.
     @Volatile private var vpFirstMoveElapsedS: Double? = null
-    // Consecutive MOVING ticks with an empty GPS window — drives the poisoned-rail global re-acquire.
+    // Consecutive MOVING ticks off the windowed line — arms the unambiguous global marker re-acquire.
     @Volatile private var emptyWindowTicks: Int = 0
-    // Ride-elapsed seconds at the whole-route ghost's t=0 (−rg.timeAt(D0)); re-nulled on a route change.
-    @Volatile private var ghostStartElapsedS: Double? = null
     // The rider's last TRUSTWORTHY route distance (the monotone rail) + the odometer captured with it.
     @Volatile private var lastGoodRouteDistM: Double? = null
     @Volatile private var distMAtLastGoodM: Double? = null
@@ -499,10 +458,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     @Volatile private var gpsAlertFired: Boolean = false
     // Previous tick's moving state (route mode) — drives the stationary→moving re-stamp edge.
     @Volatile private var wasMoving: Boolean = false
-    // Whether the D0 bootstrap position came from the GPS projector (true) or the Karoo map-match
-    // fallback (false). While false and the race is not yet anchored, a GPS fix refreshes D0 so a
-    // Karoo snap-to-wrong-segment is corrected before the anchor fires.
-    @Volatile private var routeStartDistFromGps: Boolean = false
     // First-fix D0 confirmation candidate (position + odometer at that position).
     @Volatile private var d0CandPos: Double? = null
     @Volatile private var d0CandOdo: Double? = null
@@ -511,8 +466,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // The final gap captured once at the route end, re-published so it stops inflating; null until finish.
     @Volatile private var finishedGap: GapState? = null
     // B2 path-following ghost race engine (accrues historical time per ridden metre on the ACTUAL path).
-    // Built lazily at first movement on a route, re-nulled on a route change / ride end. Replaces the whole
-    // 1D route-projection race above (which stays declared until Task 8 retires it).
+    // Built lazily at first movement; nulled at ride end/stop. KEPT across a reroute — it is route-agnostic,
+    // so the accrued lead carries to the new polyline (only the route-specific marker anchor re-bootstraps).
     @Volatile private var integrator: GhostIntegrator? = null
     // The last odometer distance handed to the integrator this ride — persisted in the checkpoint so a
     // mid-ride power-off resumes with the accrued lead (GhostIntegrator keeps lastRiderDist private).
@@ -543,17 +498,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun resetRideAnchor() {
         projectorRoute = null
         projectorPolyline = null
-        routeStartDistM = null
-        rideDistAtRouteStartM = 0.0
         firstMoveElapsedS = null
         vpFirstMoveElapsedS = null
         emptyWindowTicks = 0
-        ghostStartElapsedS = null
         lastGoodRouteDistM = null
         distMAtLastGoodM = null
         gpsAlertFired = false
         wasMoving = false
-        routeStartDistFromGps = false
         d0CandPos = null
         d0CandOdo = null
         prevSegStartM = null
@@ -1666,12 +1617,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         var cachedCurve: GhostCurve? = null
         var cachedTargetMs: Double? = null
 
-        // ② route-mode per-tick state. The per-ride/route ANCHOR (projectorRoute/Polyline, routeStartDistM
-        // (D0), rideDistAtRouteStartM, firstMoveElapsedS, vpFirstMoveElapsedS, emptyWindowTicks,
-        // ghostStartElapsedS, lastGoodRouteDistM, distMAtLastGoodM, gpsAlertFired,
-        // wasMoving, d0CandPos/Odo, prevSegStartM, finishedGap) lives in INSTANCE FIELDS
+        // ② route-mode per-tick state. The per-ride/route ANCHOR (projectorRoute/Polyline, firstMoveElapsedS,
+        // vpFirstMoveElapsedS, emptyWindowTicks, lastGoodRouteDistM, distMAtLastGoodM, gpsAlertFired,
+        // wasMoving, prevSegStartM, finishedGap, the integrator + checkpoint fields) lives in INSTANCE FIELDS
         // (declared above) so it SURVIVES a mid-ride host reconnect that cancels+relaunches this tick. It is
-        // reset by resetRideAnchor() at a genuine ride end, and on a genuine route change inside the tick.
+        // reset by resetRideAnchor() at a genuine ride end; a genuine route change resets only the route-
+        // SPECIFIC marker/finish state (the integrator + race clock are KEPT so the lead carries — 58866d8).
         // Throttle for the per-tick route-mode diagnostic log (≤ ~once per DIAG_LOG_MS); local — a reset on
         // reconnect just costs one extra diag line.
         // Throttle stamp on the MONOTONIC clock (SystemClock.elapsedRealtime), NOT wall-clock: the
@@ -1925,9 +1876,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // runs AHEAD of you to chase when you are BEHIND. The route only positions the ICON —
                         // a bad projection tick jitters the marker, never the number.
                         //
-                        // Route-change reset: a NEW route identity (a fresh load or a Karoo REROUTE, both a new
-                        // polyline) restarts the race; a same-route re-match (a mid-ride settings change, a new
-                        // path instance for the SAME polyline) keeps the accrued race.
+                        // Route-change handling: a NEW polyline re-bootstraps only the route-SPECIFIC marker/finish
+                        // state (the integrator + race clock are KEPT, so the accrued lead CARRIES — see the block
+                        // below); a same-route re-match (a mid-ride settings change, a new path instance for the
+                        // SAME polyline) changes nothing.
                         if (projectorRoute !== rm.path) {
                             val sameRoute = projectorPolyline == rm.polyline
                             projectorRoute = rm.path
