@@ -316,25 +316,28 @@ class PolylinePath(val points: List<LatLng>) {
      * GLOBAL re-acquire for the marker rail that REFUSES TO GUESS — recovers R after the rider goes off
      * the windowed line (a shortcut rejoin far ahead), without ever latching a wrong pass. Scans the whole
      * route for segments with perp ≤ [maxPerpM] AND bearing within [maxHeadingDiffDeg] of [headingDeg], and
-     * returns the smallest-perp candidate ONLY IF the qualifying candidates are UNAMBIGUOUS — i.e. they all
-     * lie within [ambiguityMarginM] of each other along the route (one physical spot / adjacent segments).
-     * Returns null when there is NO candidate (rider genuinely off-route) OR when two qualifying candidates
-     * sit far apart along the route (a self-overlap the geometry cannot disambiguate — no odometer/host
-     * value reliably can either, so guessing is what caused every prior round's latch). The caller then
-     * HOLDS + HIDES the icon and the teleport-proof number carries. Only meaningful while moving with a
-     * valid heading. Nothing wrong is ever RETAINED → the whole round-1..4 marker-latch family is
-     * structurally impossible, not merely patched.
+     * returns the smallest-perp candidate ONLY IF the qualifying candidates form ONE CONTIGUOUS CLUSTER —
+     * no along-route GAP between consecutive candidates exceeds [gapMarginM] (a bigger gap = a second,
+     * distinct pass of a self-overlap), AND the whole cluster spans ≤ [spanCapM] (backstop against a chain
+     * of near-contiguous passes). Because the candidate set is derived from route GEOMETRY around ONE GPS
+     * point (not GPS samples over time), scatter translates the cluster but cannot open a spurious internal
+     * gap — so a small [gapMarginM] cleanly separates one pass (adjacent-segment gaps ≤ ~40 m) from two
+     * passes (a gap of the whole route length between them), WITHOUT false-refusing a long contiguous curl
+     * (roundabout/spiral) the way a plain span threshold would. Returns null when there is NO candidate
+     * (off-route) OR the geometry is ambiguous → the caller HOLDS the icon and the teleport-proof number
+     * carries. Nothing wrong is ever RETAINED → the round-1..4 marker-latch family is structurally
+     * impossible, and the residual worst-case icon error is bounded by [spanCapM] (≤ ~GPS accuracy typical).
      */
     fun nearestProjectionByHeadingUnambiguousOrNull(
         p: LatLng,
         headingDeg: Double,
         maxPerpM: Double,
         maxHeadingDiffDeg: Double,
-        ambiguityMarginM: Double,
+        gapMarginM: Double,
+        spanCapM: Double,
     ): Projection? {
         var best: Projection? = null
-        var minAlong = Double.MAX_VALUE
-        var maxAlong = -Double.MAX_VALUE
+        val alongs = ArrayList<Double>()
         for (i in 0 until points.size - 1) {
             val a = points[i]; val b = points[i + 1]
             if (Polyline.bearingDiffDeg(Polyline.bearingDeg(a, b), headingDeg) > maxHeadingDiffDeg) continue
@@ -349,13 +352,18 @@ class PolylinePath(val points: List<LatLng>) {
             if (perp <= maxPerpM) {
                 val along = cumulativeM[i] + t * (cumulativeM[i + 1] - cumulativeM[i])
                 if (best == null || perp < best.perpDistM) best = Projection(along, perp, i)
-                if (along < minAlong) minAlong = along
-                if (along > maxAlong) maxAlong = along
+                alongs.add(along)
             }
         }
         val b0 = best ?: return null
-        // Ambiguous: qualifying candidates span more than the margin along the route ⇒ a distinct pass ⇒ refuse.
-        return if (maxAlong - minAlong > ambiguityMarginM) null else b0
+        if (alongs.size == 1) return b0
+        alongs.sort()
+        var maxGap = 0.0
+        for (j in 1 until alongs.size) maxGap = kotlin.math.max(maxGap, alongs[j] - alongs[j - 1])
+        val span = alongs.last() - alongs.first()
+        // A gap bigger than gapMarginM ⇒ ≥2 distinct passes ⇒ ambiguous. The span cap backstops a chain of
+        // near-contiguous passes that never individually gap. Either ⇒ refuse (hold + hide, number carries).
+        return if (maxGap > gapMarginM || span > spanCapM) null else b0
     }
 
     private fun nearestProjectionInRange(p: LatLng, windowLoM: Double, windowHiM: Double): Projection {
