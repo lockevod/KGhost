@@ -36,12 +36,18 @@ class GhostIntegratorTest {
         assertEquals(before, g.ghostTime, 1e-9)
     }
 
-    @Test fun `restore continues ghostTime without re-anchoring`() {
+    @Test fun `restore reproduces the LEAD against a fresh elapsed origin (no whole-ride inflation)`() {
         val g = newInt(); val src = pace(0.2, 1e9)
-        g.restore(ghostTime = 100.0, lastRiderDist = 500.0)
-        g.onTick(520.0, 0.0, 520.0, 90.0, 90.0, src)  // +20 m at 0.2 → ghostTime 104; gap = 104 − 90 = 14
-        assertEquals(104.0, g.ghostTime, 1e-6)
-        assertEquals(14.0, g.gapTimeS, 1e-6)
+        // Resume with a +30 s lead at odometer 500, but the resumed race clock restarts near 0 (fresh
+        // firstMoveElapsed). Persisting absolute ghostTime would have published ~elapsed-at-checkpoint;
+        // restore takes the LEAD and re-anchors ghostTime = elapsed + lead at the first resumed tick.
+        g.restore(leadS = 30.0, lastRiderDist = 500.0)
+        g.onTick(500.0, 0.0, 500.0, 90.0, 0.0, src)   // first resumed tick: elapsed≈0, no distance moved yet
+        assertEquals(30.0, g.gapTimeS, 1e-6)          // lead reproduced, NOT inflated
+        assertEquals(30.0, g.ghostTime, 1e-6)         // = elapsed(0) + lead(30)
+        g.onTick(520.0, 0.0, 520.0, 90.0, 10.0, src)  // +20 m at 0.2 → +4 ghostTime; +10 s elapsed
+        assertEquals(34.0, g.ghostTime, 1e-6)
+        assertEquals(24.0, g.gapTimeS, 1e-6)          // 34 − 10
     }
 
     @Test fun `first tick at a non-zero distance anchors the gap to zero`() {
@@ -73,7 +79,7 @@ class GhostIntegratorTest {
 
     @Test fun `no NaN map-ghost immediately after restore (resumed stopped)`() {
         val g = newInt(); val src = pace(0.2, 1e9)
-        g.restore(ghostTime = 100.0, lastRiderDist = 500.0)
+        g.restore(leadS = 100.0, lastRiderDist = 500.0)
         g.onTick(500.0, 41.0, 2.0, 90.0, 100.0, src)  // resumed stopped: Δd = 0
         assertTrue(!g.ghostLat.isNaN() && !g.ghostLng.isNaN())
         assertEquals(41.0, g.ghostLat, 1e-9)          // seeded at the resume position

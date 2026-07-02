@@ -25,6 +25,7 @@ class GhostIntegrator(
     var ghostLng = Double.NaN; private set
 
     private var lastRiderDist = Double.NaN
+    private var pendingResumeLead: Double? = null
     private val bcDist = ArrayList<Double>()
     private val bcTime = ArrayList<Double>()
     private val bcLat = ArrayList<Double>()
@@ -33,7 +34,14 @@ class GhostIntegrator(
     /** [paceAt] = the pace lookup (lat, lng, bearing) -> s/m or null (→ VP-fill). */
     fun onTick(riderDist: Double, lat: Double, lng: Double, bearingDeg: Double, elapsedS: Double,
                paceAt: (Double, Double, Double) -> Double?) {
-        if (lastRiderDist.isNaN()) {
+        val resumeLead = pendingResumeLead
+        if (resumeLead != null) {
+            // First tick after restore(): re-anchor ghostTime to THIS tick's race clock + the restored lead,
+            // so gapTimeS = ghostTime − elapsedS == leadS regardless of the resumed process's fresh elapsed
+            // origin. lastRiderDist was set by restore() (odometer continuity handled by the dd branches).
+            ghostTime = elapsedS + resumeLead; pendingResumeLead = null
+            bcDist.clear(); bcTime.clear(); bcLat.clear(); bcLng.clear()
+        } else if (lastRiderDist.isNaN()) {
             // First tick: anchor the gap to 0 (do NOT accrue the unknown pre-roll).
             lastRiderDist = riderDist; ghostTime = elapsedS
             bcDist.clear(); bcTime.clear(); bcLat.clear(); bcLng.clear()
@@ -55,10 +63,12 @@ class GhostIntegrator(
         place(elapsedS, riderDist, lat, lng)
     }
 
-    /** Restore scalar state on resume (Component 3). Breadcrumb restarts empty; it (and the ghost marker)
-     *  re-seed on the next [onTick] from the resume position — never leaving the marker NaN. */
-    fun restore(ghostTime: Double, lastRiderDist: Double) {
-        this.ghostTime = ghostTime; this.lastRiderDist = lastRiderDist
+    /** Restore scalar state on resume (Component 3): [leadS] is the race lead (gapTimeS) to reproduce, NOT
+     *  an absolute ghostTime — the next [onTick] re-anchors `ghostTime = elapsedS + leadS` so the fresh
+     *  resumed elapsed origin can't inflate the gap. [lastRiderDist] restores the odometer baseline (a
+     *  reset odometer just re-baselines via the backward-Δd branch). Breadcrumb re-seeds on that tick. */
+    fun restore(leadS: Double, lastRiderDist: Double) {
+        this.lastRiderDist = lastRiderDist; this.pendingResumeLead = leadS
         bcDist.clear(); bcTime.clear(); bcLat.clear(); bcLng.clear()
     }
 
