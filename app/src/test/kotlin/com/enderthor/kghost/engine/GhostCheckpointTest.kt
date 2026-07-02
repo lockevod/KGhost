@@ -6,7 +6,7 @@ import org.junit.Test
 
 class GhostCheckpointTest {
     @Test fun `scalar state round-trips`() {
-        val cp = GhostCheckpoint(rideEpoch = 123L, ghostTime = 42.5, lastRiderDist = 1000.0, pick = GhostPick.BEST, vpTimePerM = 0.3)
+        val cp = GhostCheckpoint(rideEpoch = 123L, leadS = 42.5, lastRiderDist = 1000.0, pick = GhostPick.BEST, vpTimePerM = 0.3, savedAtEpoch = 999L)
         val s = jsonForStorage.encodeToString(GhostCheckpoint.serializer(), cp)
         val back = jsonForStorage.decodeFromString(GhostCheckpoint.serializer(), s)
         assertEquals(cp, back)
