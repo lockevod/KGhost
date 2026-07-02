@@ -67,7 +67,7 @@ class PolylineHeadingProjectionTest {
     @Test fun `unambiguous single pass returns the point`() {
         // Eastbound on the out-and-back: only the outbound leg matches the heading → one candidate cluster.
         val p = outAndBack.nearestProjectionByHeadingUnambiguousOrNull(
-            onRoad, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, ambiguityMarginM = 500.0,
+            onRoad, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, gapMarginM = 75.0, spanCapM = 200.0,
         )
         assertNotNull(p)
         assertTrue("expected outbound arc < $half, got ${p!!.distanceAlongM}", p.distanceAlongM < half)
@@ -86,16 +86,35 @@ class PolylineHeadingProjectionTest {
             ),
         )
         val p = overlap.nearestProjectionByHeadingUnambiguousOrNull(
-            onRoad, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, ambiguityMarginM = 500.0,
+            onRoad, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, gapMarginM = 75.0, spanCapM = 200.0,
         )
         assertNull("two far-apart east passes must be ambiguous → null", p)
+    }
+
+    @Test fun `two same-direction passes only ~444 m apart are refused (gap rule beats the old 500 m span)`() {
+        // Small same-direction overlap: two east legs at lat 0 separated by a ~333 m N-W-S detour → the two
+        // candidates sit ~444 m apart along the route. The OLD raw-span rule (margin 500) had span 444 < 500 →
+        // wrongly ADOPTED (up to ~444 m icon error). The gap rule sees a 444 m gap ≫ 75 → refuses. Icon-only;
+        // the number carries.
+        val nearOverlap = PolylinePath(
+            listOf(
+                LatLng(0.0, 0.0), LatLng(0.0, 0.001), // pass 1 east ~111 m
+                LatLng(0.001, 0.001), LatLng(0.001, 0.0), LatLng(0.0, 0.0), // ~333 m detour
+                LatLng(0.0, 0.001), // pass 2 east ~111 m (same road)
+            ),
+        )
+        val onNear = LatLng(0.00005, 0.0005) // ~5.5 m off the east road, at its midpoint
+        val p = nearOverlap.nearestProjectionByHeadingUnambiguousOrNull(
+            onNear, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, gapMarginM = 75.0, spanCapM = 200.0,
+        )
+        assertNull("two same-direction passes ~444 m apart must be refused by the gap rule", p)
     }
 
     @Test fun `off-route beyond maxPerp returns null (nothing to adopt)`() {
         val far = LatLng(0.01, 0.5)
         assertNull(
             outAndBack.nearestProjectionByHeadingUnambiguousOrNull(
-                far, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, ambiguityMarginM = 500.0,
+                far, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, gapMarginM = 75.0, spanCapM = 200.0,
             ),
         )
     }

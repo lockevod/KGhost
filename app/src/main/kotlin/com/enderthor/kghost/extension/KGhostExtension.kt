@@ -291,10 +291,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         private const val CHECKPOINT_MAX_AGE_MS = 6 * 60 * 60 * 1000L
         // Heading tolerance for the marker anchor's pass-disambiguation (loop bootstrap + shortcut recovery).
         private const val ROUTE_HEADING_TOL_DEG = 45.0
-        // A global marker re-acquire is treated as AMBIGUOUS (→ hide, don't guess) when two qualifying
-        // candidates sit more than this apart along the route (a distinct self-overlap pass). A hairpin U or
-        // adjacent segments stay well under it; a real second pass is normally kilometres away.
-        private const val ROUTE_AMBIGUITY_MARGIN_M = 500.0
+        // A global marker re-acquire is AMBIGUOUS (→ hold, don't guess) when the qualifying candidates split
+        // into ≥2 clusters — an along-route GAP between consecutive candidates > GAP_M (adjacent-segment gaps
+        // of one pass are ≤ ~40 m; a distinct pass is the whole route apart) — or the cluster SPANs > SPAN_M
+        // (backstop). Gap-based, not raw-span, so a long contiguous curl/roundabout is still accepted while a
+        // second pass even a few hundred m away is refused; residual worst-case icon error is bounded by SPAN.
+        private const val ROUTE_AMBIGUITY_GAP_M = 75.0
+        private const val ROUTE_AMBIGUITY_SPAN_M = 200.0
         // Finish-freeze corroboration: the rider's ODOMETER must be within this of the route length before a
         // near-end R can freeze the gap — blocks a spurious near-end R lock from finish-freezing mid-route
         // (where the odometer is far short of the end). Generous so a real finish after a short end-shortcut
@@ -2108,7 +2111,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     if (moving && emptyWindowTicks < RECOVER_EMPTY_TICKS) emptyWindowTicks++
                                     if (moving && emptyWindowTicks >= RECOVER_EMPTY_TICKS) {
                                         rm.path.nearestProjectionByHeadingUnambiguousOrNull(
-                                            LatLng(gLat, gLng), gHdg, ROUTE_PROJ_MAX_PERP_M, ROUTE_HEADING_TOL_DEG, ROUTE_AMBIGUITY_MARGIN_M,
+                                            LatLng(gLat, gLng), gHdg, ROUTE_PROJ_MAX_PERP_M, ROUTE_HEADING_TOL_DEG,
+                                            ROUTE_AMBIGUITY_GAP_M, ROUTE_AMBIGUITY_SPAN_M,
                                         )?.let {
                                             lastGoodRouteDistM = it.distanceAlongM
                                             distMAtLastGoodM = distM
