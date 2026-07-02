@@ -62,6 +62,44 @@ class PolylineHeadingProjectionTest {
         assertNull(p)
     }
 
+    // --- nearestProjectionByHeadingUnambiguousOrNull: refuse-to-guess global re-acquire ---
+
+    @Test fun `unambiguous single pass returns the point`() {
+        // Eastbound on the out-and-back: only the outbound leg matches the heading → one candidate cluster.
+        val p = outAndBack.nearestProjectionByHeadingUnambiguousOrNull(
+            onRoad, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, ambiguityMarginM = 500.0,
+        )
+        assertNotNull(p)
+        assertTrue("expected outbound arc < $half, got ${p!!.distanceAlongM}", p.distanceAlongM < half)
+    }
+
+    @Test fun `two far-apart same-direction passes are AMBIGUOUS and return null`() {
+        // The SAME east road ridden twice same-direction, separated along the route by a big north detour:
+        // (0,0)→(0,1) east [pass 1], up-across-down, then (0,0)→(0,1) east AGAIN [pass 2]. A point on that
+        // east road projects onto BOTH passes with low perp + east heading → heading can't disambiguate a
+        // same-direction overlap → must refuse.
+        val overlap = PolylinePath(
+            listOf(
+                LatLng(0.0, 0.0), LatLng(0.0, 1.0), // pass 1 east
+                LatLng(1.0, 1.0), LatLng(1.0, 0.0), LatLng(0.0, 0.0), // north, west, south detour
+                LatLng(0.0, 1.0), // pass 2 east (same road)
+            ),
+        )
+        val p = overlap.nearestProjectionByHeadingUnambiguousOrNull(
+            onRoad, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, ambiguityMarginM = 500.0,
+        )
+        assertNull("two far-apart east passes must be ambiguous → null", p)
+    }
+
+    @Test fun `off-route beyond maxPerp returns null (nothing to adopt)`() {
+        val far = LatLng(0.01, 0.5)
+        assertNull(
+            outAndBack.nearestProjectionByHeadingUnambiguousOrNull(
+                far, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, ambiguityMarginM = 500.0,
+            ),
+        )
+    }
+
     @Test fun `bearingDiffDeg is circular`() {
         assertEquals(10.0, Polyline.bearingDiffDeg(5.0, 355.0), 1e-9)
         assertEquals(180.0, Polyline.bearingDiffDeg(0.0, 180.0), 1e-9)
