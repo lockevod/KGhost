@@ -313,24 +313,28 @@ class PolylinePath(val points: List<LatLng>) {
     }
 
     /**
-     * GLOBAL re-acquire disambiguated by an ODOMETER PRIOR, for recovering the marker rail after the
-     * rider goes off the windowed line (a shortcut rejoin far ahead, or a rail that latched wrong).
-     * Scans the WHOLE route for segments with perp ≤ [maxPerpM] AND bearing within [maxHeadingDiffDeg]
-     * of [headingDeg], and returns the one whose `distanceAlongM` is CLOSEST to [anchorAlongM] (the
-     * odometer-expected route position), NOT the smallest perp. Bidirectional (can pull the rail back
-     * DOWN if it over-shot) and, on a same-direction self-overlap where both passes match perp+heading,
-     * the odometer prior picks the pass the rider has actually reached. Null if nothing qualifies
-     * (rider genuinely off-route → caller holds). Only meaningful while moving with a valid heading.
+     * GLOBAL re-acquire for the marker rail that REFUSES TO GUESS — recovers R after the rider goes off
+     * the windowed line (a shortcut rejoin far ahead), without ever latching a wrong pass. Scans the whole
+     * route for segments with perp ≤ [maxPerpM] AND bearing within [maxHeadingDiffDeg] of [headingDeg], and
+     * returns the smallest-perp candidate ONLY IF the qualifying candidates are UNAMBIGUOUS — i.e. they all
+     * lie within [ambiguityMarginM] of each other along the route (one physical spot / adjacent segments).
+     * Returns null when there is NO candidate (rider genuinely off-route) OR when two qualifying candidates
+     * sit far apart along the route (a self-overlap the geometry cannot disambiguate — no odometer/host
+     * value reliably can either, so guessing is what caused every prior round's latch). The caller then
+     * HOLDS + HIDES the icon and the teleport-proof number carries. Only meaningful while moving with a
+     * valid heading. Nothing wrong is ever RETAINED → the whole round-1..4 marker-latch family is
+     * structurally impossible, not merely patched.
      */
-    fun nearestProjectionByHeadingNearestAlongOrNull(
+    fun nearestProjectionByHeadingUnambiguousOrNull(
         p: LatLng,
         headingDeg: Double,
-        anchorAlongM: Double,
         maxPerpM: Double,
         maxHeadingDiffDeg: Double,
+        ambiguityMarginM: Double,
     ): Projection? {
         var best: Projection? = null
-        var bestDelta = Double.MAX_VALUE
+        var minAlong = Double.MAX_VALUE
+        var maxAlong = -Double.MAX_VALUE
         for (i in 0 until points.size - 1) {
             val a = points[i]; val b = points[i + 1]
             if (Polyline.bearingDiffDeg(Polyline.bearingDeg(a, b), headingDeg) > maxHeadingDiffDeg) continue
@@ -344,11 +348,14 @@ class PolylinePath(val points: List<LatLng>) {
             val perp = sqrt((px - fx) * (px - fx) + (py - fy) * (py - fy))
             if (perp <= maxPerpM) {
                 val along = cumulativeM[i] + t * (cumulativeM[i + 1] - cumulativeM[i])
-                val delta = kotlin.math.abs(along - anchorAlongM)
-                if (best == null || delta < bestDelta) { best = Projection(along, perp, i); bestDelta = delta }
+                if (best == null || perp < best.perpDistM) best = Projection(along, perp, i)
+                if (along < minAlong) minAlong = along
+                if (along > maxAlong) maxAlong = along
             }
         }
-        return best
+        val b0 = best ?: return null
+        // Ambiguous: qualifying candidates span more than the margin along the route ⇒ a distinct pass ⇒ refuse.
+        return if (maxAlong - minAlong > ambiguityMarginM) null else b0
     }
 
     private fun nearestProjectionInRange(p: LatLng, windowLoM: Double, windowHiM: Double): Projection {

@@ -291,6 +291,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         private const val CHECKPOINT_MAX_AGE_MS = 6 * 60 * 60 * 1000L
         // Heading tolerance for the marker anchor's pass-disambiguation (loop bootstrap + shortcut recovery).
         private const val ROUTE_HEADING_TOL_DEG = 45.0
+        // A global marker re-acquire is treated as AMBIGUOUS (→ hide, don't guess) when two qualifying
+        // candidates sit more than this apart along the route (a distinct self-overlap pass). A hairpin U or
+        // adjacent segments stay well under it; a real second pass is normally kilometres away.
+        private const val ROUTE_AMBIGUITY_MARGIN_M = 500.0
+        // Finish-freeze corroboration: the rider's ODOMETER must be within this of the route length before a
+        // near-end R can freeze the gap — blocks a spurious near-end R lock from finish-freezing mid-route
+        // (where the odometer is far short of the end). Generous so a real finish after a short end-shortcut
+        // still qualifies.
+        private const val FINISH_ODO_MARGIN_M = 3_000.0
 
         /**
          * Recovery from a poisoned rail. The GPS window is centred on `lastGoodRouteDistM`; if a bad value
@@ -2068,18 +2077,17 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     distMAtLastGoodM = distM
                                 } else if (base != null && gHdg.isFinite()) {
                                     // Recovery: after RECOVER_EMPTY_TICKS moving ticks off the window (a shortcut that
-                                    // rejoined far ahead, or a rail that latched wrong), a GLOBAL perp+heading re-acquire
-                                    // anchored to the ODOMETER-EXPECTED position (base + metres ridden since). It is
-                                    // BIDIRECTIONAL — it can pull the rail back DOWN if it over-shot (a forward-only
-                                    // re-acquire could never escape a forward over-shoot) — and the odometer anchor picks
-                                    // the pass the rider has actually reached on a same-direction self-overlap. Retries
-                                    // every tick once armed (counter reset only on a successful re-acquire).
+                                    // rejoined far ahead), a GLOBAL perp+heading re-acquire that adopts a new R ONLY when
+                                    // it is UNAMBIGUOUS (a single candidate cluster). If ambiguous (two far-apart passes
+                                    // of a self-overlap) or nothing qualifies (still off-route), it returns null → R is
+                                    // HELD and the icon HIDES (below) rather than latching a guess — so no wrong rail is
+                                    // ever retained. Only scans while MOVING (a parked-off-route rider triggers no O(n)
+                                    // sweep); retries every moving tick, counter reset only on a successful re-lock.
                                     val moving = speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS
                                     if (moving && emptyWindowTicks < RECOVER_EMPTY_TICKS) emptyWindowTicks++
-                                    if (emptyWindowTicks >= RECOVER_EMPTY_TICKS) {
-                                        val odoExpected = base + (distM - (baseOdo ?: distM)).coerceAtLeast(0.0)
-                                        rm.path.nearestProjectionByHeadingNearestAlongOrNull(
-                                            LatLng(gLat, gLng), gHdg, odoExpected, ROUTE_PROJ_MAX_PERP_M, ROUTE_HEADING_TOL_DEG,
+                                    if (moving && emptyWindowTicks >= RECOVER_EMPTY_TICKS) {
+                                        rm.path.nearestProjectionByHeadingUnambiguousOrNull(
+                                            LatLng(gLat, gLng), gHdg, ROUTE_PROJ_MAX_PERP_M, ROUTE_HEADING_TOL_DEG, ROUTE_AMBIGUITY_MARGIN_M,
                                         )?.let {
                                             lastGoodRouteDistM = it.distanceAlongM
                                             distMAtLastGoodM = distM
@@ -2090,6 +2098,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             }
                         }
                         val riderR = lastGoodRouteDistM
+                        // R is RELIABLE when the primary window is locked or within the brief off-window grace
+                        // (emptyWindowTicks < threshold). Once off-window past the threshold with no unambiguous
+                        // recovery, R is a stale hold → the marker HIDES and the finish-freeze won't trip (the
+                        // teleport-proof number carries). A GPS loss on-route holds emptyWindowTicks (the R block
+                        // is skipped on a stale fix), so a dropout keeps the marker, only a real off-route hides it.
+                        val markerReliable = emptyWindowTicks < RECOVER_EMPTY_TICKS
                         // Ghost's ROUTE position (drives the marker AND the behind-distance): the route distance
                         // whose historical time is `rg.timeAt(R) − gapTimeS` — AHEAD ⇒ it trails you on the route,
                         // BEHIND ⇒ it runs AHEAD to chase. rg saturates at routeLen (pin-at-finish).
@@ -2127,8 +2141,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // lead doesn't erode (number) and the icon doesn't keep gliding past (marker) while
                         // ELAPSED_TIME climbs. Un-freeze if R drops back out of the end band (a pass-through
                         // destination). Guarded to real routes (a route ≤ 2·band is never "at the finish" tick 1).
-                        val atFinish = riderR != null && routeLenM > 2 * ROUTE_END_NEAR_M &&
-                            routeLenM - riderR <= ROUTE_END_NEAR_M
+                        // Also gated to a RELIABLE R (not a stale off-route hold) and CORROBORATED by the odometer
+                        // (the rider has actually ridden ~the whole route) so a spurious near-end R lock can't
+                        // finish-freeze mid-route.
+                        val atFinish = riderR != null && markerReliable && routeLenM > 2 * ROUTE_END_NEAR_M &&
+                            routeLenM - riderR <= ROUTE_END_NEAR_M && distM >= routeLenM - FINISH_ODO_MARGIN_M
                         val gap: GapState
                         val markerDist: Double?
                         if (atFinish) {
@@ -2153,8 +2170,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         if (onHistory) SegmentInfoHolder.set(B2_ON_HISTORY) else SegmentInfoHolder.clear()
                         // Marker (BOTH cases, ROUTE frame) — [markerDist] is the live ghostRouteDist, or the
                         // FROZEN position at the finish, so the icon and the number always agree. Icon only —
-                        // hidden when R is unknown; the number carries.
-                        mapGhostState = if (cfg.showGhostOnMap && markerDist != null) {
+                        // hidden when R is unknown OR UNRELIABLE (off-route past the grace with no unambiguous
+                        // re-lock: showing a stale/guessed position would be worse than nothing); the number carries.
+                        mapGhostState = if (cfg.showGhostOnMap && markerDist != null && markerReliable) {
                             MapGhostState(markerDist, rm.path, SystemClock.elapsedRealtime())
                         } else {
                             null
