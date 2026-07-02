@@ -1977,10 +1977,55 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 scope.launch(Dispatchers.IO) { writeGhostCheckpoint() }
                             }
                         }
-                        // Publish the gap. GapState's sign convention is mathematical (ahead ⇒ gapTimeS<0,
-                        // gapDistanceM>0); the integrator is the opposite (ahead ⇒ gapTimeS>0) — negate time.
+                        // Rider ROUTE position R — anchors the map marker AND triggers the finish freeze; the
+                        // NUMBER never touches it (stays teleport-proof). Project the GPS onto the route,
+                        // WINDOWED around the odometer-propagated expected position so it can't flip to another
+                        // pass of a self-intersecting loop; on a long empty-window stretch (a shortcut that
+                        // rejoined far ahead) do ONE capped global re-acquire so the anchor doesn't stay stuck
+                        // behind. Held (frozen) when the fix is off the line. All updates land in
+                        // lastGoodRouteDistM (R) + distMAtLastGoodM (its odometer).
+                        val routeLenM = rm.path.totalM
+                        run {
+                            val fixR = lastFix
+                            if (fixR != null && gLat.isFinite() && gLng.isFinite() &&
+                                SystemClock.elapsedRealtime() - fixR.ms <= GPS_FIX_FRESH_MS
+                            ) {
+                                val base = lastGoodRouteDistM
+                                val baseOdo = distMAtLastGoodM
+                                val onLine = if (base != null && baseOdo != null) {
+                                    val fwd = (distM - baseOdo).coerceIn(0.0, ROUTE_PROJ_FWD_MAX_M) + ROUTE_PROJ_FWD_M
+                                    rm.path.nearestProjectionInWindowOrNull(LatLng(gLat, gLng), base, ROUTE_PROJ_BACK_M, fwd)
+                                        ?.distanceAlongM?.takeIf { it.isFinite() && it <= routeLenM }
+                                } else {
+                                    rm.path.nearestProjection(LatLng(gLat, gLng))
+                                        .let { if (it.perpDistM <= ROUTE_PROJ_MAX_PERP_M) it.distanceAlongM else null }
+                                }
+                                if (onLine != null) {
+                                    emptyWindowTicks = 0
+                                    lastGoodRouteDistM = onLine
+                                    distMAtLastGoodM = distM
+                                } else if (base != null) {
+                                    // Empty window: after RECOVER_EMPTY_TICKS moving ticks, one capped global
+                                    // re-acquire pulls R to the (possibly far-ahead) true position — but no higher
+                                    // than the odometer ceiling, so it can't jump to a wrong-pass FORWARD point.
+                                    val moving = speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS
+                                    if (moving) emptyWindowTicks++
+                                    if (emptyWindowTicks >= RECOVER_EMPTY_TICKS) {
+                                        emptyWindowTicks = 0
+                                        val ceil = base + (distM - (baseOdo ?: distM)).coerceAtLeast(0.0)
+                                        val g = rm.path.nearestProjection(LatLng(gLat, gLng))
+                                        g.distanceAlongM
+                                            .takeIf { it.isFinite() && g.perpDistM <= ROUTE_PROJ_MAX_PERP_M && it <= ceil + ROUTE_PROJ_BACK_M }
+                                            ?.let { lastGoodRouteDistM = it; distMAtLastGoodM = distM }
+                                    }
+                                }
+                            }
+                        }
+                        val riderR = lastGoodRouteDistM
+                        // The live gap from the integrator. GapState's sign convention is mathematical (ahead ⇒
+                        // gapTimeS<0, gapDistanceM>0); the integrator is the opposite (ahead ⇒ gapTimeS>0).
                         val fresh = coast.quality != CoastQuality.LONG_LOSS
-                        val gap = GapState(
+                        val liveGap = GapState(
                             gapTimeS = -integ.gapTimeS,
                             gapDistanceM = integ.gapDistM,
                             progressM = riderDist,
@@ -1989,6 +2034,17 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             estimated = !fresh,
                             active = true,
                         )
+                        // FINISH FREEZE (#3): once R reaches the route end the race is over — capture the gap
+                        // ONCE and re-publish it so a stationary finisher's lead doesn't erode while ELAPSED_TIME
+                        // keeps climbing (the integrator has no route-end concept). Un-freeze if R drops back
+                        // out of the end band (a pass-through destination) → race on.
+                        val atFinish = riderR != null && routeLenM - riderR <= ROUTE_END_NEAR_M
+                        val gap = if (atFinish) {
+                            finishedGap ?: liveGap.also { finishedGap = it }
+                        } else {
+                            finishedGap = null
+                            liveGap
+                        }
                         GapStateHolder.update(gap)
                         // SEG/GP tag: SEG when the rider is on recorded history this tick (patch has pace at
                         // the fix), GP on VP-fill. The field reads only non-null (SEG) — the label is unused,
@@ -1996,29 +2052,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val onHistory = patch != null && gHdg.isFinite() &&
                             patch.pace(gLat, gLng, gHdg, eff.ghostPick) != null
                         if (onHistory) SegmentInfoHolder.set(B2_ON_HISTORY) else SegmentInfoHolder.clear()
-                        // Marker (BOTH cases, ROUTE frame). Project the rider onto the loaded route (windowed
-                        // around the last good position; a shortcut breadcrumb reads off-line → HOLD the last
-                        // good R so the icon glides, never jerks). Place the ghost at the ROUTE distance whose
-                        // historical time is `rg.timeAt(R) − gapTimeS`: AHEAD ⇒ ghost trails you; BEHIND ⇒ it
-                        // runs AHEAD to chase. rg saturates at routeLen (pin-at-finish). The number stays
-                        // teleport-proof; this only positions the ICON, dropped when it can't be placed.
-                        mapGhostState = if (cfg.showGhostOnMap && rg != null && gLat.isFinite() && gLng.isFinite()) {
-                            val base = lastGoodRouteDistM
-                            val proj = if (base != null) {
-                                rm.path.nearestProjectionInWindowOrNull(LatLng(gLat, gLng), base, ROUTE_PROJ_BACK_M, ROUTE_PROJ_FWD_M)
-                            } else {
-                                rm.path.nearestProjection(LatLng(gLat, gLng))
-                            }
-                            val riderR = proj?.distanceAlongM
-                                ?.takeIf { it.isFinite() && proj.perpDistM <= ROUTE_PROJ_MAX_PERP_M }
-                            if (riderR != null) lastGoodRouteDistM = riderR
-                            val anchorR = riderR ?: base
-                            if (anchorR != null) {
-                                val ghostRouteDist = rg.distanceAt((rg.timeAt(anchorR) - integ.gapTimeS).coerceAtLeast(0.0))
-                                MapGhostState(ghostRouteDist, rm.path, SystemClock.elapsedRealtime())
-                            } else {
-                                null // no route position yet (never projected) → no icon; the number carries
-                            }
+                        // Marker (BOTH cases, ROUTE frame). Place the ghost at the ROUTE distance whose historical
+                        // time is `rg.timeAt(R) − gapTimeS`: AHEAD ⇒ ghost trails you; BEHIND ⇒ it runs AHEAD to
+                        // chase. Uses the LIVE integrator gap (not the frozen one) so a beaten ghost keeps gliding
+                        // to the line. rg saturates at routeLen (pin-at-finish). Icon only — hidden when R is
+                        // unknown; the number carries.
+                        mapGhostState = if (cfg.showGhostOnMap && rg != null && riderR != null) {
+                            val ghostRouteDist = rg.distanceAt((rg.timeAt(riderR) - integ.gapTimeS).coerceAtLeast(0.0))
+                            MapGhostState(ghostRouteDist, rm.path, SystemClock.elapsedRealtime())
                         } else {
                             null
                         }
