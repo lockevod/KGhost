@@ -38,8 +38,10 @@ class GhostIntegrator(
         if (resumeLead != null) {
             // First tick after restore(): re-anchor ghostTime to THIS tick's race clock + the restored lead,
             // so gapTimeS = ghostTime − elapsedS == leadS regardless of the resumed process's fresh elapsed
-            // origin. lastRiderDist was set by restore() (odometer continuity handled by the dd branches).
-            ghostTime = elapsedS + resumeLead; pendingResumeLead = null
+            // origin. Re-baseline lastRiderDist to THIS tick's odometer (dd=0) so the un-checkpointed metres
+            // ridden between the last write and the cut don't accrue an unoffset lead overshoot, and an
+            // odometer reset across the resume is absorbed cleanly.
+            ghostTime = elapsedS + resumeLead; lastRiderDist = riderDist; pendingResumeLead = null
             bcDist.clear(); bcTime.clear(); bcLat.clear(); bcLng.clear()
         } else if (lastRiderDist.isNaN()) {
             // First tick: anchor the gap to 0 (do NOT accrue the unknown pre-roll).

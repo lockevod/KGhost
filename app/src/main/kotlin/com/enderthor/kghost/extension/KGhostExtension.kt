@@ -1916,7 +1916,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // path instance for the SAME polyline) keeps the accrued race.
                         if (projectorRoute !== rm.path) {
                             val sameRoute = projectorPolyline == rm.polyline
-                            val hadRoute = projectorPolyline != null
                             projectorRoute = rm.path
                             projectorPolyline = rm.polyline
                             if (!sameRoute) {
@@ -1925,12 +1924,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 prevSegStartM = null
                                 integrator = null // rebuilt at first movement on the new route
                                 integLastRiderDist = 0.0
+                                finishedGap = null
                                 finishedGhostRouteDist = null
-                                // A GENUINE mid-ride route change (a DIFFERENT polyline replacing a previous one)
-                                // starts a NEW race → drop the old checkpoint so the rebuild below can't restore
-                                // the previous route's lead onto it. NOT on the first load (hadRoute == false),
-                                // which must keep a checkpoint for a power-off resume of THIS route.
-                                if (hadRoute) scope.launch(Dispatchers.IO) { deleteGhostCheckpoint() }
+                                // No checkpoint delete here: the rebuild's restore is gated on routeHash, so a
+                                // DIFFERENT polyline can't restore the old route's lead — deterministic, with no
+                                // racy IO-delete-vs-flush-vs-rebuild ordering. The stale file is harmless (it
+                                // fails the routeHash match) and is overwritten by the new route's next write.
                             }
                         }
                         val rg = rm.routeGhost
@@ -1966,7 +1965,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             val cp = loadGhostCheckpoint()
                             val riderDistNow = coast.effectiveDistanceM
                             val recent = cp != null && System.currentTimeMillis() - cp.savedAtEpoch in 0..CHECKPOINT_MAX_AGE_MS
-                            if (cp != null && recent && cp.pick == eff.ghostPick && cp.vpTimePerM == vpTpm &&
+                            // routeHash match is REQUIRED: it deterministically blocks restoring a previous
+                            // route's lead onto a new one (rideEpoch is unchanged across a route change), with
+                            // no dependence on delete ordering.
+                            if (cp != null && recent && cp.routeHash == rm.polyline.hashCode() &&
+                                cp.pick == eff.ghostPick && cp.vpTimePerM == vpTpm &&
                                 (cp.rideEpoch == recordingStartedEpoch ||
                                     kotlin.math.abs(riderDistNow - cp.lastRiderDist) <= CHECKPOINT_RESUME_MARGIN_M)
                             ) {
@@ -2006,6 +2009,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     pick = integPick!!,
                                     vpTimePerM = integVpTpm,
                                     savedAtEpoch = System.currentTimeMillis(),
+                                    routeHash = rm.polyline.hashCode(),
                                 )
                                 scope.launch(Dispatchers.IO) { flushGhostCheckpoint() }
                             }
@@ -2028,15 +2032,27 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 val baseOdo = distMAtLastGoodM
                                 val onLine = if (base != null && baseOdo != null) {
                                     // Primary: small odometer-propagated window — loop-safe by route-distance span.
+                                    // MUST perp-gate: nearestProjectionInWindowOrNull returns the nearest IN-window
+                                    // point at ANY perp, so WITHOUT this it never nulls for an interior base — the
+                                    // rider crawling off-route on a shortcut would just drag R along the skipped arc
+                                    // and the recovery below could never fire. Perp > MAX ⇒ off the line ⇒ null ⇒ hold
+                                    // ⇒ recovery re-acquires at the rejoin.
                                     val fwd = (distM - baseOdo).coerceIn(0.0, ROUTE_PROJ_FWD_MAX_M) + ROUTE_PROJ_FWD_M
                                     rm.path.nearestProjectionInWindowOrNull(LatLng(gLat, gLng), base, ROUTE_PROJ_BACK_M, fwd)
+                                        ?.takeIf { it.perpDistM <= ROUTE_PROJ_MAX_PERP_M }
                                         ?.distanceAlongM?.takeIf { it.isFinite() && it <= routeLenM }
                                 } else if (base == null && gHdg.isFinite()) {
                                     // Bootstrap: HEADING-gated global so a closed loop (start point == finish point)
-                                    // can't coin-flip R onto the end. Null (no heading / off-line) → hold.
+                                    // can't coin-flip R onto the end.
                                     rm.path.nearestProjectionByHeadingInWindowOrNull(
                                         LatLng(gLat, gLng), gHdg, 0.0, 0.0, routeLenM, ROUTE_PROJ_MAX_PERP_M, ROUTE_HEADING_TOL_DEG,
                                     )?.distanceAlongM
+                                } else if (base == null) {
+                                    // Bootstrap with no heading yet (GPS pre-lock): perp-gated global. Accepts the rare
+                                    // loop start==end coin-flip (heading refines it next tick) — better than hiding the
+                                    // marker for the first seconds of every ride.
+                                    rm.path.nearestProjection(LatLng(gLat, gLng))
+                                        .let { if (it.perpDistM <= ROUTE_PROJ_MAX_PERP_M) it.distanceAlongM else null }
                                 } else {
                                     null
                                 }
