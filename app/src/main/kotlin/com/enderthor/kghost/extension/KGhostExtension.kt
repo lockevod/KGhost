@@ -2005,9 +2005,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     lastGoodRouteDistM = onLine
                                     distMAtLastGoodM = distM
                                 } else if (base != null) {
-                                    // Empty window: after RECOVER_EMPTY_TICKS moving ticks, one capped global
-                                    // re-acquire pulls R to the (possibly far-ahead) true position — but no higher
-                                    // than the odometer ceiling, so it can't jump to a wrong-pass FORWARD point.
+                                    // Empty window: after RECOVER_EMPTY_TICKS moving ticks, one global re-acquire
+                                    // pulls R to the (possibly far-ahead) true position — BOUNDED to [base, odometer
+                                    // ceiling]: FORWARD-ONLY (>= base, so at a loop self-crossing it can never drop
+                                    // back to an EARLIER pass) and no higher than the metres physically ridden (so it
+                                    // can't jump to a wrong-pass LATER point either). Between the two bounds the anchor
+                                    // is strictly monotonic → the icon cannot teleport on Sergi1's loop.
                                     val moving = speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS
                                     if (moving) emptyWindowTicks++
                                     if (emptyWindowTicks >= RECOVER_EMPTY_TICKS) {
@@ -2015,7 +2018,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                         val ceil = base + (distM - (baseOdo ?: distM)).coerceAtLeast(0.0)
                                         val g = rm.path.nearestProjection(LatLng(gLat, gLng))
                                         g.distanceAlongM
-                                            .takeIf { it.isFinite() && g.perpDistM <= ROUTE_PROJ_MAX_PERP_M && it <= ceil + ROUTE_PROJ_BACK_M }
+                                            .takeIf { it.isFinite() && g.perpDistM <= ROUTE_PROJ_MAX_PERP_M && it in base..(ceil + ROUTE_PROJ_BACK_M) }
                                             ?.let { lastGoodRouteDistM = it; distMAtLastGoodM = distM }
                                     }
                                 }
