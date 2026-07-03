@@ -2129,18 +2129,23 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // line and snaps to the rejoin. Still non-latching — R itself is only ever re-locked
                         // UNAMBIGUOUSLY, so the icon never moves to a GUESSED pass.
                         if (markerReliable && ghostRouteDist != null) lastReliableGhostRouteDist = ghostRouteDist
+                        // Capture the finish ONCE when the rider reaches the route end having ridden ~the whole
+                        // route (odometer-corroborated), then LATCH it: completing the loaded route makes the
+                        // result FINAL — the gap AND marker stay frozen for the rest of the ride even if the rider
+                        // pedals PAST the finish line. On a CLOSED LOOP the finish sits on the START point, so
+                        // crossing it re-acquires R at the start (route-dist ~0) and would otherwise un-freeze the
+                        // race; latching prevents that. Cleared only at ride end / a genuine route change.
+                        if (atFinish && finishedGap == null) {
+                            finishedGap = liveGap
+                            finishedGhostRouteDist = ghostRouteDist
+                        }
                         val gap: GapState
                         val markerDist: Double?
-                        if (atFinish) {
-                            if (finishedGap == null) {
-                                finishedGap = liveGap
-                                finishedGhostRouteDist = ghostRouteDist
-                            }
-                            gap = finishedGap!!
+                        val fg = finishedGap
+                        if (fg != null) {
+                            gap = fg
                             markerDist = finishedGhostRouteDist
                         } else {
-                            finishedGap = null
-                            finishedGhostRouteDist = null
                             gap = liveGap
                             // Live position while reliable; the frozen last-reliable position while off-route.
                             markerDist = if (markerReliable) ghostRouteDist else lastReliableGhostRouteDist
