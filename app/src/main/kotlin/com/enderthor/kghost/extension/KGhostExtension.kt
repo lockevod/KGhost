@@ -463,8 +463,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     @Volatile private var d0CandOdo: Double? = null
     // Start-distance of the recorded stretch the rider was on last tick — edge-triggers the segment alert.
     @Volatile private var prevSegStartM: Double? = null
-    // The final gap captured once at the route end, re-published so it stops inflating; null until finish.
-    @Volatile private var finishedGap: GapState? = null
+    // Option B moving-time race clock: previous tick's ELAPSED_TIME (to hold raceElapsed while stopped so
+    // the gap freezes instead of drifting) + whether the rider has COMPLETED the loaded route once (to hide
+    // the one-lap map marker on a 2nd lap, where R wraps to the start; the NUMBER keeps racing).
+    @Volatile private var prevTickElapsedS: Double? = null
+    @Volatile private var crossedFinish: Boolean = false
     // B2 path-following ghost race engine (accrues historical time per ridden metre on the ACTUAL path).
     // Built lazily at first movement; nulled at ride end/stop. KEPT across a reroute — it is route-agnostic,
     // so the accrued lead carries to the new polyline (only the route-specific marker anchor re-bootstraps).
@@ -483,9 +486,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // the Paused write can't clobber the shared temp file).
     @Volatile private var pendingCheckpoint: GhostCheckpoint? = null
     private val checkpointMutex = Mutex()
-    // Ghost route distance captured at the finish freeze so the MARKER freezes WITH the number (else the
-    // icon keeps gliding to the line while the number is held). Null = not frozen.
-    @Volatile private var finishedGhostRouteDist: Double? = null
     // The last ghost route distance drawn while R was RELIABLE. When the rider goes off the route (R
     // unreliable) the marker HOLDS this frozen position instead of hiding — so the icon never disappears
     // while a route is loaded (incl. a Karoo reroute/deviation), it just pauses where you left the line and
@@ -508,14 +508,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         d0CandPos = null
         d0CandOdo = null
         prevSegStartM = null
-        finishedGap = null
+        prevTickElapsedS = null
+        crossedFinish = false
         integrator = null
         integLastRiderDist = 0.0
         integPick = null
         integVpTpm = 0.0
         lastCheckpointMs = 0L
         pendingCheckpoint = null
-        finishedGhostRouteDist = null
         lastReliableGhostRouteDist = null
     }
 
@@ -1619,7 +1619,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
 
         // ② route-mode per-tick state. The per-ride/route ANCHOR (projectorRoute/Polyline, firstMoveElapsedS,
         // vpFirstMoveElapsedS, emptyWindowTicks, lastGoodRouteDistM, distMAtLastGoodM, gpsAlertFired,
-        // wasMoving, prevSegStartM, finishedGap, the integrator + checkpoint fields) lives in INSTANCE FIELDS
+        // wasMoving, prevSegStartM, crossedFinish, the integrator + checkpoint fields) lives in INSTANCE FIELDS
         // (declared above) so it SURVIVES a mid-ride host reconnect that cancels+relaunches this tick. It is
         // reset by resetRideAnchor() at a genuine ride end; a genuine route change resets only the route-
         // SPECIFIC marker/finish state (the integrator + race clock are KEPT so the lead carries — 58866d8).
@@ -1896,8 +1896,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 distMAtLastGoodM = null
                                 emptyWindowTicks = 0
                                 prevSegStartM = null
-                                finishedGap = null
-                                finishedGhostRouteDist = null
+                                crossedFinish = false // a new route hasn't been completed yet
                                 lastReliableGhostRouteDist = null
                                 // Checkpoint: restore is gated on routeKey (name+length), so a DIFFERENT route can't
                                 // restore a foreign lead; the carried integrator's next write stamps the new routeKey
@@ -1908,8 +1907,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val patch = rm.pacePatch
                         // Fair start: hold --- until the rider first rolls (a stationary wait for a lock is
                         // never a growing deficit). firstMoveElapsedS is stamped above every tick.
-                        val moveStart = firstMoveElapsedS
-                        if (moveStart == null) {
+                        val moveStart0 = firstMoveElapsedS
+                        if (moveStart0 == null) {
                             holdGap()
                             val nowMs = SystemClock.elapsedRealtime()
                             if (nowMs - lastDiagLogMs >= diagLogMs) {
@@ -1918,6 +1917,21 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             }
                             return@runCatching
                         }
+                        val riderDist = coast.effectiveDistanceM
+                        // MOVING-TIME race clock (option B): while the rider isn't advancing on the ground
+                        // (stopped at the finish or a light), HOLD raceElapsed by advancing the origin, so the
+                        // gap FREEZES at the result instead of drifting BEHIND, and resumes cleanly on moving.
+                        // Keyed on the odometer delta — the SAME signal the integrator accrues on (ghostTime only
+                        // grows when dd>0), so the two stay consistent (both frozen while stopped). Auto-pause
+                        // already freezes ELAPSED_TIME, so this only bites a stop-while-Recording (incl. the sim
+                        // sitting at the line). NOT applied before a prior tick exists.
+                        var moveStart = moveStart0
+                        val prevEl = prevTickElapsedS
+                        if (prevEl != null && elapsedS > prevEl && riderDist <= integLastRiderDist) {
+                            moveStart += (elapsedS - prevEl)
+                            firstMoveElapsedS = moveStart
+                        }
+                        prevTickElapsedS = elapsedS
                         // Build the integrator ONCE, at first movement — snapshot the pick + the VP-fill pace
                         // (the always-present target). A route change re-nulls it above → fresh race.
                         var integ = integrator
@@ -1971,7 +1985,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val gLat = fix?.lat ?: Double.NaN
                         val gLng = fix?.lng ?: Double.NaN
                         val gHdg = fix?.headingDeg ?: Double.NaN
-                        val riderDist = coast.effectiveDistanceM
                         integ.onTick(riderDist, gLat, gLng, gHdg, elapsedS - moveStart) { la, ln, br ->
                             patch?.pace(la, ln, br, eff.ghostPick)
                         }
@@ -2114,41 +2127,30 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             active = true,
                         )
                         // FINISH FREEZE (#3): once R reaches the route end the race is over — capture the gap AND
-                        // the ghost's route position ONCE and re-publish both FROZEN, so a stationary finisher's
-                        // lead doesn't erode (number) and the icon doesn't keep gliding past (marker) while
-                        // ELAPSED_TIME climbs. Un-freeze if R drops back out of the end band (a pass-through
-                        // destination). Guarded to real routes (a route ≤ 2·band is never "at the finish" tick 1).
-                        // Also gated to a RELIABLE R (not a stale off-route hold) and CORROBORATED by the odometer
-                        // (the rider has actually ridden ~the whole route) so a spurious near-end R lock can't
-                        // finish-freeze mid-route.
-                        val atFinish = riderR != null && markerReliable && routeLenM > 2 * ROUTE_END_NEAR_M &&
-                            routeLenM - riderR <= ROUTE_END_NEAR_M && distM >= routeLenM - FINISH_ODO_MARGIN_M
                         // Remember the last ghost position drawn while R was reliable — the marker HOLDS this
                         // (frozen) when the rider goes off-route, instead of hiding, so the icon never disappears
                         // while a route is loaded (incl. a Karoo reroute/deviation): it pauses where you left the
-                        // line and snaps to the rejoin. Still non-latching — R itself is only ever re-locked
-                        // UNAMBIGUOUSLY, so the icon never moves to a GUESSED pass.
+                        // line and snaps to the rejoin. Non-latching — R is only ever re-locked UNAMBIGUOUSLY.
                         if (markerReliable && ghostRouteDist != null) lastReliableGhostRouteDist = ghostRouteDist
-                        // Capture the finish ONCE when the rider reaches the route end having ridden ~the whole
-                        // route (odometer-corroborated), then LATCH it: completing the loaded route makes the
-                        // result FINAL — the gap AND marker stay frozen for the rest of the ride even if the rider
-                        // pedals PAST the finish line. On a CLOSED LOOP the finish sits on the START point, so
-                        // crossing it re-acquires R at the start (route-dist ~0) and would otherwise un-freeze the
-                        // race; latching prevents that. Cleared only at ride end / a genuine route change.
-                        if (atFinish && finishedGap == null) {
-                            finishedGap = liveGap
-                            finishedGhostRouteDist = ghostRouteDist
+                        // Option B: the NUMBER never latches at the finish — it keeps racing while you MOVE and
+                        // freezes when you STOP (the moving-time clock above). Mark the route COMPLETED the first
+                        // time R reaches the end band having ridden ~the whole route (odometer-corroborated), so
+                        // the ONE-LAP map marker can be hidden on a 2nd lap (where R wraps to the start and the
+                        // one-lap route-ghost can't place the icon; the number keeps racing route-agnostically).
+                        if (riderR != null && routeLenM > 2 * ROUTE_END_NEAR_M &&
+                            routeLenM - riderR <= ROUTE_END_NEAR_M && distM >= routeLenM - FINISH_ODO_MARGIN_M
+                        ) {
+                            crossedFinish = true
                         }
-                        val gap: GapState
-                        val markerDist: Double?
-                        val fg = finishedGap
-                        if (fg != null) {
-                            gap = fg
-                            markerDist = finishedGhostRouteDist
-                        } else {
-                            gap = liveGap
-                            // Live position while reliable; the frozen last-reliable position while off-route.
-                            markerDist = if (markerReliable) ghostRouteDist else lastReliableGhostRouteDist
+                        val gap = liveGap
+                        // Marker: HIDDEN once past the finish onto a 2nd lap (crossed the finish, then R wrapped
+                        // back into the route's first half); else the live position while reliable, or the frozen
+                        // last-reliable position while off-route.
+                        val onLap2 = crossedFinish && riderR != null && riderR < routeLenM * 0.5
+                        val markerDist: Double? = when {
+                            onLap2 -> null
+                            markerReliable -> ghostRouteDist
+                            else -> lastReliableGhostRouteDist
                         }
                         GapStateHolder.update(gap)
                         // SEG/GP tag: SEG when the rider is on recorded history this tick (patch has pace at
