@@ -19,16 +19,19 @@ live on a data field and as a marker on the map.
 - **External ghosts (import)** — race against rides you did *not* record with KGhost: it scans the
   Karoo's own `/sdcard/FitFiles/*.fit` history and imports GPX/FIT files you drop into
   `/sdcard/KGhost/`, turning them into ghosts to race.
-- **Ghost on the map** — during a route race, the ghost is drawn as a marker on the Karoo map,
-  sliding along the route at the ghost's pace so you can see it pull ahead or fall behind on the road.
-  The marker icon (ghost / cyclist / arrow / dot) is selectable; its size is automatic (it follows the
-  map zoom), and it glides smoothly rather than hopping once per second.
+- **Ghost on the map** — during a route race, the ghost is drawn as a marker on the Karoo map so you
+  can see it pull ahead (when you're behind, it runs up the road for you to chase) or trail behind you.
+  If you leave the route, the marker **holds its last position** and snaps to where you rejoin rather
+  than guessing; on a second lap of a loop it's simply hidden (the gap number keeps racing). The marker
+  icon (ghost / cyclist / arrow / dot) is selectable; its size is automatic (it follows the map zoom),
+  and it glides smoothly rather than hopping once per second.
 - **Fair start** — the race starts when **you** start riding, not when you press record. Waiting at
   the start for a GPS lock is never counted against you, whether or not you use auto-pause. The gap
   field shows `---` until you actually roll.
-- **Uses the Karoo's own position on the route** — KGhost reads where you are along the loaded route
-  from the Karoo itself, so it works correctly on loops and out-and-backs, and recovers cleanly if you
-  go off-route and the Karoo recalculates.
+- **Races your actual path — reroute-proof** — the gap is measured over the ground **you actually
+  ride**, comparing your pace to your historical pace metre by metre. It never depends on projecting you
+  onto the route, so it **can't teleport** on loops, self-crossing routes, shortcuts or reroutes. A
+  reroute to a different route **carries your lead** — the race continues, it doesn't restart.
 - **Per ride profile** — each Karoo ride profile can have its own setup: how you race (**fixed pace**
   vs **your rides**), its own Ghost Pace base (e.g. faster on the road bike, slower on the MTB), which
   past ghost to use (**best / last / average**), the map icon, and whether KGhost is on at all. So your
@@ -77,23 +80,24 @@ karooSystem.streamDataFlow("TYPE_EXT::kghost::kghost-gap-time").collect { state 
 - `TYPE_EXT::kghost::kghost-gap-time` — gap in **seconds**, positive = ahead.
 - `TYPE_EXT::kghost::kghost-gap-dist` — gap in **metres**, positive = ahead.
 - Each DataPoint also carries an `estimated` field (`1.0` while the value is an **estimate** — a
-  GPS dropout being dead-reckoned, or the rider off-route — else `0.0`):
-  `dataPoint.values["estimated"]`.
+  GPS dropout being dead-reckoned — else `0.0`): `dataPoint.values["estimated"]`.
 - While there is nothing to show (not recording, no data yet, sustained GPS loss) the stream sits in
   `StreamState.Searching`. If KGhost isn't installed the stream is simply silent — no error.
 
-Ahead is green, behind is red, on-pace is neutral. While your position is briefly uncertain — a GPS
-gap, or while you're **off-route** — the value is shown in **amber** as an estimate rather than
-blanking. `---` appears only when there is nothing to show — no target set, not recording, you haven't
-started riding yet, or after a sustained GPS loss (see below). Fields are designed for sunlight
+Ahead is green, behind is red, on-pace is neutral. During a **GPS dropout** the value is shown in
+**amber** as an estimate (dead-reckoned) rather than blanking; leaving the **route** does *not* make it
+an estimate — the number races your actual path and stays solid off-route. `---` appears only when
+there is nothing to show — no target set, not recording, you haven't started riding yet, or after a
+sustained GPS loss (see below). Fields are designed for sunlight
 readability and respect the Karoo's day/night theme.
 
 ### Stops and GPS dropouts
 
-A normal **stop** (a red light) is not a problem: the ghost keeps to its pace, so if you stop and it
-doesn't, you fall behind — exactly like a real race. **Pausing the ride** (the pause button, or the
-Karoo's auto-pause) freezes the ghost with you: the ride clock stops, so a coffee stop while paused
-costs you nothing against the ghost.
+The race runs on **moving time**: when you **stop** (a red light, a photo, the finish line) the gap
+**freezes** at its current value and resumes when you roll again — stopping never quietly eats your
+lead. **Pausing the ride** (the pause button or the Karoo's auto-pause) freezes it too. So whether you
+stop, park, or pause, a break costs you nothing against the ghost; the race is decided by how you ride,
+not by how long you rest.
 
 A **GPS dropout** never blanks the gap straight away — KGhost keeps showing an estimate and only gives
 up after a sustained loss:
@@ -105,29 +109,31 @@ up after a sustained loss:
 | ~1 min+ | …plus a one-shot **"GPS lost"** alert (clears when the signal returns) | visible |
 | ~3 min+ | gives up → `---` | hidden |
 
-When the signal returns, your position corrects and the gap catches up. The map ghost runs on time
-alone, so it stays visible and gliding throughout a dropout — it isn't hidden just because *your*
-position is briefly unknown.
+When the signal returns, the gap catches up (the odometer dead-reckons through the gap, so the race
+keeps running). The map ghost holds its position and stays visible throughout a dropout — it isn't
+hidden just because *your* position is briefly unknown.
 
-### Detours, reroutes, and shortcuts (when the gap can look odd)
+**Power off mid-ride?** KGhost checkpoints the race a few times a minute, so if the Karoo dies and the
+ride resumes, the gap comes back **with the lead you'd built** rather than restarting from zero.
 
-KGhost races you along the **loaded route**, so when you leave it the gap does its best with what the
-Karoo reports — and a few situations can look strange for a moment:
+### Detours, reroutes, and shortcuts
 
-- **A detour that rejoins the route** (you miss a turn and take a longer way back): the extra distance
-  counts against you, so the gap drifts a little further **behind** while you're off-route, then
-  settles when you rejoin. That's real — the detour genuinely cost you distance.
-- **A shortcut that skips part of the route**: KGhost does **not** credit distance you didn't ride. You
-  are compared on the route the ghost actually rode, so cutting a corner won't suddenly show you
-  winning — it simply doesn't count the skipped stretch.
-- **Routes that cross themselves (loops, out-and-backs)**: once in a while the Karoo can momentarily
-  place you on a *later* pass through the same streets. KGhost caps your progress to the distance
-  you've actually pedalled, so such a glitch can't teleport the gap to a wild value — at worst it's
-  briefly off by the length of your detour, and corrects once you're cleanly back on the route.
+The **gap number** races you over the ground you actually ride, at your historical pace — it never
+projects you onto the route, so detours, shortcuts, self-crossing loops and reroutes are handled by
+construction and **can never teleport the gap**:
 
-In all of these the gap is shown as an **amber estimate** while you're off the route, and corrects the
-moment you rejoin. A genuinely big reroute (the Karoo sends you several km a different way) is the one
-case nothing can fully reconcile — you and the ghost simply rode different distances.
+- **A detour or a shortcut**: you keep being raced against your historical pace on the ground under
+  your wheels. You can't "win" by cutting a corner (you simply cover less ground at your own pace), and
+  a longer way round costs you the extra time it takes you — no special cases, no odd jumps.
+- **Loops and self-crossing routes**: because the number doesn't rely on *which pass* of the road
+  you're on, a self-crossing route can't confuse it. (The **map marker** does place you on the route;
+  when it can't tell one pass from another it simply holds or hides — the number always carries.)
+- **A reroute to a different route**: your **lead carries over** — the race continues on the new route
+  from wherever you'd got to, it doesn't reset to zero.
+
+The only thing tied to the loaded route is the **map marker** (see *Ghost on the map* above): if you
+leave the route it holds its last spot and snaps to where you rejoin, and on a second lap it hides. The
+number keeps racing throughout.
 
 ## Settings
 
