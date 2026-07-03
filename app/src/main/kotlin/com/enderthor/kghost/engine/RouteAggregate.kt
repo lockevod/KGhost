@@ -27,7 +27,7 @@ const val AGG_MAX_SPEED_MS = 30.0
 
 /** Persisted-aggregate schema version. Bump when the node/aggregate layout changes so old blobs are
  *  discarded (and re-seeded) instead of mis-read. */
-const val AGG_SCHEMA_VERSION = 2
+const val AGG_SCHEMA_VERSION = 4
 
 /** BEST reducer plausibility cap: a node's "best" may be at most this many times faster than its own
  *  recency-weighted average there. Clips a GPS-glitch segment (which as a raw min would spike the
@@ -35,15 +35,37 @@ const val AGG_SCHEMA_VERSION = 2
  *  vs an easy-ride-heavy average; a tighter 1.5 would clamp a legitimately fast lap. Self-anchored. */
 const val BEST_MAX_SPEEDUP = 2.0
 
-/** AVERAGE needs at least this many laps on a node before it is raceable — one lap is not yet a
- *  smoothed mean (a single noisy GPS lap would lurch). BEST/LAST race at ≥1 (a single recorded ride
- *  is exactly what they represent). */
+/** Laps on a node below which AVERAGE has no smoothed mean yet and FALLS BACK to the LAST reducer
+ *  (the single recorded lap) rather than dropping the node to Ghost-Pace. At ≥ this many laps AVERAGE
+ *  uses the EMA mean. This is NO LONGER a raceability gate — every pick races covered nodes at count≥1;
+ *  it only selects EMA-vs-last for AVERAGE. (Gating AVERAGE at ≥2 left a route with only ONE full
+ *  recorded lap almost entirely in Ghost-Pace mid-route, since that lone lap never lifts a node past 1.) */
 const val AGG_MIN_LAPS = 2
 
 /** Minimum raceable run length (m). A contiguous raceable run shorter than this is dropped (isolated
  *  noise); ported from SegmentMatcher.minSegmentM. The run set is per-pick (AVERAGE gates at
  *  AGG_MIN_LAPS, BEST/LAST at 1). */
 const val AGG_MIN_SEG_M = 300.0
+
+/** Symmetric-difference size (added ∪ removed candidate ids) that triggers a WARMED re-seed; a seed
+ *  with fewer than this many tracks re-seeds on ANY change (cold/sparse routes warm up fast). */
+const val RESEED_MIN_DELTA = 5
+
+/**
+ * Whether the corridor grid must be (re)seeded: no cache, an empty seed, or the overlapping candidate
+ * id SET changed enough. Gating on the symmetric difference of the id SET (not its COUNT) is essential
+ * — auto-tidy archives an old near-duplicate as each new ride is added, churning the set at a CONSTANT
+ * size, so a count-equality gate would freeze a warmed aggregate on its first seed forever. Pure;
+ * [nowIds] is the no-parse candidate id set from TrackStore.
+ */
+fun shouldReseed(cached: PerRouteAggregate?, nowIds: Set<String>): Boolean {
+    if (cached == null) return true
+    val seeded = cached.seededTrackIds.toSet()
+    if (seeded == nowIds) return false
+    if (seeded.size < RESEED_MIN_DELTA) return true
+    val symDiff = (seeded - nowIds).size + (nowIds - seeded).size
+    return symDiff >= kotlin.math.max(RESEED_MIN_DELTA, (seeded.size * 0.2).toInt())
+}
 
 /** One grid node: the three reducers of the per-segment delta (node k-1 → k), plus the lap count. */
 @Serializable
@@ -60,12 +82,13 @@ data class AggregateNode(
 )
 
 /**
- * Per-route exponential-moving-average ghost: the recency-weighted mean of recent laps of one loaded
- * route, sampled on a fixed [stepM] grid over route distance `[0, routeLenM]`.
+ * Per-route pace grid: per-segment time reducers (EMA mean / min / last) on a fixed [stepM] grid over
+ * route distance `[0, routeLenM]`, consumed by [toLiveSegments] to build the AVERAGE / BEST / LAST ghosts.
  *
- * Persisted independently of the recorded track files (see [com.enderthor.kghost.geo.AggregateStore]),
- * so it survives the track-library prune — that is the whole reason it is an O(1) running mean rather
- * than an average recomputed from the surviving tracks (which the prune caps at three per route).
+ * Built by [com.enderthor.kghost.engine.CorridorSeeder] from the rider's overlapping history (matched by
+ * cell + bearing) and persisted by [com.enderthor.kghost.geo.AggregateStore]. It is REBUILT from the
+ * current candidate set whenever that set changes enough (see [shouldReseed]); it is NOT an O(1) running
+ * mean updated per ride (the historical per-ride [updateAggregate] fold is no longer wired).
  *
  * Pure data + pure transforms; no Android, no filesystem — unit-tested directly.
  */
@@ -79,23 +102,28 @@ data class PerRouteAggregate(
     val schemaVersion: Int = 0,
     /** Node `k` (index) represents route distance `k * stepM`. Size = floor(routeLenM/stepM) + 1. */
     val nodes: List<AggregateNode>,
+    /** Stored-track ids the corridor seed folded (the no-parse candidate set at seed time). The lazy
+     *  re-seed gates on the SYMMETRIC DIFFERENCE of this set vs the current candidate set — NOT on its
+     *  size — because auto-tidy churns the set at a constant size, which a count gate would never see. */
+    val seededTrackIds: List<String> = emptyList(),
 ) {
     /**
      * Raceable [LiveSegment]s for [pick], from this grid: contiguous runs of covered nodes (count≥1),
      * each built from the pick's reducer (EMA / min-clamped / last). Runs shorter than [minSegM] are
      * dropped. The caller bridges the gaps (count==0 / dropped) with the Ghost-Pace fill via
-     * [RouteGhost.build]. AVERAGE needs ≥ [AGG_MIN_LAPS] laps per node (a single noisy lap is not a
-     * smoothed mean); BEST/LAST race at ≥ 1 (a single recorded ride is what they represent).
+     * [RouteGhost.build]. ALL picks race at count≥1; AVERAGE uses the EMA mean on a node with
+     * ≥ [AGG_MIN_LAPS] laps and FALLS BACK to the LAST reducer (the single recorded lap) below that —
+     * so a route with only one full recording still races end-to-end instead of sitting in Ghost-Pace.
      */
     fun toLiveSegments(pick: GhostPick, minSegM: Double = AGG_MIN_SEG_M): List<LiveSegment> {
         val out = ArrayList<LiveSegment>()
-        val minLaps = if (pick == GhostPick.AVERAGE) AGG_MIN_LAPS else 1
         // node[k].count = laps covering the INCOMING segment (k-1→k); node 0 has none, so scan k≥1.
+        // Every pick is raceable at count≥1 (AVERAGE's EMA-vs-last choice is per-node in nodeDelta).
         var k = 1
         while (k < nodes.size) {
-            if (nodes[k].count < minLaps) { k++; continue }
+            if (nodes[k].count < 1) { k++; continue }
             val firstK = k
-            while (k + 1 < nodes.size && nodes[k + 1].count >= minLaps) k++
+            while (k + 1 < nodes.size && nodes[k + 1].count >= 1) k++
             buildRunSegment(firstK - 1, k, pick, minSegM)?.let { out.add(it) }
             k++
         }
@@ -103,11 +131,13 @@ data class PerRouteAggregate(
     }
 
     /** The pick's per-segment delta at node [k]. BEST is clamped to a plausible multiple of the average
-     *  there (no glitch spike, no node-to-node jump); AVERAGE/LAST are the raw reducers. */
+     *  there (no glitch spike, no node-to-node jump); LAST is the raw last-good reducer; AVERAGE is the
+     *  EMA mean once a node has ≥ [AGG_MIN_LAPS] laps and falls back to LAST (the lone recorded lap)
+     *  below that — at count==1 the two are identical anyway, so the fallback only ever helps coverage. */
     private fun nodeDelta(k: Int, pick: GhostPick): Double {
         val n = nodes[k]
         return when (pick) {
-            GhostPick.AVERAGE -> n.dtS
+            GhostPick.AVERAGE -> if (n.count >= AGG_MIN_LAPS) n.dtS else n.lastDtS
             GhostPick.LAST -> n.lastDtS
             GhostPick.BEST -> maxOf(n.minDtS, n.dtS / BEST_MAX_SPEEDUP)
         }

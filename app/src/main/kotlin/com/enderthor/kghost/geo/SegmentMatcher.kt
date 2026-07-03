@@ -265,8 +265,21 @@ object SegmentMatcher {
     }
 
     /** Route-distance jump (m) above which [seedLaps] treats a windowed-projection miss as a long
-     *  off-route excursion and SPLITS the lap rather than bridging it (2 × [sliceFwdWindowM]). */
+     *  off-route excursion and SPLITS the lap rather than bridging it. */
     private const val SEED_MAX_GAP_M = 500.0
+
+    /**
+     * Seed-only projection windows for the LEGACY [routeLaps]/[seedLaps] path. NOTE: as of the corridor
+     * pace model the PRODUCTION seed is [com.enderthor.kghost.engine.CorridorSeeder], not [seedLaps] —
+     * [routeLaps]/[seedLaps]/[extractTrackSlice] and these windows are now exercised only by their unit
+     * tests. Kept for reference and those differential tests; the "tripled mid-route coverage" this
+     * widening once gave AVERAGE no longer applies to the shipped path (CorridorSeeder supersedes it).
+     * (Historically: wider than the live [sliceFwdWindowM]/[sliceBackWindowM] so an offline whole-track
+     * pass lets a genuine near-repeat that wanders a little keep tracking the route instead of falling
+     * out after a short stretch; kept MODERATE so a loop's advance test can't snap onto a later pass.)
+     */
+    private const val seedFwdWindowM = 600.0
+    private const val seedBackWindowM = 50.0
 
     /**
      * One forward pass over a track for the seed → ZERO OR MORE laps. Project each point onto the route
@@ -296,7 +309,7 @@ object SegmentMatcher {
             val along: Double
             val perp: Double
             if (prevRouteM.isNaN() ||
-                !route.nearestProjectionNearInto(tp.lat, tp.lng, prevRouteM, sliceBackWindowM, sliceFwdWindowM, projOut)
+                !route.nearestProjectionNearInto(tp.lat, tp.lng, prevRouteM, seedBackWindowM, seedFwdWindowM, projOut)
             ) {
                 val p = route.nearestProjection(LatLng(tp.lat, tp.lng))
                 along = p.distanceAlongM

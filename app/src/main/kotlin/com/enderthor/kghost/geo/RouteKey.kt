@@ -7,8 +7,9 @@ package com.enderthor.kghost.geo
  * A route loaded on the Karoo always carries a name (its route-file name), and the same route reloaded
  * has the same name and length — so this keys "the same route" across rides without any geometry math.
  * Length is rounded to 100 m so a trivial re-export jitter still maps to the same key. A name+length
- * collision between two genuinely different routes is rare and self-correcting (at worst it briefly
- * blends two routes' means, which the EMA washes out as you keep riding one of them).
+ * collision between two genuinely different routes is rare and does not corrupt pace: the corridor
+ * seed is recomputed for whichever route is currently loaded (from that route's own overlapping tracks),
+ * so a collision only forces a re-seed each time you alternate the two — never a blended ghost.
  *
  * Pure; the result is also a safe file-name stem (lowercase, `[a-z0-9-]` only).
  */
