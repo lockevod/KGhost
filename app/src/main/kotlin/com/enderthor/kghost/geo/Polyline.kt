@@ -358,12 +358,24 @@ class PolylinePath(val points: List<LatLng>) {
         val b0 = best ?: return null
         if (alongs.size == 1) return b0
         alongs.sort()
+        // CIRCULAR contiguity. On a closed/near-closed loop the start (~0) and finish (~routeLen) are the
+        // SAME place, so candidates there straddle the 0/routeLen seam and a LINEAR span would be ~routeLen
+        // even though it's one physical cluster. So treat the route as a ring: count the gaps between
+        // consecutive candidates INCLUDING the wrap gap (last→first via the route length). Exactly ONE gap
+        // > gapMarginM ⇒ one contiguous cluster (that gap is the empty rest-of-route arc, wherever it sits,
+        // seam or not); ≥2 ⇒ ≥2 distinct passes ⇒ ambiguous. The cluster's own circular extent (route length
+        // minus the largest gap) is the span backstop against a tight chain of near-contiguous passes.
         var maxGap = 0.0
-        for (j in 1 until alongs.size) maxGap = kotlin.math.max(maxGap, alongs[j] - alongs[j - 1])
-        val span = alongs.last() - alongs.first()
-        // A gap bigger than gapMarginM ⇒ ≥2 distinct passes ⇒ ambiguous. The span cap backstops a chain of
-        // near-contiguous passes that never individually gap. Either ⇒ refuse (hold + hide, number carries).
-        return if (maxGap > gapMarginM || span > spanCapM) null else b0
+        var bigGaps = 0
+        for (j in 1 until alongs.size) {
+            val g = alongs[j] - alongs[j - 1]
+            if (g > maxGap) maxGap = g
+            if (g > gapMarginM) bigGaps++
+        }
+        val wrapGap = totalM - alongs.last() + alongs.first()
+        if (wrapGap > maxGap) maxGap = wrapGap
+        if (wrapGap > gapMarginM) bigGaps++
+        return if (bigGaps >= 2 || (totalM - maxGap) > spanCapM) null else b0
     }
 
     private fun nearestProjectionInRange(p: LatLng, windowLoM: Double, windowHiM: Double): Projection {
