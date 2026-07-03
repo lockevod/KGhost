@@ -468,6 +468,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // the one-lap map marker on a 2nd lap, where R wraps to the start; the NUMBER keeps racing).
     @Volatile private var prevTickElapsedS: Double? = null
     @Volatile private var crossedFinish: Boolean = false
+    // Latched once the rider crosses the finish AND wraps back into the route's first half (= genuinely on a
+    // 2nd lap). Stays true for the rest of the ride so the one-lap marker stays HIDDEN across the WHOLE 2nd+
+    // lap (not just its first half). Reset at ride end / route change.
+    @Volatile private var lap2Started: Boolean = false
     // B2 path-following ghost race engine (accrues historical time per ridden metre on the ACTUAL path).
     // Built lazily at first movement; nulled at ride end/stop. KEPT across a reroute — it is route-agnostic,
     // so the accrued lead carries to the new polyline (only the route-specific marker anchor re-bootstraps).
@@ -510,6 +514,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         prevSegStartM = null
         prevTickElapsedS = null
         crossedFinish = false
+        lap2Started = false
         integrator = null
         integLastRiderDist = 0.0
         integPick = null
@@ -1897,6 +1902,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 emptyWindowTicks = 0
                                 prevSegStartM = null
                                 crossedFinish = false // a new route hasn't been completed yet
+                                lap2Started = false
                                 lastReliableGhostRouteDist = null
                                 // Checkpoint: restore is gated on routeKey (name+length), so a DIFFERENT route can't
                                 // restore a foreign lead; the carried integrator's next write stamps the new routeKey
@@ -2134,23 +2140,28 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         if (markerReliable && ghostRouteDist != null) lastReliableGhostRouteDist = ghostRouteDist
                         // Option B: the NUMBER never latches at the finish — it keeps racing while you MOVE and
                         // freezes when you STOP (the moving-time clock above). Mark the route COMPLETED the first
-                        // time R reaches the end band having ridden ~the whole route (odometer-corroborated), so
-                        // the ONE-LAP map marker can be hidden on a 2nd lap (where R wraps to the start and the
-                        // one-lap route-ghost can't place the icon; the number keeps racing route-agnostically).
+                        // time R reaches the end band having ridden ~the whole route, so the ONE-LAP map marker can
+                        // be hidden on a 2nd lap (R wraps to the start; the one-lap route-ghost can't place the
+                        // icon; the number keeps racing route-agnostically). The odometer corroboration (guards a
+                        // spurious near-end R lock mid-route) SCALES to the route: max(routeLen−3km, half the
+                        // route) — so it stays a real gate on a short route (< 3 km, where a fixed 3 km would be
+                        // vacuously true and could hide the icon for a whole first lap).
+                        val finishOdoFloor = (routeLenM - FINISH_ODO_MARGIN_M).coerceAtLeast(routeLenM * 0.5)
                         if (riderR != null && routeLenM > 2 * ROUTE_END_NEAR_M &&
-                            routeLenM - riderR <= ROUTE_END_NEAR_M && distM >= routeLenM - FINISH_ODO_MARGIN_M
+                            routeLenM - riderR <= ROUTE_END_NEAR_M && distM >= finishOdoFloor
                         ) {
                             crossedFinish = true
                         }
+                        // LATCH the 2nd-lap hide: once the rider has completed the route AND wrapped back into its
+                        // first half, keep the marker hidden for the REST of the ride (else it reappears — pinned
+                        // near the start — during the back half of every subsequent lap). A finisher who STOPS at
+                        // the line (riderR≈routeLen, not yet wrapped) still sees the frozen icon.
+                        if (crossedFinish && riderR != null && riderR < routeLenM * 0.5) lap2Started = true
                         val gap = liveGap
-                        // Marker: HIDDEN once past the finish onto a 2nd lap (crossed the finish, then R wrapped
-                        // back into the route's first half); else the live position while reliable, or the frozen
-                        // last-reliable position while off-route.
-                        val onLap2 = crossedFinish && riderR != null && riderR < routeLenM * 0.5
                         val markerDist: Double? = when {
-                            onLap2 -> null
+                            lap2Started -> null // 2nd+ lap: the one-lap map has no meaningful ghost position
                             markerReliable -> ghostRouteDist
-                            else -> lastReliableGhostRouteDist
+                            else -> lastReliableGhostRouteDist // off-route: hold the last reliable position
                         }
                         GapStateHolder.update(gap)
                         // SEG/GP tag: SEG when the rider is on recorded history this tick (patch has pace at
