@@ -1991,9 +1991,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val gLat = fix?.lat ?: Double.NaN
                         val gLng = fix?.lng ?: Double.NaN
                         val gHdg = fix?.headingDeg ?: Double.NaN
-                        integ.onTick(riderDist, gLat, gLng, gHdg, elapsedS - moveStart) { la, ln, br ->
-                            patch?.pace(la, ln, br, eff.ghostPick)
-                        }
+                        // Historical pace at THIS tick's fix — computed ONCE and reused for both the integrator
+                        // accrual and the SEG/GP tag below (the integrator's paceAt is called with the same
+                        // lat/lng/heading, so the neighbourhood scan need not run twice per second). Null → VP-fill
+                        // (and GP tag). PacePatch.pace already returns null for a non-finite heading.
+                        val paceNow = patch?.pace(gLat, gLng, gHdg, eff.ghostPick)
+                        integ.onTick(riderDist, gLat, gLng, gHdg, elapsedS - moveStart) { _, _, _ -> paceNow }
                         integLastRiderDist = riderDist
                         // Persist the scalar race state ~every CHECKPOINT_INTERVAL_MS so a mid-ride power-off /
                         // crash resumes with the LEAD (integ.gapTimeS), not the raw ghostTime. The snapshot is
@@ -2167,8 +2170,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // SEG/GP tag: SEG when the rider is on recorded history this tick (patch has pace at
                         // the fix), GP on VP-fill. The field reads only non-null (SEG) — the label is unused,
                         // so a stable instance (deduped by the holder) avoids per-tick churn.
-                        val onHistory = patch != null && gHdg.isFinite() &&
-                            patch.pace(gLat, gLng, gHdg, eff.ghostPick) != null
+                        val onHistory = paceNow != null
                         if (onHistory) SegmentInfoHolder.set(B2_ON_HISTORY) else SegmentInfoHolder.clear()
                         // Marker (BOTH cases, ROUTE frame) — [markerDist] is the live ghostRouteDist, the FROZEN
                         // finish position, or (off-route) the frozen last-reliable position. Shown whenever we have
