@@ -62,6 +62,84 @@ class PolylineHeadingProjectionTest {
         assertNull(p)
     }
 
+    // --- nearestProjectionByHeadingUnambiguousOrNull: refuse-to-guess global re-acquire ---
+
+    @Test fun `unambiguous single pass returns the point`() {
+        // Eastbound on the out-and-back: only the outbound leg matches the heading → one candidate cluster.
+        val p = outAndBack.nearestProjectionByHeadingUnambiguousOrNull(
+            onRoad, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, gapMarginM = 75.0, spanCapM = 200.0,
+        )
+        assertNotNull(p)
+        assertTrue("expected outbound arc < $half, got ${p!!.distanceAlongM}", p.distanceAlongM < half)
+    }
+
+    @Test fun `two far-apart same-direction passes are AMBIGUOUS and return null`() {
+        // The SAME east road ridden twice same-direction, separated along the route by a big north detour:
+        // (0,0)→(0,1) east [pass 1], up-across-down, then (0,0)→(0,1) east AGAIN [pass 2]. A point on that
+        // east road projects onto BOTH passes with low perp + east heading → heading can't disambiguate a
+        // same-direction overlap → must refuse.
+        val overlap = PolylinePath(
+            listOf(
+                LatLng(0.0, 0.0), LatLng(0.0, 1.0), // pass 1 east
+                LatLng(1.0, 1.0), LatLng(1.0, 0.0), LatLng(0.0, 0.0), // north, west, south detour
+                LatLng(0.0, 1.0), // pass 2 east (same road)
+            ),
+        )
+        val p = overlap.nearestProjectionByHeadingUnambiguousOrNull(
+            onRoad, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, gapMarginM = 75.0, spanCapM = 200.0,
+        )
+        assertNull("two far-apart east passes must be ambiguous → null", p)
+    }
+
+    @Test fun `two same-direction passes only ~444 m apart are refused (gap rule beats the old 500 m span)`() {
+        // Small same-direction overlap: two east legs at lat 0 separated by a ~333 m N-W-S detour → the two
+        // candidates sit ~444 m apart along the route. The OLD raw-span rule (margin 500) had span 444 < 500 →
+        // wrongly ADOPTED (up to ~444 m icon error). The gap rule sees a 444 m gap ≫ 75 → refuses. Icon-only;
+        // the number carries.
+        val nearOverlap = PolylinePath(
+            listOf(
+                LatLng(0.0, 0.0), LatLng(0.0, 0.001), // pass 1 east ~111 m
+                LatLng(0.001, 0.001), LatLng(0.001, 0.0), LatLng(0.0, 0.0), // ~333 m detour
+                LatLng(0.0, 0.001), // pass 2 east ~111 m (same road)
+            ),
+        )
+        val onNear = LatLng(0.00005, 0.0005) // ~5.5 m off the east road, at its midpoint
+        val p = nearOverlap.nearestProjectionByHeadingUnambiguousOrNull(
+            onNear, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, gapMarginM = 75.0, spanCapM = 200.0,
+        )
+        assertNull("two same-direction passes ~444 m apart must be refused by the gap rule", p)
+    }
+
+    @Test fun `closed-loop seam (candidates near 0 AND near routeLen) is ONE cluster, not ambiguous`() {
+        // A loop that returns to its start heading the SAME way it left (an east road through the seam): the
+        // last segment approaches (0,0) heading east, and the first segment leaves (0,0) heading east. A point
+        // at the seam projects onto BOTH — near route-dist 0 AND near routeLen. A LINEAR span/maxGap would be
+        // ~routeLen → wrongly "ambiguous". The circular rule sees ONE big gap (the empty rest of the loop) →
+        // adopts. (This is the Copilot wrap-around fix; without it the marker never re-acquires at a loop's
+        // start/finish.)
+        val loopSeam = PolylinePath(
+            listOf(
+                LatLng(0.0, 0.0), LatLng(0.0, 0.001), // seg0 east
+                LatLng(0.001, 0.001), LatLng(0.001, -0.0005), LatLng(0.0, -0.0005), // up, over, down
+                LatLng(0.0, 0.0), // last seg (0,-0.0005)->(0,0): EAST, back through the start
+            ),
+        )
+        val onSeam = LatLng(0.00003, -0.0002) // ~3 m off the east road, just west of the start
+        val p = loopSeam.nearestProjectionByHeadingUnambiguousOrNull(
+            onSeam, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, gapMarginM = 75.0, spanCapM = 200.0,
+        )
+        assertNotNull("a seam-straddling single cluster must adopt, not refuse", p)
+    }
+
+    @Test fun `off-route beyond maxPerp returns null (nothing to adopt)`() {
+        val far = LatLng(0.01, 0.5)
+        assertNull(
+            outAndBack.nearestProjectionByHeadingUnambiguousOrNull(
+                far, headingDeg = 90.0, maxPerpM = 40.0, maxHeadingDiffDeg = 45.0, gapMarginM = 75.0, spanCapM = 200.0,
+            ),
+        )
+    }
+
     @Test fun `bearingDiffDeg is circular`() {
         assertEquals(10.0, Polyline.bearingDiffDeg(5.0, 355.0), 1e-9)
         assertEquals(180.0, Polyline.bearingDiffDeg(0.0, 180.0), 1e-9)

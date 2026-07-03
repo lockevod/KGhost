@@ -141,16 +141,21 @@ class RouteAggregateTest {
         assertEquals(1, b.nodes[24].count)
     }
 
-    // A node-pair is raceable after a single lap (count >= 1).
-    @Test fun `AVERAGE needs two laps to race while BEST and LAST race after one`() {
+    // Every pick races a node-pair after a single lap (count >= 1); AVERAGE falls back to LAST until ≥2.
+    @Test fun `every pick races after one lap and AVERAGE falls back to LAST until a second`() {
         val key = "loop"
         val l = lap(0.0 to 0.0, 25.0 to 5.0, 50.0 to 10.0, 75.0 to 15.0, 100.0 to 20.0)
         val one = updateAggregate(null, key, "Loop", 1000.0, l)
-        // One lap: AVERAGE is not yet a smoothed mean (a single noisy lap would lurch) → not raceable;
-        // BEST/LAST race the one recorded ride (that single ride is exactly what they represent).
-        assertTrue(one.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).isEmpty())
+        // One lap: every pick races the recorded ride. AVERAGE has no smoothed mean yet, so it FALLS
+        // BACK to the LAST reducer (the single recorded lap) instead of leaving the stretch in
+        // Ghost-Pace — a route with only one full recording must still race end-to-end.
+        val avgOne = one.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0)
+        val lastOne = one.toLiveSegments(GhostPick.LAST, minSegM = 0.0)
+        assertTrue(avgOne.isNotEmpty())
         assertTrue(one.toLiveSegments(GhostPick.BEST, minSegM = 0.0).isNotEmpty())
-        assertTrue(one.toLiveSegments(GhostPick.LAST, minSegM = 0.0).isNotEmpty())
+        assertTrue(lastOne.isNotEmpty())
+        // AVERAGE == LAST on single-lap nodes (same curve), confirming the fallback.
+        assertEquals(lastOne.first().ghost.timeAt(75.0), avgOne.first().ghost.timeAt(75.0), 1e-9)
         val two = updateAggregate(one, key, "Loop", 1000.0, l)
         val segs = two.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0)
         assertTrue(segs.isNotEmpty())
@@ -249,8 +254,8 @@ class RouteAggregateTest {
         )
 
     @Test fun `toLiveSegments builds one segment per contiguous covered run`() {
-        // counts 2,2,2,0,0 over nodes 0..4. The race scan considers nodes k>=1 (count >= AGG_MIN_LAPS
-        // for AVERAGE means the INCOMING segment k-1->k is covered): nodes 1,2 qualify → the run is
+        // counts 2,2,2,0,0 over nodes 0..4. The race scan considers nodes k>=1 (count >= 1 means the
+        // INCOMING segment k-1->k is covered): nodes 1,2 qualify → the run is
         // built from firstK-1 = 0, so the segment is [0,50] with deltas dt[1],dt[2] = 5,5 → 10 s.
         val agg = aggOf(100.0, 0.0 to 2, 5.0 to 2, 5.0 to 2, 15.0 to 0, 20.0 to 0)
         val segs = agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0)
@@ -267,7 +272,7 @@ class RouteAggregateTest {
     }
 
     @Test fun `toLiveSegments races a lone covered node`() {
-        // A single covered node-pair (node 1, count >= AGG_MIN_LAPS for AVERAGE) is raceable: segment [0,25].
+        // A single covered node-pair (node 1, count >= 1) is raceable: segment [0,25].
         val agg = aggOf(100.0, 0.0 to 0, 5.0 to 2, 5.0 to 0, 15.0 to 0, 20.0 to 0)
         val segs = agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0)
         assertEquals(1, segs.size)
@@ -312,5 +317,36 @@ class RouteAggregateTest {
         assertEquals(5.5, agg.nodes[1].dtS, 1e-9)
         assertEquals(2, agg.nodes[1].count)
         assertTrue(agg.toLiveSegments(GhostPick.AVERAGE, minSegM = 0.0).isNotEmpty())
+    }
+
+    @Test fun `schema is v4 and seededTrackIds round-trips`() {
+        assertEquals(4, AGG_SCHEMA_VERSION)
+        val agg = PerRouteAggregate(
+            routeKey = "k", routeName = "K", routeLenM = 100.0,
+            schemaVersion = AGG_SCHEMA_VERSION,
+            nodes = listOf(AggregateNode(), AggregateNode(dtS = 5.0, count = 2, minDtS = 5.0, lastDtS = 5.0)),
+            seededTrackIds = listOf("a", "b", "c"),
+        )
+        assertEquals(listOf("a", "b", "c"), agg.seededTrackIds)
+        assertTrue(PerRouteAggregate("k", "K", 100.0, nodes = emptyList()).seededTrackIds.isEmpty())
+    }
+
+    @Test fun `shouldReseed gates on the candidate set symmetric difference, not its count`() {
+        fun aggOf(ids: List<String>) = PerRouteAggregate("k", "K", 100.0, schemaVersion = AGG_SCHEMA_VERSION,
+            nodes = emptyList(), seededTrackIds = ids)
+        // No cache or empty seed → always reseed.
+        assertTrue(shouldReseed(null, setOf("a")))
+        // Same set → no reseed.
+        assertEquals(false, shouldReseed(aggOf(listOf("a", "b")), setOf("a", "b")))
+        // Sparse seed (< RESEED_MIN_DELTA tracks) → ANY change reseeds.
+        assertTrue(shouldReseed(aggOf(listOf("a", "b")), setOf("a", "b", "c")))
+        // Warmed seed of 10, churned by ONE (symDiff 2 < 5) → NO reseed yet (amortised).
+        val ten = (1..10).map { "t$it" }
+        assertEquals(false, shouldReseed(aggOf(ten), (2..11).map { "t$it" }.toSet()))
+        // Warmed seed of 10 churned by FIVE in / five out (symDiff 10 >= 5) → reseed. THIS is the
+        // auto-tidy freeze case: the COUNT stayed 10 the whole time, only the SET moved.
+        assertTrue(shouldReseed(aggOf(ten), (6..15).map { "t$it" }.toSet()))
+        // Shrink (prune) → reseed.
+        assertTrue(shouldReseed(aggOf(ten), (1..4).map { "t$it" }.toSet()))
     }
 }

@@ -312,6 +312,72 @@ class PolylinePath(val points: List<LatLng>) {
         return best
     }
 
+    /**
+     * GLOBAL re-acquire for the marker rail that REFUSES TO GUESS — recovers R after the rider goes off
+     * the windowed line (a shortcut rejoin far ahead), without ever latching a wrong pass. Scans the whole
+     * route for segments with perp ≤ [maxPerpM] AND bearing within [maxHeadingDiffDeg] of [headingDeg], and
+     * returns the smallest-perp candidate ONLY IF the qualifying candidates form ONE CONTIGUOUS CLUSTER —
+     * no along-route GAP between consecutive candidates exceeds [gapMarginM] (a bigger gap = a second,
+     * distinct pass of a self-overlap), AND the whole cluster spans ≤ [spanCapM] (backstop against a chain
+     * of near-contiguous passes). Because the candidate set is derived from route GEOMETRY around ONE GPS
+     * point (not GPS samples over time), scatter translates the cluster but cannot open a spurious internal
+     * gap — so a small [gapMarginM] cleanly separates one pass (adjacent-segment gaps ≤ ~40 m) from two
+     * passes (a gap of the whole route length between them), WITHOUT false-refusing a long contiguous curl
+     * (roundabout/spiral) the way a plain span threshold would. Returns null when there is NO candidate
+     * (off-route) OR the geometry is ambiguous → the caller HOLDS the icon and the teleport-proof number
+     * carries. Nothing wrong is ever RETAINED → the round-1..4 marker-latch family is structurally
+     * impossible, and the residual worst-case icon error is bounded by [spanCapM] (≤ ~GPS accuracy typical).
+     */
+    fun nearestProjectionByHeadingUnambiguousOrNull(
+        p: LatLng,
+        headingDeg: Double,
+        maxPerpM: Double,
+        maxHeadingDiffDeg: Double,
+        gapMarginM: Double,
+        spanCapM: Double,
+    ): Projection? {
+        var best: Projection? = null
+        val alongs = ArrayList<Double>()
+        for (i in 0 until points.size - 1) {
+            val a = points[i]; val b = points[i + 1]
+            if (Polyline.bearingDiffDeg(Polyline.bearingDeg(a, b), headingDeg) > maxHeadingDiffDeg) continue
+            val mPerDegLat = 111_320.0
+            val mPerDegLng = 111_320.0 * cos(Math.toRadians(a.lat))
+            val bx = (b.lng - a.lng) * mPerDegLng; val by = (b.lat - a.lat) * mPerDegLat
+            val px = (p.lng - a.lng) * mPerDegLng; val py = (p.lat - a.lat) * mPerDegLat
+            val segLen2 = bx * bx + by * by
+            val t = if (segLen2 == 0.0) 0.0 else ((px * bx + py * by) / segLen2).coerceIn(0.0, 1.0)
+            val fx = t * bx; val fy = t * by
+            val perp = sqrt((px - fx) * (px - fx) + (py - fy) * (py - fy))
+            if (perp <= maxPerpM) {
+                val along = cumulativeM[i] + t * (cumulativeM[i + 1] - cumulativeM[i])
+                if (best == null || perp < best.perpDistM) best = Projection(along, perp, i)
+                alongs.add(along)
+            }
+        }
+        val b0 = best ?: return null
+        if (alongs.size == 1) return b0
+        alongs.sort()
+        // CIRCULAR contiguity. On a closed/near-closed loop the start (~0) and finish (~routeLen) are the
+        // SAME place, so candidates there straddle the 0/routeLen seam and a LINEAR span would be ~routeLen
+        // even though it's one physical cluster. So treat the route as a ring: count the gaps between
+        // consecutive candidates INCLUDING the wrap gap (last→first via the route length). Exactly ONE gap
+        // > gapMarginM ⇒ one contiguous cluster (that gap is the empty rest-of-route arc, wherever it sits,
+        // seam or not); ≥2 ⇒ ≥2 distinct passes ⇒ ambiguous. The cluster's own circular extent (route length
+        // minus the largest gap) is the span backstop against a tight chain of near-contiguous passes.
+        var maxGap = 0.0
+        var bigGaps = 0
+        for (j in 1 until alongs.size) {
+            val g = alongs[j] - alongs[j - 1]
+            if (g > maxGap) maxGap = g
+            if (g > gapMarginM) bigGaps++
+        }
+        val wrapGap = totalM - alongs.last() + alongs.first()
+        if (wrapGap > maxGap) maxGap = wrapGap
+        if (wrapGap > gapMarginM) bigGaps++
+        return if (bigGaps >= 2 || (totalM - maxGap) > spanCapM) null else b0
+    }
+
     private fun nearestProjectionInRange(p: LatLng, windowLoM: Double, windowHiM: Double): Projection {
         var best = Projection(0.0, Double.MAX_VALUE, 0)
         // Window the scan: only segments whose `[cumulativeM[i], cumulativeM[i+1]]` intersects
