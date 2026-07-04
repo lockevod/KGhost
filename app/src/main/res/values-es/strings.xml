@@ -21,9 +21,9 @@
     <string name="gap_graphic_name">Pista Ghost Pace</string>
     <string name="gap_graphic_description">Vista de pista que muestra tu posición respecto al Ghost Pace.</string>
     <!-- Valores de gap solo-stream (render numérico nativo; también consumibles por otras extensiones). -->
-    <string name="gap_time_stream_name">Gap Ghost (s)</string>
+    <string name="gap_time_stream_name">Gap Ghost Tiempo (s)</string>
     <string name="gap_time_stream_description">Gap con el ghost en segundos (positivo = por delante). Publicado como stream para otras apps.</string>
-    <string name="gap_dist_stream_name">Gap Ghost (m)</string>
+    <string name="gap_dist_stream_name">Gap Ghost Dist (m)</string>
     <string name="gap_dist_stream_description">Gap con el ghost en metros (positivo = por delante). Publicado como stream para otras apps.</string>
 
     <!-- UI de ajustes: pestañas -->

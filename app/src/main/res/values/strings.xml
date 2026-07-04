@@ -20,9 +20,9 @@
     <string name="gap_graphic_name">Ghost Pace Track</string>
     <string name="gap_graphic_description">Track view showing your position relative to the Ghost Pace.</string>
     <!-- Stream-only gap values (native numeric rendering; also consumable by other extensions). -->
-    <string name="gap_time_stream_name">Ghost Gap (s)</string>
+    <string name="gap_time_stream_name">Ghost Gap Time (s)</string>
     <string name="gap_time_stream_description">Gap to the ghost in seconds (positive = ahead). Streamed for other apps.</string>
-    <string name="gap_dist_stream_name">Ghost Gap (m)</string>
+    <string name="gap_dist_stream_name">Ghost Gap Dist (m)</string>
     <string name="gap_dist_stream_description">Gap to the ghost in metres (positive = ahead). Streamed for other apps.</string>
 
     <!-- Settings UI: tabs -->
