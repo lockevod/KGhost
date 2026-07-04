@@ -32,4 +32,11 @@ class PermissionAlertScheduleTest {
             PermissionAlertSchedule.decide(PermAlertState(3, base), nowEpoch = base + d10),
         )
     }
+
+    @Test fun `backward clock jump fires instead of suppressing`() {
+        // now < lastFired (wall clock jumped back: GPS time correction / FIT-replay testing) —
+        // elapsed is negative, which must NOT be treated as "within the throttle window".
+        val out = PermissionAlertSchedule.decide(PermAlertState(1, 5_000_000L), nowEpoch = 1_000L)
+        assertEquals(PermAlertState(2, 1_000L), out)
+    }
 }
