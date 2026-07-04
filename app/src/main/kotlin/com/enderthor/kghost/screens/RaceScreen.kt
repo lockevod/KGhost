@@ -1,7 +1,6 @@
 package com.enderthor.kghost.screens
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -9,8 +8,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -43,7 +40,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.enderthor.kghost.managers.ConfigurationManager
 import com.enderthor.kghost.managers.StoragePermission
 import kotlinx.coroutines.launch
-import timber.log.Timber
 
 /**
  * Race tab: settings for the "Race Your Own" feature.
