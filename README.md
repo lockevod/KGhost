@@ -201,9 +201,11 @@ Device-level switches and recorded-track-library management (not per profile):
   **Anon tag** (no personal or device identifier), shown in this screen so you can quote it in a bug
   report. Turn the diagnostic log off and nothing is ever sent.
 
-> **How it works under the hood:** the position/ghost/alert model (route position, the "fair start"
-> ghost clock, GPS-loss handling, reroutes) is documented for developers in
-> [`docs/route-ghost-model.md`](docs/route-ghost-model.md). You don't need it to use the app.
+> **How it works under the hood:** two developer docs, neither needed to use the app —
+> [`docs/route-ghost-model.md`](docs/route-ghost-model.md) covers the position/ghost/alert model (route
+> position, the "fair start" ghost clock, GPS-loss handling, reroutes), and
+> [`docs/import-pipeline.md`](docs/import-pipeline.md) covers the recorded-ghost library (import,
+> storage, the all-files-access reminder, and the large-library import performance).
 
 ## Install (sideload)
 
