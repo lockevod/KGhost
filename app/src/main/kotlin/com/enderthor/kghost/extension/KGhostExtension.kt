@@ -493,6 +493,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // the Paused write can't clobber the shared temp file).
     @Volatile private var pendingCheckpoint: GhostCheckpoint? = null
     private val checkpointMutex = Mutex()
+    // Serializes maybeAlertMissingPermission()'s load-decide-dispatch-write across concurrent
+    // RideState.Recording emissions (e.g. a host reconnect storm firing it twice in quick
+    // succession), so the second call's config read always observes the first call's write instead
+    // of racing it — see maybeAlertMissingPermission() for the full reasoning.
+    private val permAlertMutex = Mutex()
     // The last ghost route distance drawn while R was RELIABLE. When the rider goes off the route (R
     // unreliable) the marker HOLDS this frozen position instead of hiding — so the icon never disappears
     // while a route is loaded (incl. a Karoo reroute/deviation), it just pauses where you left the line and
@@ -1530,28 +1535,38 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
      */
     private fun maybeAlertMissingPermission() {
         if (StoragePermission.hasAllFilesAccess(applicationContext)) return
+        // Two near-simultaneous RideState.Recording emissions (e.g. a host reconnect storm) can each
+        // launch this coroutine. Without serialization both would read the same (firedCount,
+        // lastFiredEpoch) via loadConfigFlow().first() before either writes back, so both would pass
+        // PermissionAlertSchedule.decide() and both dispatch an alert — a duplicate alert plus a lost
+        // firedCount increment. permAlertMutex.withLock makes the whole load→decide→dispatch→write
+        // sequence a single-flight critical section: the second coroutine only starts its read after
+        // the first has already written, so it observes the updated (firedCount, lastFiredEpoch) and
+        // decide() correctly throttles it.
         scope.launch(Dispatchers.IO) {
-            val cfg = configManager.loadConfigFlow().first()
-            if (!cfg.masterEnabled) return@launch
-            val now = System.currentTimeMillis()
-            val next = PermissionAlertSchedule.decide(
-                PermAlertState(cfg.permAlertFiredCount, cfg.permAlertLastFiredEpoch), now,
-            ) ?: return@launch
-            karooSystem.dispatch(
-                InRideAlert(
-                    id = "kghost-perm-$now",
-                    icon = R.drawable.ic_ghost,
-                    title = applicationContext.getString(R.string.perm_alert_title),
-                    detail = applicationContext.getString(R.string.perm_alert_detail),
-                    autoDismissMs = 10_000L,
-                    backgroundColor = R.color.perm_alert_bg,
-                    textColor = R.color.perm_alert_text,
-                ),
-            )
-            configManager.updateConfig {
-                it.copy(permAlertFiredCount = next.firedCount, permAlertLastFiredEpoch = next.lastFiredEpoch)
+            permAlertMutex.withLock {
+                val cfg = configManager.loadConfigFlow().first()
+                if (!cfg.masterEnabled) return@withLock
+                val now = System.currentTimeMillis()
+                val next = PermissionAlertSchedule.decide(
+                    PermAlertState(cfg.permAlertFiredCount, cfg.permAlertLastFiredEpoch), now,
+                ) ?: return@withLock
+                karooSystem.dispatch(
+                    InRideAlert(
+                        id = "kghost-perm-$now",
+                        icon = R.drawable.ic_ghost,
+                        title = applicationContext.getString(R.string.perm_alert_title),
+                        detail = applicationContext.getString(R.string.perm_alert_detail),
+                        autoDismissMs = 10_000L,
+                        backgroundColor = R.color.perm_alert_bg,
+                        textColor = R.color.perm_alert_text,
+                    ),
+                )
+                configManager.updateConfig {
+                    it.copy(permAlertFiredCount = next.firedCount, permAlertLastFiredEpoch = next.lastFiredEpoch)
+                }
+                Timber.d("KVP perm alert fired count=${next.firedCount}")
             }
-            Timber.d("KVP perm alert fired count=${next.firedCount}")
         }
     }
 
