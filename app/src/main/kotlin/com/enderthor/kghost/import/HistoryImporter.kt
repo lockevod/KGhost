@@ -57,13 +57,18 @@ class HistoryImporter(
     private data class WorkItem(val file: File, val kind: Kind)
 
     /** Outcome of decoding+decimating ONE file, produced by the decode workers and consumed by the
-     *  single ordered collector. A [Failed] carries no data (its file was null/short/threw); the
-     *  policy mirrors the old inline body. [Decoded] also carries the source [File] so the collector
-     *  can mark it in the [ProcessedLedger] once its chunk is actually FLUSHED (persisted to the
-     *  store) — not merely buffered. */
+     *  single ordered collector. A [Failed] carries no data (its file was null/threw); the policy
+     *  mirrors the old inline body — TRANSIENT, always retried (a null decode or thrown exception
+     *  may be a mid-write/truncated file that becomes readable later). [Decoded] also carries the
+     *  source [File] so the collector can mark it in the [ProcessedLedger] once its chunk is
+     *  actually FLUSHED (persisted to the store) — not merely buffered. [Invalid] is a file that
+     *  decoded completely but decimated to <2 points — deterministically and permanently unusable
+     *  as a ghost (indoor/trainer or single-GPS-fix ride) — so it is marked in the ledger right
+     *  away (there is no track to orphan on a later cancel, unlike [Decoded]). */
     private sealed interface DecodedOrFail {
         data class Decoded(val file: File, val track: RecordedTrack, val lastModified: Long) : DecodedOrFail
         object Failed : DecodedOrFail
+        data class Invalid(val file: File) : DecodedOrFail
     }
 
     fun import(onlyNew: Boolean): Flow<ImportProgress> = flow {
@@ -173,9 +178,11 @@ class HistoryImporter(
             } ?: return DecodedOrFail.Failed
             val decimated = decimate(track)
             if (decimated.points.size < 2) {
-                // L-F1: a <2-point track is unusable/unraceable; count as failure, drop it.
+                // L-F1: a <2-point track is unusable/unraceable — and, since it decoded fully, this
+                // is DETERMINISTIC (not transient), so mark it Invalid: the collector ledgers it
+                // immediately so it isn't re-decoded on every subsequent import.
                 Timber.w("import dropped %s: decimated to %d point(s)", item.file.name, decimated.points.size)
-                DecodedOrFail.Failed
+                DecodedOrFail.Invalid(item.file)
             } else {
                 DecodedOrFail.Decoded(item.file, decimated, item.file.lastModified())
             }
@@ -235,6 +242,16 @@ class HistoryImporter(
                 for (d in decoded) {
                     when (d) {
                         is DecodedOrFail.Failed -> failed++
+                        is DecodedOrFail.Invalid -> {
+                            // Permanently-invalid file: there is no track to store, so the
+                            // "mark only after the chunk flushes" rule (which exists to avoid
+                            // orphaning a decoded-but-unstored VALID ride on cancel) doesn't apply —
+                            // nothing here can be orphaned. The collector is single-threaded, so
+                            // mutating ledgerMap directly needs no lock; ledger.save() in the
+                            // finally persists it. Still counts as `failed` for this run's summary.
+                            failed++
+                            ledger.mark(ledgerMap, d.file)
+                        }
                         is DecodedOrFail.Decoded -> {
                             chunk.add(d.track)
                             chunkLastModified.add(d.lastModified)
