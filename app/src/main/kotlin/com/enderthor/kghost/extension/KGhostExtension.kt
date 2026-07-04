@@ -43,6 +43,9 @@ import com.enderthor.kghost.geo.TrackStore
 import com.enderthor.kghost.geo.TrackStorage
 import com.enderthor.kghost.geo.routeKeyOf
 import com.enderthor.kghost.managers.ConfigurationManager
+import com.enderthor.kghost.managers.PermAlertState
+import com.enderthor.kghost.managers.PermissionAlertSchedule
+import com.enderthor.kghost.managers.StoragePermission
 import com.enderthor.kghost.map.GhostMapPresenter
 import com.enderthor.kghost.map.MapGlide
 import com.enderthor.kghost.map.GhostMarker
@@ -862,6 +865,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // (it never extrapolates on wall-clock), so a stale paused snapshot can't lurch the
                     // marker forward — the first post-resume tick simply glides it to the new value.
                     startTick()
+                    maybeAlertMissingPermission()
                 }
                 is RideState.Paused -> {
                     // The clock is tied to ELAPSED_TIME, which the ride app already pauses, so the tick
@@ -1517,6 +1521,39 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         "raceEnabled=${c.raceEnabled} target=${"%.1f".format(c.targetMs())}m/s pick=${c.ghostPick} " +
             "showMap=${c.showGhostOnMap} icon=${c.ghostIcon} entryAlert=${c.segmentEntryAlert} " +
             "exitAlert=${c.segmentExitAlert} autoRecord=${c.autoRecord}"
+
+    /**
+     * On ride start, if all-files access is missing (and the master switch is on), fire the decaying
+     * missing-permission reminder (see [PermissionAlertSchedule]) and persist the new schedule state so
+     * the throttle survives process death. No-op when the permission is present or the master switch is
+     * off. Reads/writes config on [Dispatchers.IO] via the existing ConfigurationManager.
+     */
+    private fun maybeAlertMissingPermission() {
+        if (StoragePermission.hasAllFilesAccess(applicationContext)) return
+        scope.launch(Dispatchers.IO) {
+            val cfg = configManager.loadConfigFlow().first()
+            if (!cfg.masterEnabled) return@launch
+            val now = System.currentTimeMillis()
+            val next = PermissionAlertSchedule.decide(
+                PermAlertState(cfg.permAlertFiredCount, cfg.permAlertLastFiredEpoch), now,
+            ) ?: return@launch
+            karooSystem.dispatch(
+                InRideAlert(
+                    id = "kghost-perm-$now",
+                    icon = R.drawable.ic_ghost,
+                    title = applicationContext.getString(R.string.perm_alert_title),
+                    detail = applicationContext.getString(R.string.perm_alert_detail),
+                    autoDismissMs = 10_000L,
+                    backgroundColor = R.color.perm_alert_bg,
+                    textColor = R.color.perm_alert_text,
+                ),
+            )
+            configManager.updateConfig {
+                it.copy(permAlertFiredCount = next.firedCount, permAlertLastFiredEpoch = next.lastFiredEpoch)
+            }
+            Timber.d("KVP perm alert fired count=${next.firedCount}")
+        }
+    }
 
     // `.sample()` is a @FlowPreview API; opting in here (same convention as KSafe's LocationManager).
     @OptIn(kotlinx.coroutines.FlowPreview::class)

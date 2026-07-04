@@ -16,6 +16,11 @@
     <string name="segment_exit_title">Fin del tramo</string>
     <string name="segment_exit_detail">Vuelves al ritmo fantasma</string>
 
+    <!-- Aviso en marcha (con calendario decreciente) cuando falta el acceso a todos los archivos, por
+         lo que KGhost pasa a funcionar solo como virtual partner. -->
+    <string name="perm_alert_title">Sin acceso a archivos</string>
+    <string name="perm_alert_detail">KGhost irá solo como virtual partner · concede acceso en Ajustes</string>
+
     <string name="gap_numeric_name">Diferencia Ghost Pace</string>
     <string name="gap_numeric_description">Diferencia de tiempo/distancia con el Ghost Pace.</string>
     <string name="gap_graphic_name">Pista Ghost Pace</string>

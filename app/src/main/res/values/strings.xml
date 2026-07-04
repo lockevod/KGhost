@@ -15,6 +15,11 @@
     <string name="segment_exit_title">Stretch ended</string>
     <string name="segment_exit_detail">Back to Ghost Pace</string>
 
+    <!-- In-ride alert shown (decaying schedule) when all-files access is missing so KGhost falls
+         back to virtual-partner-only mode. -->
+    <string name="perm_alert_title">No file access</string>
+    <string name="perm_alert_detail">KGhost runs virtual-partner only · grant access in Settings</string>
+
     <string name="gap_numeric_name">Ghost Pace Gap</string>
     <string name="gap_numeric_description">Time/distance gap to the Ghost Pace.</string>
     <string name="gap_graphic_name">Ghost Pace Track</string>
