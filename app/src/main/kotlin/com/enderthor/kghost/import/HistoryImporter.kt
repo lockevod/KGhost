@@ -129,12 +129,13 @@ class HistoryImporter(
         // L-F2: highest lastModified among files whose decoded tracks have been FLUSHED so far.
         var maxFlushedLastModified = Long.MIN_VALUE
 
-        // Flush the current chunk into the store, fold its counts into the running totals, advance
-        // lastScan past the flushed files (success-only), mark the flushed files' ledger entries, and
-        // clear the buffers. Called per full chunk and once more at end-of-loop. Each flush +
-        // lastScanSetter takes effect immediately, so a CancellationException thrown afterwards
-        // cannot undo already-persisted work — and the ledger marks below are likewise scoped to only
-        // the files whose tracks just landed in the sink.
+        // Flush the current chunk into the store, fold its counts into the running totals, mark the
+        // flushed files' ledger entries, advance lastScan past them (success-only), and clear the
+        // buffers. Called per full chunk and once more at end-of-loop. The ledger mark happens BEFORE
+        // the suspend lastScanSetter() call so a Cancel landing during that suspend still leaves the
+        // ledger consistent with the sink (both already reflect this chunk) — see the note at the mark
+        // call below. Each flush takes effect immediately, so a CancellationException thrown
+        // afterwards cannot undo already-persisted work.
         suspend fun flushChunk() {
             if (chunk.isEmpty()) return
             val added = sink.addAll(chunk)
@@ -142,14 +143,19 @@ class HistoryImporter(
             skippedDuplicates += (chunk.size - added)
             val chunkMax = chunkLastModified.max()
             if (chunkMax > maxFlushedLastModified) maxFlushedLastModified = chunkMax
-            // L-F2: advance per successful flush so a cancel after some flushes still leaves lastScan
-            // correctly past them (re-run with onlyNew won't reprocess flushed files).
-            if (maxFlushedLastModified > lastScanProvider()) lastScanSetter(maxFlushedLastModified)
             // Mark the ledger for exactly the files whose tracks were just persisted above — NOT at
             // buffer time — so a cancel before this point leaves those files unmarked and therefore
             // re-importable on the next run (ledger.save() in the finally only persists marks already
             // recorded here, bounding it to actually-flushed work, same as lastScan/sink.commit()).
+            // Done BEFORE the suspend lastScanSetter() call below: if a Cancel lands exactly during
+            // that suspend, the ledger is already marked for this chunk, so sink (folded above) and
+            // ledger (marked here) stay consistent with each other at the cancel point — only lastScan
+            // itself may lag by one chunk, which is harmless (a re-run just re-decodes+skips those
+            // already-ledgered files instead of re-storing them).
             chunkFiles.forEach { ledger.mark(ledgerMap, it) }
+            // L-F2: advance per successful flush so a cancel after some flushes still leaves lastScan
+            // correctly past them (re-run with onlyNew won't reprocess flushed files).
+            if (maxFlushedLastModified > lastScanProvider()) lastScanSetter(maxFlushedLastModified)
             chunk.clear()
             chunkLastModified.clear()
             chunkFiles.clear()
