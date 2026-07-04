@@ -4,7 +4,7 @@ import com.enderthor.kghost.engine.GhostPick
 import kotlinx.serialization.Serializable
 
 /** Current schema version. Bump this and add a branch in [migrateToLatest] when defaults change. */
-const val CONFIG_VERSION = 7
+const val CONFIG_VERSION = 8
 
 /** Default Ghost Pace target speed (12 km/h) used when the user hasn't set one. */
 val DEFAULT_TARGET_SPEED_MS: Double = kmhToMs(12.0)
@@ -97,6 +97,10 @@ data class KGhostConfig(
     val autoTidy: Boolean = true,
     /** Epoch millis when the one-time backlog sweep last ran. 0 = never swept. */
     val tidySweepEpoch: Long = 0L,
+    /** Number of times the missing-permission in-ride alert has fired (drives the decaying schedule). */
+    val permAlertFiredCount: Int = 0,
+    /** Wall-clock epoch millis the missing-permission alert last fired. 0 = never. */
+    val permAlertLastFiredEpoch: Long = 0L,
 ) {
     /**
      * The Ghost Pace target speed (m/s) — ALWAYS valid and present. The VP can never be
@@ -164,5 +168,8 @@ fun KGhostConfig.migrateToLatest(): KGhostConfig {
     // v6 → v7: per-profile raceEnabled/ghostPick/ghostIcon added; all take Kotlin defaults matching the
     // global defaults, so existing profiles (and the global config) behave identically — just stamp.
     if (c.version < 7) c = c.copy(version = 7)
+    // v7 → v8: missing-permission in-ride alert schedule state added; both take Kotlin defaults
+    // (0 / 0L = never fired), so existing installs start the decaying reminder fresh — just stamp.
+    if (c.version < 8) c = c.copy(version = 8)
     return c
 }
