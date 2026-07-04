@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -232,6 +234,7 @@ class HistoryImporterTest {
         }
 
         val store = TrackStore(tracksDir)
+        val ledgerFile = File(tmp.newFolder("bookkeeping"), "processed.json")
 
         var lastScan = 0L
         // listFiles() order is OS-defined, so drive the cancel off a decode counter, not filenames:
@@ -252,6 +255,7 @@ class HistoryImporterTest {
             gpxParse = { null },
             lastScanProvider = { lastScan },
             lastScanSetter = { lastScan = it },
+            processedLedgerFile = ledgerFile,
         )
 
         // CancellationException propagates out of the flow; the already-executed flush (+ its
@@ -276,6 +280,31 @@ class HistoryImporterTest {
             .map { File(fitFilesDir, it.removePrefix("t") + ".fit").lastModified() }
             .max()
         assertEquals(expectedMax, lastScan)
+
+        // Task 8: the ProcessedLedger is marked at FLUSH time only (inside flushChunk(), after
+        // sink.addAll succeeds), and ledger.save() runs in the finally — so a cancel must leave the
+        // ledger containing EXACTLY the flushed files, and NOT the ones merely decoded/buffered into
+        // a chunk that never flushed. Reload from disk (not the in-memory map) so this exercises the
+        // real save() written in the finally.
+        val ledger = ProcessedLedger(ledgerFile)
+        val reloaded = ledger.load()
+        assertEquals(25, reloaded.size)
+
+        val storedFiles = storedIds.map { File(fitFilesDir, it.removePrefix("t") + ".fit") }.toSet()
+        storedFiles.forEach { f ->
+            assertTrue("flushed file ${f.name} must be marked processed", ledger.isProcessed(reloaded, f))
+        }
+
+        // Every file NOT among the 25 flushed ones was, at best, decoded/buffered into a chunk that
+        // never flushed (or never decoded at all) — it must be ABSENT from the ledger so it is
+        // re-imported (not silently skipped) on the next run.
+        val unflushedFiles = (0 until n)
+            .map { File(fitFilesDir, "f%02d.fit".format(it)) }
+            .filterNot { it in storedFiles }
+        assertEquals(n - 25, unflushedFiles.size)
+        unflushedFiles.forEach { f ->
+            assertFalse("unflushed file ${f.name} must NOT be marked processed", ledger.isProcessed(reloaded, f))
+        }
     }
 
     @Test fun `onlyNew with future lastScan processes nothing`() = runTest {
