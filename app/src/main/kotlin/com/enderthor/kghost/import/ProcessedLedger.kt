@@ -36,6 +36,17 @@ class ProcessedLedger(private val file: File) {
         map[key(f)] = Entry(f.length(), f.lastModified())
     }
 
+    /** Mark with EXPLICIT (size, lastModified) instead of reading the file's current stats. Callers
+     *  that decode a file on one thread/time and only get around to marking it later (e.g. the
+     *  importer's collector, which marks a chunk only once it is flushed) must use this overload
+     *  with the stats captured AT DECODE TIME — otherwise a file that mutates between decode and
+     *  mark (e.g. a mid-write FIT finishing) would be ledgered with its post-mutation stats, and a
+     *  later import comparing against the (by-then-settled) current stats would wrongly match and
+     *  silently skip it forever, even if it had gone on to decode as a fully valid ride (TOCTOU). */
+    fun mark(map: MutableMap<String, Entry>, f: File, size: Long, lastModified: Long) {
+        map[key(f)] = Entry(size, lastModified)
+    }
+
     fun save(map: Map<String, Entry>) {
         runCatching {
             val tmp = File(file.parentFile, file.name + ".tmp")
