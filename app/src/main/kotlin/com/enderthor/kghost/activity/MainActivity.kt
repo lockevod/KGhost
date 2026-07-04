@@ -24,6 +24,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.enderthor.kghost.R
 import com.enderthor.kghost.data.KGhostConfig
@@ -94,6 +95,14 @@ fun TabLayout() {
         trackCount = withContext(Dispatchers.IO) {
             try { TrackStore(TrackStorage.tracksDir(context)).allTrackIds().size } catch (_: Exception) { null }
         }
+    }
+
+    // A reinstall revokes all-files access, so on first launch the count reads (wiped) internal
+    // storage → 0. Returning from the system permission screen fires ON_RESUME; bump refreshKey so
+    // the count recomputes against the now-readable /sdcard/KGhost/tracks without a manual import.
+    LifecycleResumeEffect(Unit) {
+        refreshKey++
+        onPauseOrDispose { }
     }
 
     // The settings Activity runs in its OWN process (separate from the extension service), so it needs
