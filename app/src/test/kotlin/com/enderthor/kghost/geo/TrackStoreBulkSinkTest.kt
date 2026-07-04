@@ -100,4 +100,58 @@ class TrackStoreBulkSinkTest {
         assertTrue("c1_1" in indexIds)
         assertTrue("c2_1" in indexIds)
     }
+
+    /** Regression for the archive-resurrection bug: the OLD commit() unioned the sink's WHOLE
+     *  seeded-from-disk index (captured at openBulkSink()) onto the current on-disk snapshot. That
+     *  seed still contains a track that a concurrent archive() removes mid-import — a ride-finish
+     *  tidy pass (tidyGroup -> archive) that runs while an import is in flight. Since the seed still
+     *  has the archived id, the union at commit() re-adds it to index.json even though its
+     *  `<id>.json` has already been moved to archive/ — a permanent dangling index entry that
+     *  prewarmAndReconcile() never prunes (it only repairs the opposite drift: a live file missing
+     *  from the index).
+     *
+     *  This test opens a sink on a store that already has a LIVE track T, adds a chunk, then calls
+     *  store.archive(listOf(T.id)) directly (simulating tidyGroup firing mid-import), adds another
+     *  chunk, and commits. It must find T's id ABSENT from index.json afterwards — the archive's
+     *  removal must survive the sink's commit.
+     *
+     *  Fails on the old whole-seed-union commit (see git history: `T.id` was in the seed taken at
+     *  openBulkSink() before the archive call, so the union at commit() re-added it to index.json
+     *  even though its file had already moved to archive/). */
+    @Test fun `commit honors a concurrent archive removal that lands between sink chunks`() {
+        val dir = File(tmp.newFolder("E"), "tracks")
+        val store = TrackStore(dir)
+
+        // T is a real, already-indexed live track before the sink ever opens.
+        val liveTrack = track("T", "kT")
+        assertTrue(store.add(liveTrack))
+        assertTrue("T must be indexed before the sink opens", "T" in readIndexJson(dir).values.flatten().toSet())
+
+        val sink = store.openBulkSink() // seeds (and, pre-fix, would capture T in its stale seed)
+
+        val chunk1 = (1..5).map { track("g1_$it", "gk1_$it") }
+        val chunk2 = (1..5).map { track("g2_$it", "gk2_$it") }
+
+        sink.addAll(chunk1)
+        // Simulate a ride-finish tidy pass archiving T DIRECTLY on the same store, mid-import.
+        val movedCount = store.archive(listOf("T"))
+        assertEquals(1, movedCount)
+        assertTrue(
+            "T's file must have moved to archive/",
+            File(File(dir, TrackStore.ARCHIVE_SUBDIR), "T.json").isFile,
+        )
+        assertTrue("T must no longer be a live file", "T" !in store.allTrackIds())
+
+        sink.addAll(chunk2)
+        sink.commit()
+
+        val indexIdsAfterCommit = readIndexJson(dir).values.flatten().toSet()
+        assertTrue(
+            "T must NOT be resurrected in index.json after commit — it was archived mid-import",
+            "T" !in indexIdsAfterCommit,
+        )
+        // Sanity: the sink's own chunks (both before and after the archive call) are present.
+        assertTrue("g1_1" in indexIdsAfterCommit)
+        assertTrue("g2_1" in indexIdsAfterCommit)
+    }
 }
