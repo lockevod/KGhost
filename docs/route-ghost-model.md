@@ -226,7 +226,9 @@ GPS-glitch segment can't spike the curve, while a genuine strong day (≤2× the
 whole-route ghost. No live match, no per-pick overlay.
 
 **Seeded from history (every pick races from ride 1).** On the first match of a route with no (valid)
-grid, KGhost seeds it from the candidate tracks loaded for the match: `SegmentMatcher.routeLaps` (a cheap
+grid, KGhost seeds it from the candidate tracks loaded for the match — those tracks come from the recorded
+library, whose import/storage/dedup and the performance work behind it are documented in
+[`import-pipeline.md`](import-pipeline.md). Seeding: `SegmentMatcher.routeLaps` (a cheap
 O(n) single forward pass per track, splitting at >500 m off-route gaps) yields each track's
 route-distance laps, folded oldest→newest by `seedAggregateFromLaps` — populating all three reducers —
 then persisted. So every pick is raceable from the first ride; later rides load the persisted grid

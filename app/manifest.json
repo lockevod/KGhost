@@ -3,9 +3,9 @@
   "packageName": "com.enderthor.kghost",
   "latestApkUrl": "https://github.com/lockevod/KGhost/releases/latest/download/kghost.apk",
   "iconUrl": "https://github.com/lockevod/KGhost/releases/latest/download/kghost.png",
-  "latestVersion": "0.7.2",
-  "latestVersionCode": 202606242,
+  "latestVersion": "0.9.0",
+  "latestVersionCode": 202607021,
   "developer": "github.com/lockevod",
   "description": "Race against a ghost on your Karoo: a fixed-pace Ghost Pace or your own past self on a route, stitched into one continuous ghost. Shows the live time/distance gap on graphical and numeric data fields and draws the ghost's position on the map. Records each ride automatically and can import GPX/FIT ghosts dropped in /sdcard/KGhost. Keeps estimating during GPS dropouts. Beta version, use with care.",
-  "releaseNotes": "Fix clock. Fix ghost starting ahead when Karoo map-matches wrong position before GPS locks. Average/Best/Last now race a single per-route grid seeded from history — Average is ready from ride 1 and counts any lap regardless of start position on the route. Best clamp raised to 2× average so genuine fast laps come through."
+  "releaseNotes": "Much faster history import for large libraries (already-imported rides are skipped). Recorded-track count now refreshes after a reinstall once all-files access is granted. Storage-permission warning is now shown on the main screen with an occasional in-ride reminder. Improve data parsing. Improve ghost behaviour. Fix re-routing. Fix average mode (cool down case). Fix ghost starting ahead when Karoo map-matches wrong position before GPS locks."
 }

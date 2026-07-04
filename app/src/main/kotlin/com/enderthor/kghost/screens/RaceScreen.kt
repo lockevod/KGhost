@@ -1,7 +1,6 @@
 package com.enderthor.kghost.screens
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -9,8 +8,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -43,7 +40,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.enderthor.kghost.managers.ConfigurationManager
 import com.enderthor.kghost.managers.StoragePermission
 import kotlinx.coroutines.launch
-import timber.log.Timber
 
 /**
  * Race tab: settings for the "Race Your Own" feature.
@@ -361,44 +357,7 @@ internal fun ImportSection(
     )
 
     if (!hasAccess) {
-        // ── Permission gate ───────────────────────────────────────────────────
-        // Rendered as an error-container card (not a plain surface) so the rider can't miss that
-        // this access is required — without it KGhost loads no ghosts at all.
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.errorContainer,
-                contentColor = MaterialTheme.colorScheme.onErrorContainer,
-            ),
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    text = stringResource(R.string.import_permission_title),
-                    style = MaterialTheme.typography.titleSmall,
-                )
-                Text(
-                    text = stringResource(R.string.import_permission_description),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Button(
-                    onClick = {
-                        // B-I4: some Karoo OS builds expose no all-files-access settings screen;
-                        // startActivity would then throw ActivityNotFoundException and crash the
-                        // settings UI. Guard it and log instead.
-                        runCatching { context.startActivity(StoragePermission.requestIntent(context)) }
-                            .onFailure { Timber.w(it, "could not open all-files-access settings") }
-                    },
-                    modifier = Modifier.heightIn(min = 48.dp),
-                ) {
-                    Text(stringResource(R.string.import_permission_grant))
-                }
-            }
-        }
+        PermissionWarningBanner()
         return
     }
 

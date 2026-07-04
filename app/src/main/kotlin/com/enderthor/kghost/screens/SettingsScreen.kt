@@ -45,6 +45,11 @@ fun SettingsScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        // Storage-permission gate is critical: without all-files access KGhost loads no recorded
+        // ghosts (Ghost-Pace / virtual-partner only). Surface it on the main screen too, not just
+        // in the import section. Renders nothing once granted.
+        PermissionWarningBanner()
+
         // Intro: explain how the two sections relate (one continuous ghost).
         Text(
             text = stringResource(R.string.combined_intro_title),
