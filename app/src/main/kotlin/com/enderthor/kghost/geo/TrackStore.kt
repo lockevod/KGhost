@@ -164,6 +164,74 @@ class TrackStore(private val dir: File) {
         }
     }
 
+    /** Opens a bulk-import sink that keeps the index + known keys IN MEMORY across many chunks and
+     *  persists the aggregate bookkeeping ONCE at [BulkSink.commit], instead of re-reading/rewriting
+     *  index.json + sourcekeys.json per chunk (the old O(n^2) at 1200 rides). Each `<id>.json` is
+     *  still written per chunk, so a mid-import Cancel keeps flushed tracks; a hard kill leaves a
+     *  stale index that prewarmAndReconcile() rebuilds at next startup. */
+    fun openBulkSink(): BulkSink { ensureDir(); return BulkSink() }
+
+    inner class BulkSink internal constructor() {
+        // `known` is seeded from disk once (for in-batch dedup against already-ingested keys) and
+        // held for the whole import — same as before.
+        //
+        // `additions` is NOT seeded from disk. It accumulates ONLY the cells THIS sink adds during
+        // this import. Seeding it from disk (the old behaviour) made it a stale whole-library seed
+        // that commit() unioned back onto the current disk snapshot — which correctly preserved a
+        // concurrent add() (present in the fresh disk read) but WRONGLY resurrected a track that a
+        // concurrent archive()/tidyGroup removed mid-import (still present in the stale seed, so the
+        // union re-added it even though the current disk snapshot — and the archived <id>.json's new
+        // location — say it's gone). Starting `additions` empty and unioning only IT onto a fresh
+        // disk read at commit time preserves a concurrent add (it's on disk) while honoring a
+        // concurrent archive's removal (the removed id was never in `additions` to begin with).
+        //
+        // readPathCellSnapshot() is still called once here, under indexLock, purely for its one-time
+        // legacy bbox->path-cell migration SIDE EFFECT (writes the `.pathcells` marker + a migrated
+        // index.json on a legacy store) — its return value is intentionally discarded, NOT used to
+        // seed the merge base.
+        private val known = synchronized(indexLock) { readSourceKeys().toMutableSet() }
+        private val additions = synchronized(indexLock) {
+            readPathCellSnapshot() // one-time legacy-migration side effect only; result unused.
+            SpatialIndex(INDEX_PRECISION, emptyMap())
+        }
+
+        /** Write each new track's <id>.json and fold it into the in-memory additions-only index +
+         *  known keys. No aggregate bookkeeping IO here. Returns the count newly stored (dedup within
+         *  batch + against known). */
+        fun addAll(tracks: List<RecordedTrack>): Int {
+            if (tracks.isEmpty()) return 0
+            var added = 0
+            synchronized(indexLock) {
+                for (t in tracks) {
+                    if (t.sourceKey.isNotEmpty() && t.sourceKey in known) continue
+                    atomicWriteText(File(dir, t.id + JSON_SUFFIX), jsonForStorage.encodeToString(t), fsync = false)
+                    val cells = additions.cellsForPath(t.points.map { LatLng(it.lat, it.lng) })
+                    if (cells.isNotEmpty()) additions.add(t.id, cells)
+                    if (t.sourceKey.isNotEmpty()) known.add(t.sourceKey)
+                    added++
+                }
+            }
+            return added
+        }
+
+        /** Persist the accumulated index + sourcekeys once (fsynced), UNION-MERGED onto the CURRENT
+         *  on-disk state rather than overwritten from a stale whole-library seed. Reading the RAW
+         *  on-disk snapshot ([readSnapshot], not [readPathCellSnapshot] — migration already ran once
+         *  at open, so commit must not re-trigger that rebuild) fresh at commit time and unioning ONLY
+         *  this sink's own [additions] onto it means: a concurrent [add] (e.g. a ride finishing
+         *  mid-import) is preserved because it's already in that fresh disk read; a concurrent
+         *  [archive]/[tidyGroup] removal is honored because the archived id was never added to
+         *  [additions] in the first place — so the union can't resurrect it. `sourcekeys.json` is
+         *  still unioned (archive() intentionally never removes source keys, so no equivalent
+         *  resurrection risk there). Idempotent: a second commit unions the same [additions] onto disk
+         *  again, same result. */
+        fun commit() = synchronized(indexLock) {
+            val merged = SpatialIndex(INDEX_PRECISION, readSnapshot()).apply { addAll(additions.snapshot()) }
+            writeSnapshot(merged.snapshot())
+            writeSourceKeys(readSourceKeys() + known)
+        }
+    }
+
     /**
      * Archive (do not delete) the given tracks: under [indexLock], FIRST rewrite `index.json` with the
      * ids removed (from the RAW [readSnapshot], so no path-cell rebuild runs under the lock), THEN move

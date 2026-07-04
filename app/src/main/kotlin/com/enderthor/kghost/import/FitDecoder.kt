@@ -17,9 +17,9 @@ import kotlin.math.pow
 /**
  * Decodes a Garmin FIT activity file into a [RecordedTrack] using the official Garmin FIT Java SDK.
  *
- * Only `record` messages carrying a valid GPS position are kept. The integrity check consumes the
- * input stream, so it runs on a SEPARATE [FileInputStream] from the actual decode. Any failure
- * (corrupt/truncated file, IO error, SDK runtime error) is swallowed and yields null — never throws.
+ * Only `record` messages carrying a valid GPS position are kept. The decode is single-pass: there is
+ * no separate upfront integrity check. Any failure (corrupt/truncated file, IO error, SDK runtime
+ * error) surfaces as an exception from `decode.read`, which is swallowed and yields null — never throws.
  */
 object FitDecoder {
 
@@ -28,8 +28,6 @@ object FitDecoder {
 
     fun decode(file: File, source: Source): RecordedTrack? = runCatching {
         val decode = Decode()
-        // checkFileIntegrity consumes the stream, so use a throwaway stream here.
-        FileInputStream(file).use { if (!decode.checkFileIntegrity(it)) return null }
 
         // Build lightweight TrackPoints AS records stream in, instead of buffering every heavy
         // RecordMesg first. A multi-hour FIT is ~20k records; holding them all is tens of MB of SDK

@@ -29,4 +29,8 @@
          @ColorRes per the InRideAlert contract. -->
     <color name="segment_alert_bg">#FF1565C0</color>
     <color name="segment_alert_text">#FFFFFFFF</color>
+
+    <!-- Missing all-files-access in-ride reminder (amber/warning). -->
+    <color name="perm_alert_bg">#FFB35A00</color>
+    <color name="perm_alert_text">#FFFFFFFF</color>
 </resources>
