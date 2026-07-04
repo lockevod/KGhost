@@ -59,7 +59,8 @@ class HistoryImporter(
     /** Outcome of decoding+decimating ONE file, produced by the decode workers and consumed by the
      *  single ordered collector. A [Failed] carries no data (its file was null/short/threw); the
      *  policy mirrors the old inline body. [Decoded] also carries the source [File] so the collector
-     *  can mark it in the [ProcessedLedger] once it is buffered into a chunk. */
+     *  can mark it in the [ProcessedLedger] once its chunk is actually FLUSHED (persisted to the
+     *  store) — not merely buffered. */
     private sealed interface DecodedOrFail {
         data class Decoded(val file: File, val track: RecordedTrack, val lastModified: Long) : DecodedOrFail
         object Failed : DecodedOrFail
@@ -119,18 +120,21 @@ class HistoryImporter(
         // advances lastScan only past files whose tracks were actually written (L-F2 preserved).
         val chunk = ArrayList<RecordedTrack>(FLUSH_EVERY)
         val chunkLastModified = ArrayList<Long>(FLUSH_EVERY)
+        // Source File of each buffered-but-not-yet-flushed track, parallel to `chunk`/
+        // `chunkLastModified`. Marked into the ledger ONLY once its chunk is actually persisted by
+        // flushChunk() below — never at buffer time — so a mid-run cancel (or crash) can never mark a
+        // file "processed" whose track was never written to the store. This mirrors maxFlushedLastModified,
+        // which likewise only advances past FLUSHED files.
+        val chunkFiles = ArrayList<File>(FLUSH_EVERY)
         // L-F2: highest lastModified among files whose decoded tracks have been FLUSHED so far.
         var maxFlushedLastModified = Long.MIN_VALUE
-        // Files that successfully decoded (reached a chunk), to be marked in the ledger + saved once
-        // in the finally below — alongside sink.commit() so a cancel still persists the ledger for
-        // work already buffered, same as the sink already persists flushed chunks. Failures are never
-        // added here, so they keep retrying on the next run.
-        val processedFiles = HashSet<File>()
 
         // Flush the current chunk into the store, fold its counts into the running totals, advance
-        // lastScan past the flushed files (success-only), and clear the buffer. Called per full
-        // chunk and once more at end-of-loop. Each flush + lastScanSetter takes effect immediately,
-        // so a CancellationException thrown afterwards cannot undo already-persisted work.
+        // lastScan past the flushed files (success-only), mark the flushed files' ledger entries, and
+        // clear the buffers. Called per full chunk and once more at end-of-loop. Each flush +
+        // lastScanSetter takes effect immediately, so a CancellationException thrown afterwards
+        // cannot undo already-persisted work — and the ledger marks below are likewise scoped to only
+        // the files whose tracks just landed in the sink.
         suspend fun flushChunk() {
             if (chunk.isEmpty()) return
             val added = sink.addAll(chunk)
@@ -141,8 +145,14 @@ class HistoryImporter(
             // L-F2: advance per successful flush so a cancel after some flushes still leaves lastScan
             // correctly past them (re-run with onlyNew won't reprocess flushed files).
             if (maxFlushedLastModified > lastScanProvider()) lastScanSetter(maxFlushedLastModified)
+            // Mark the ledger for exactly the files whose tracks were just persisted above — NOT at
+            // buffer time — so a cancel before this point leaves those files unmarked and therefore
+            // re-importable on the next run (ledger.save() in the finally only persists marks already
+            // recorded here, bounding it to actually-flushed work, same as lastScan/sink.commit()).
+            chunkFiles.forEach { ledger.mark(ledgerMap, it) }
             chunk.clear()
             chunkLastModified.clear()
+            chunkFiles.clear()
         }
 
         // Decode + decimate ONE file. Returns Failed for null/short/throwing files (same policy as
@@ -222,7 +232,7 @@ class HistoryImporter(
                         is DecodedOrFail.Decoded -> {
                             chunk.add(d.track)
                             chunkLastModified.add(d.lastModified)
-                            processedFiles.add(d.file)
+                            chunkFiles.add(d.file)
                         }
                     }
 
@@ -252,13 +262,14 @@ class HistoryImporter(
             // the flushed <id>.json files are always reflected in the aggregate bookkeeping. A hard
             // process kill (no finally) leaves a stale index that startup reconcile rebuilds.
             sink.commit()
-            // Mark every successfully-decoded file in the ledger and persist it ONCE, alongside the
-            // sink commit above, so a cancel still keeps the ledger in sync with whatever was
-            // buffered/flushed. Failures were never added to processedFiles, so they keep retrying.
-            if (processedFiles.isNotEmpty()) {
-                processedFiles.forEach { ledger.mark(ledgerMap, it) }
-                ledger.save(ledgerMap)
-            }
+            // Persist the ledger ONCE, alongside the sink commit above. `ledgerMap` was only ever
+            // mutated inside flushChunk() — i.e. exactly for files whose chunk was already persisted
+            // by sink.addAll() — so on a cancel this save is bounded to actually-flushed work, same as
+            // maxFlushedLastModified/lastScan and sink.commit(). Any file that was decoded+buffered
+            // but whose chunk never flushed (e.g. a cancel mid-chunk) is simply absent from ledgerMap
+            // and will be correctly re-decoded+re-imported next run. Failures never entered a chunk,
+            // so they were never marked and keep retrying too.
+            ledger.save(ledgerMap)
         }
 
         // --- DONE ---
