@@ -17,7 +17,10 @@ object PermissionAlertSchedule {
     /** New state to persist when an alert should fire NOW, or null to stay silent. */
     fun decide(state: PermAlertState, nowEpoch: Long): PermAlertState? {
         val throttle = if (state.firedCount < INITIAL_BURST) SHORT_THROTTLE_MS else LONG_THROTTLE_MS
-        if (state.lastFiredEpoch != 0L && nowEpoch - state.lastFiredEpoch < throttle) return null
+        val elapsed = nowEpoch - state.lastFiredEpoch
+        // A negative elapsed means the wall clock jumped backward (GPS time correction, FIT-replay
+        // testing) — that is NOT "still within the throttle window", so fall through and fire.
+        if (state.lastFiredEpoch != 0L && elapsed in 0L until throttle) return null
         return PermAlertState(state.firedCount + 1, nowEpoch)
     }
 }

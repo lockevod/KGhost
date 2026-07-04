@@ -91,8 +91,8 @@ class HistoryImporter(
         // (they are neither imported, skipped-duplicate, nor failed — they were never attempted).
         val ledger = ProcessedLedger(processedLedgerFile)
         val ledgerMap = ledger.load()
-        val skippedByLedger = workList.count { ledger.isProcessed(ledgerMap, it.file) }
-        val work = workList.filterNot { ledger.isProcessed(ledgerMap, it.file) }
+        val (ledgerSkipped, work) = workList.partition { ledger.isProcessed(ledgerMap, it.file) }
+        val skippedByLedger = ledgerSkipped.size
         val total = work.size
         if (skippedByLedger > 0) Timber.d("import: ledger skipped %d already-processed files", skippedByLedger)
         emit(ImportProgress(ImportProgress.Phase.SCANNING, current = 0, total = total, 0, 0, 0))
