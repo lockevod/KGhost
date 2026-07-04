@@ -79,6 +79,14 @@ class HistoryImporter(
         var failed = 0
         var imported = 0
         var skippedDuplicates = 0
+        // Bulk sink: keeps the index + known keys IN MEMORY across every chunk of this run and
+        // persists the aggregate index.json/sourcekeys.json ONCE at commit() (below, in the
+        // finally), instead of trackStore.addAll's per-chunk read-modify-write of those files
+        // (O(n^2) bookkeeping over ~48 chunks / 1200 files). Each <id>.json is still written
+        // per-chunk by sink.addAll, so a mid-run Cancel keeps already-flushed tracks on disk; a
+        // hard process kill (skipping the finally) leaves a stale index that
+        // TrackStore.prewarmAndReconcile() repairs at next startup.
+        val sink = trackStore.openBulkSink()
         // Chunk buffer plus the lastModified of the file each buffered track came from, so a flush
         // advances lastScan only past files whose tracks were actually written (L-F2 preserved).
         val chunk = ArrayList<RecordedTrack>(FLUSH_EVERY)
@@ -92,7 +100,7 @@ class HistoryImporter(
         // so a CancellationException thrown afterwards cannot undo already-persisted work.
         suspend fun flushChunk() {
             if (chunk.isEmpty()) return
-            val added = trackStore.addAll(chunk)
+            val added = sink.addAll(chunk)
             imported += added
             skippedDuplicates += (chunk.size - added)
             val chunkMax = chunkLastModified.max()
@@ -104,57 +112,64 @@ class HistoryImporter(
             chunkLastModified.clear()
         }
 
-        workList.forEachIndexed { index, item ->
-            // Per-file cooperative cancellation: a cancel is honored within one file, not ten.
-            currentCoroutineContext().ensureActive()
-            try {
-                val track = when (item.kind) {
-                    Kind.FITFILES_FIT -> fitDecode(item.file, Source.FITFILES_SCAN)
-                    Kind.IMPORT_FIT -> fitDecode(item.file, Source.FIT_IMPORT)
-                    Kind.IMPORT_GPX -> gpxParse(item.file)
-                }
-                if (track == null) {
-                    failed++
-                } else {
-                    val decimated = decimate(track)
-                    if (decimated.points.size < 2) {
-                        // L-F1: a <2-point track is unusable/unraceable; count as failure, drop it.
-                        failed++
-                        Timber.w("import dropped %s: decimated to %d point(s)", item.file.name, decimated.points.size)
-                    } else {
-                        chunk.add(decimated)
-                        chunkLastModified.add(item.file.lastModified())
+        try {
+            workList.forEachIndexed { index, item ->
+                // Per-file cooperative cancellation: a cancel is honored within one file, not ten.
+                currentCoroutineContext().ensureActive()
+                try {
+                    val track = when (item.kind) {
+                        Kind.FITFILES_FIT -> fitDecode(item.file, Source.FITFILES_SCAN)
+                        Kind.IMPORT_FIT -> fitDecode(item.file, Source.FIT_IMPORT)
+                        Kind.IMPORT_GPX -> gpxParse(item.file)
                     }
+                    if (track == null) {
+                        failed++
+                    } else {
+                        val decimated = decimate(track)
+                        if (decimated.points.size < 2) {
+                            // L-F1: a <2-point track is unusable/unraceable; count as failure, drop it.
+                            failed++
+                            Timber.w("import dropped %s: decimated to %d point(s)", item.file.name, decimated.points.size)
+                        } else {
+                            chunk.add(decimated)
+                            chunkLastModified.add(item.file.lastModified())
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    // A cooperative cancel must propagate (not be counted as a per-file failure); the
+                    // chunks flushed before it persist.
+                    throw e
+                } catch (e: Exception) {
+                    failed++
+                    Timber.w(e, "import failed for %s", item.file.name)
                 }
-            } catch (e: CancellationException) {
-                // A cooperative cancel must propagate (not be counted as a per-file failure); the
-                // chunks flushed before it persist.
-                throw e
-            } catch (e: Exception) {
-                failed++
-                Timber.w(e, "import failed for %s", item.file.name)
+
+                // Chunked flush: independent of the PROGRESS_EVERY emit cadence below.
+                if (chunk.size >= FLUSH_EVERY) flushChunk()
+
+                val current = index + 1
+                if (current % PROGRESS_EVERY == 0 || current == total) {
+                    emit(
+                        ImportProgress(
+                            ImportProgress.Phase.PARSING,
+                            current = current,
+                            total = total,
+                            imported = imported,
+                            skippedDuplicates = skippedDuplicates,
+                            failed = failed,
+                        ),
+                    )
+                }
             }
 
-            // Chunked flush: independent of the PROGRESS_EVERY emit cadence below.
-            if (chunk.size >= FLUSH_EVERY) flushChunk()
-
-            val current = index + 1
-            if (current % PROGRESS_EVERY == 0 || current == total) {
-                emit(
-                    ImportProgress(
-                        ImportProgress.Phase.PARSING,
-                        current = current,
-                        total = total,
-                        imported = imported,
-                        skippedDuplicates = skippedDuplicates,
-                        failed = failed,
-                    ),
-                )
-            }
+            // --- STORE (final flush of the trailing partial chunk) ---
+            flushChunk()
+        } finally {
+            // Persist the in-memory index/sourcekeys ONCE — on normal completion AND on a Cancel, so
+            // the flushed <id>.json files are always reflected in the aggregate bookkeeping. A hard
+            // process kill (no finally) leaves a stale index that startup reconcile rebuilds.
+            sink.commit()
         }
-
-        // --- STORE (final flush of the trailing partial chunk) ---
-        flushChunk()
 
         // --- DONE ---
         // L-F2: lastScan has already been advanced per flush above to the highest lastModified among

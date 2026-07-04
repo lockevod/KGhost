@@ -164,6 +164,43 @@ class TrackStore(private val dir: File) {
         }
     }
 
+    /** Opens a bulk-import sink that keeps the index + known keys IN MEMORY across many chunks and
+     *  persists the aggregate bookkeeping ONCE at [BulkSink.commit], instead of re-reading/rewriting
+     *  index.json + sourcekeys.json per chunk (the old O(n^2) at 1200 rides). Each `<id>.json` is
+     *  still written per chunk, so a mid-import Cancel keeps flushed tracks; a hard kill leaves a
+     *  stale index that prewarmAndReconcile() rebuilds at next startup. */
+    fun openBulkSink(): BulkSink { ensureDir(); return BulkSink() }
+
+    inner class BulkSink internal constructor() {
+        // Seed from disk once (migrating the legacy index like addAll does), then keep in memory.
+        private val known = synchronized(indexLock) { readSourceKeys().toMutableSet() }
+        private val index = synchronized(indexLock) { SpatialIndex(INDEX_PRECISION, readPathCellSnapshot()) }
+
+        /** Write each new track's <id>.json and fold it into the in-memory index/keys. No aggregate
+         *  bookkeeping IO here. Returns the count newly stored (dedup within batch + against known). */
+        fun addAll(tracks: List<RecordedTrack>): Int {
+            if (tracks.isEmpty()) return 0
+            var added = 0
+            synchronized(indexLock) {
+                for (t in tracks) {
+                    if (t.sourceKey.isNotEmpty() && t.sourceKey in known) continue
+                    atomicWriteText(File(dir, t.id + JSON_SUFFIX), jsonForStorage.encodeToString(t), fsync = false)
+                    val cells = index.cellsForPath(t.points.map { LatLng(it.lat, it.lng) })
+                    if (cells.isNotEmpty()) index.add(t.id, cells)
+                    if (t.sourceKey.isNotEmpty()) known.add(t.sourceKey)
+                    added++
+                }
+            }
+            return added
+        }
+
+        /** Persist the accumulated index + sourcekeys once (fsynced). Idempotent. */
+        fun commit() = synchronized(indexLock) {
+            writeSnapshot(index.snapshot())
+            writeSourceKeys(known)
+        }
+    }
+
     /**
      * Archive (do not delete) the given tracks: under [indexLock], FIRST rewrite `index.json` with the
      * ids removed (from the RAW [readSnapshot], so no path-cell rebuild runs under the lock), THEN move
