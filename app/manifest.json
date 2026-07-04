@@ -7,5 +7,5 @@
   "latestVersionCode": 202607021,
   "developer": "github.com/lockevod",
   "description": "Race against a ghost on your Karoo: a fixed-pace Ghost Pace or your own past self on a route, stitched into one continuous ghost. Shows the live time/distance gap on graphical and numeric data fields and draws the ghost's position on the map. Records each ride automatically and can import GPX/FIT ghosts dropped in /sdcard/KGhost. Keeps estimating during GPS dropouts. Beta version, use with care.",
-  "releaseNotes": "Improve data parsing. Improve ghost behaviour. Fix re-routing. Fix average mode (cool down case). Fix ghost starting ahead when Karoo map-matches wrong position before GPS locks."
+  "releaseNotes": "Much faster history import for large libraries (already-imported rides are skipped). Recorded-track count now refreshes after a reinstall once all-files access is granted. Storage-permission warning is now shown on the main screen with an occasional in-ride reminder. Improve data parsing. Improve ghost behaviour. Fix re-routing. Fix average mode (cool down case). Fix ghost starting ahead when Karoo map-matches wrong position before GPS locks."
 }
