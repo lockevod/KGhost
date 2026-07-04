@@ -98,10 +98,72 @@ class HistoryImporterLedgerFlushTest {
         }
     }
 
-    // NOTE on the cancel case (no deterministic test added here — Task 7's
+    @Test fun `ledger-seeded file skips decode entirely and is excluded from total`() = runTest {
+        val fitFilesDir = tmp.newFolder("fitfiles2")
+        val importDir = tmp.newFolder("import2")
+        val tracksDir = tmp.newFolder("tracks2")
+        val ledgerFile = File(tmp.newFolder("bookkeeping2"), "processed.json")
+
+        // 5 work files; r2 will be pre-seeded into the ledger with its REAL current (size,
+        // lastModified) so import() sees an exact match and skips its decode entirely.
+        val n = 5
+        repeat(n) { i -> touch(fitFilesDir, "r$i.fit").apply { setLastModified(2_000L + i) } }
+        val seededFile = File(fitFilesDir, "r2.fit")
+
+        val ledger = ProcessedLedger(ledgerFile)
+        run {
+            val seeded = ledger.load()
+            ledger.mark(seeded, seededFile)
+            ledger.save(seeded)
+        }
+
+        val store = TrackStore(tracksDir)
+        var r2DecodeCalled = false
+
+        val importer = HistoryImporter(
+            fitFilesDir = fitFilesDir,
+            importDir = importDir,
+            trackStore = store,
+            decimate = { it },
+            fitDecode = { f, _ ->
+                if (f.name == seededFile.name) r2DecodeCalled = true
+                val id = f.name.removeSuffix(".fit")
+                track("t$id", "key-$id")
+            },
+            gpxParse = { null },
+            lastScanProvider = { 0L },
+            processedLedgerFile = ledgerFile,
+        )
+
+        val progress = importer.import(onlyNew = false).toList()
+        val done = progress.last()
+
+        // r2's decoder was NEVER invoked — the ledger filter dropped it from `work` before decode.
+        assertFalse("decode must be skipped for the ledger-seeded file", r2DecodeCalled)
+
+        // r2 is excluded from `total` (never attempted: not imported, not skipped-dup, not failed).
+        assertEquals(ImportProgress.Phase.DONE, done.phase)
+        assertEquals(n - 1, done.total)
+        assertEquals(n - 1, done.imported)
+        assertEquals(0, done.skippedDuplicates)
+        assertEquals(0, done.failed)
+        assertEquals(n - 1, store.allTrackIds().size)
+
+        // The ledger still contains r2 (pre-seeded, untouched) plus the n-1 newly-flushed files.
+        val reloaded = ledger.load()
+        assertEquals(n, reloaded.size)
+        assertTrue("pre-seeded r2 must remain in the ledger", ledger.isProcessed(reloaded, seededFile))
+        (0 until n).filter { it != 2 }.forEach { i ->
+            val f = File(fitFilesDir, "r$i.fit")
+            assertTrue("newly-flushed file r$i.fit must be marked processed", ledger.isProcessed(reloaded, f))
+        }
+    }
+
+    // NOTE on the cancel case (a deterministic test now exists — Task 8 follow-up extended Task 7's
     // `cancellation mid-run preserves already-flushed chunks and advances lastScan past them` in
-    // HistoryImporterTest already covers cancel PROPAGATION and the sink/lastScan bounding; the
-    // ledger now uses the identical mechanism):
+    // HistoryImporterTest with ledger assertions: the reloaded ledger contains exactly the 25
+    // flushed files and none of the merely-buffered-but-unflushed ones. Retained below for context
+    // on WHY that guarantee holds):
     //
     // Before this fix, `chunkFiles`-equivalent tracking (then `processedFiles`) was populated in the
     // collector loop the moment a Decoded result was buffered — i.e. BEFORE flushChunk() ran for
