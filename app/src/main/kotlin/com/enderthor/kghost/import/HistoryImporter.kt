@@ -56,14 +56,36 @@ class HistoryImporter(
 
     private data class WorkItem(val file: File, val kind: Kind)
 
+    /** A valid-decode file awaiting its chunk flush, paired with the (size, lastModified) captured
+     *  at DECODE TIME so the eventual ledger mark reflects the version actually decoded, not
+     *  whatever the file's stats happen to be when its chunk flushes (TOCTOU fix). */
+    private data class PendingMark(val file: File, val size: Long, val lastModified: Long)
+
     /** Outcome of decoding+decimating ONE file, produced by the decode workers and consumed by the
-     *  single ordered collector. A [Failed] carries no data (its file was null/short/threw); the
-     *  policy mirrors the old inline body. [Decoded] also carries the source [File] so the collector
-     *  can mark it in the [ProcessedLedger] once its chunk is actually FLUSHED (persisted to the
-     *  store) — not merely buffered. */
+     *  single ordered collector. A [Failed] carries no data (its file was null/threw); the policy
+     *  mirrors the old inline body — TRANSIENT, always retried (a null decode or thrown exception
+     *  may be a mid-write/truncated file that becomes readable later). [Decoded] also carries the
+     *  source [File] so the collector can mark it in the [ProcessedLedger] once its chunk is
+     *  actually FLUSHED (persisted to the store) — not merely buffered. [Invalid] is a file that
+     *  decoded completely but decimated to <2 points — deterministically and permanently unusable
+     *  as a ghost (indoor/trainer or single-GPS-fix ride) — so it is marked in the ledger right
+     *  away (there is no track to orphan on a later cancel, unlike [Decoded]).
+     *
+     *  Both variants also carry [size]/[lastModified] captured in [decodeOne] at the START of
+     *  decoding (before the decode call), NOT read fresh when the collector later marks the ledger.
+     *  This closes a TOCTOU: the decode decision (valid vs invalid) is made from the file's contents
+     *  as they were at decode time, but the ledger mark used to happen later (collector time, or —
+     *  for [Decoded] — at chunk-flush time), reading the file's stats AS OF THAT LATER MOMENT. If the
+     *  file mutated in between (e.g. a mid-write FIT finishing after being read as <2 points, or a
+     *  valid decode's file being touched again before its chunk flushes), the ledger would silently
+     *  ledger the NEW stats — and a later import, seeing the file's already-settled current stats
+     *  match, would skip it forever, even though the version actually decoded may since have become
+     *  a fully valid, never-yet-stored ride. Marking with the decode-time snapshot instead means a
+     *  mid-processing mutation is detected as a stats mismatch next run, so the file is re-decoded. */
     private sealed interface DecodedOrFail {
-        data class Decoded(val file: File, val track: RecordedTrack, val lastModified: Long) : DecodedOrFail
+        data class Decoded(val file: File, val track: RecordedTrack, val size: Long, val lastModified: Long) : DecodedOrFail
         object Failed : DecodedOrFail
+        data class Invalid(val file: File, val size: Long, val lastModified: Long) : DecodedOrFail
     }
 
     fun import(onlyNew: Boolean): Flow<ImportProgress> = flow {
@@ -120,12 +142,15 @@ class HistoryImporter(
         // advances lastScan only past files whose tracks were actually written (L-F2 preserved).
         val chunk = ArrayList<RecordedTrack>(FLUSH_EVERY)
         val chunkLastModified = ArrayList<Long>(FLUSH_EVERY)
-        // Source File of each buffered-but-not-yet-flushed track, parallel to `chunk`/
-        // `chunkLastModified`. Marked into the ledger ONLY once its chunk is actually persisted by
-        // flushChunk() below — never at buffer time — so a mid-run cancel (or crash) can never mark a
-        // file "processed" whose track was never written to the store. This mirrors maxFlushedLastModified,
-        // which likewise only advances past FLUSHED files.
-        val chunkFiles = ArrayList<File>(FLUSH_EVERY)
+        // Source file + its DECODE-TIME (size, lastModified) for each buffered-but-not-yet-flushed
+        // track, parallel to `chunk`/`chunkLastModified`. Marked into the ledger ONLY once its chunk
+        // is actually persisted by flushChunk() below — never at buffer time — so a mid-run cancel
+        // (or crash) can never mark a file "processed" whose track was never written to the store.
+        // This mirrors maxFlushedLastModified, which likewise only advances past FLUSHED files. The
+        // stats are the ones captured in decodeOne (before decoding), not read fresh at flush time,
+        // so a file that mutates between decode and flush is still marked with the snapshot the
+        // decode decision was actually based on (TOCTOU fix — see DecodedOrFail's doc).
+        val chunkPending = ArrayList<PendingMark>(FLUSH_EVERY)
         // L-F2: highest lastModified among files whose decoded tracks have been FLUSHED so far.
         var maxFlushedLastModified = Long.MIN_VALUE
 
@@ -152,38 +177,50 @@ class HistoryImporter(
             // ledger (marked here) stay consistent with each other at the cancel point — only lastScan
             // itself may lag by one chunk, which is harmless (a re-run just re-decodes+skips those
             // already-ledgered files instead of re-storing them).
-            chunkFiles.forEach { ledger.mark(ledgerMap, it) }
+            chunkPending.forEach { ledger.mark(ledgerMap, it.file, it.size, it.lastModified) }
             // L-F2: advance per successful flush so a cancel after some flushes still leaves lastScan
             // correctly past them (re-run with onlyNew won't reprocess flushed files).
             if (maxFlushedLastModified > lastScanProvider()) lastScanSetter(maxFlushedLastModified)
             chunk.clear()
             chunkLastModified.clear()
-            chunkFiles.clear()
+            chunkPending.clear()
         }
 
         // Decode + decimate ONE file. Returns Failed for null/short/throwing files (same policy as
         // the old inline body: null decode, <2 decimated points, or any non-cancellation exception).
         // Pure w.r.t. the collector's mutable bookkeeping (chunk/failed/…) so it is safe to run on N
         // workers; a CancellationException still PROPAGATES (never counted as a per-file failure).
-        fun decodeOne(item: WorkItem): DecodedOrFail = try {
-            val track = when (item.kind) {
-                Kind.FITFILES_FIT -> fitDecode(item.file, Source.FITFILES_SCAN)
-                Kind.IMPORT_FIT -> fitDecode(item.file, Source.FIT_IMPORT)
-                Kind.IMPORT_GPX -> gpxParse(item.file)
-            } ?: return DecodedOrFail.Failed
-            val decimated = decimate(track)
-            if (decimated.points.size < 2) {
-                // L-F1: a <2-point track is unusable/unraceable; count as failure, drop it.
-                Timber.w("import dropped %s: decimated to %d point(s)", item.file.name, decimated.points.size)
+        fun decodeOne(item: WorkItem): DecodedOrFail {
+            // Snapshot the file's stats ONCE, before decoding, as "the version we are processing" —
+            // the decode decision below (valid vs invalid) is made from the file's contents as of
+            // THIS moment. Using this snapshot (rather than re-reading the file's stats later, at
+            // collector/flush time) is what closes the TOCTOU: if the file mutates while decoding is
+            // in flight or before its result is marked/flushed, the ledger still records the version
+            // that was actually decoded, not whatever the file happens to look like later.
+            val srcSize = item.file.length()
+            val srcMtime = item.file.lastModified()
+            return try {
+                val track = when (item.kind) {
+                    Kind.FITFILES_FIT -> fitDecode(item.file, Source.FITFILES_SCAN)
+                    Kind.IMPORT_FIT -> fitDecode(item.file, Source.FIT_IMPORT)
+                    Kind.IMPORT_GPX -> gpxParse(item.file)
+                } ?: return DecodedOrFail.Failed
+                val decimated = decimate(track)
+                if (decimated.points.size < 2) {
+                    // L-F1: a <2-point track is unusable/unraceable — and, since it decoded fully, this
+                    // is DETERMINISTIC (not transient), so mark it Invalid: the collector ledgers it
+                    // immediately so it isn't re-decoded on every subsequent import.
+                    Timber.w("import dropped %s: decimated to %d point(s)", item.file.name, decimated.points.size)
+                    DecodedOrFail.Invalid(item.file, srcSize, srcMtime)
+                } else {
+                    DecodedOrFail.Decoded(item.file, decimated, srcSize, srcMtime)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Timber.w(e, "import failed for %s", item.file.name)
                 DecodedOrFail.Failed
-            } else {
-                DecodedOrFail.Decoded(item.file, decimated, item.file.lastModified())
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Timber.w(e, "import failed for %s", item.file.name)
-            DecodedOrFail.Failed
         }
 
         try {
@@ -235,10 +272,20 @@ class HistoryImporter(
                 for (d in decoded) {
                     when (d) {
                         is DecodedOrFail.Failed -> failed++
+                        is DecodedOrFail.Invalid -> {
+                            // Permanently-invalid file: there is no track to store, so the
+                            // "mark only after the chunk flushes" rule (which exists to avoid
+                            // orphaning a decoded-but-unstored VALID ride on cancel) doesn't apply —
+                            // nothing here can be orphaned. The collector is single-threaded, so
+                            // mutating ledgerMap directly needs no lock; ledger.save() in the
+                            // finally persists it. Still counts as `failed` for this run's summary.
+                            failed++
+                            ledger.mark(ledgerMap, d.file, d.size, d.lastModified)
+                        }
                         is DecodedOrFail.Decoded -> {
                             chunk.add(d.track)
                             chunkLastModified.add(d.lastModified)
-                            chunkFiles.add(d.file)
+                            chunkPending.add(PendingMark(d.file, d.size, d.lastModified))
                         }
                     }
 
