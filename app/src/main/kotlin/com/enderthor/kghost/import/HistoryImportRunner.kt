@@ -82,6 +82,7 @@ object HistoryImportRunner {
                     lastScanSetter = { epoch ->
                         configManager.updateConfig { it.copy(lastScanEpoch = epoch) }
                     },
+                    processedLedgerFile = File(TrackStorage.tracksDir(appContext), "processed.json"),
                 )
                 importer.import(onlyNew = onlyNew).collect { _progress.value = it }
                 // Normal DONE: ask the host to refresh its track count once.

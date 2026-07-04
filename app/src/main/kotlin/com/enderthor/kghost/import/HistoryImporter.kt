@@ -44,6 +44,12 @@ class HistoryImporter(
     // before the run continues, otherwise N fire-and-forget writes can land out of order (a smaller
     // epoch winning) or swallow a failure, leaving lastScan stale (a re-run then reprocesses files).
     private val lastScanSetter: suspend (Long) -> Unit = {},
+    // Persistent record of already-decoded+stored files (path+size+mtime), so a re-import skips the
+    // expensive DECODE entirely for unchanged files instead of only deduping post-decode via
+    // sourceKey. Defaulted next to fitFilesDir purely so existing/unit tests that don't care about
+    // the ledger get a fresh, never-populated file; production always passes the real tracks dir
+    // (see HistoryImportRunner).
+    private val processedLedgerFile: File = File(fitFilesDir, ".processed_ledger.json"),
 ) {
 
     private enum class Kind { FITFILES_FIT, IMPORT_FIT, IMPORT_GPX }
@@ -52,9 +58,10 @@ class HistoryImporter(
 
     /** Outcome of decoding+decimating ONE file, produced by the decode workers and consumed by the
      *  single ordered collector. A [Failed] carries no data (its file was null/short/threw); the
-     *  policy mirrors the old inline body. */
+     *  policy mirrors the old inline body. [Decoded] also carries the source [File] so the collector
+     *  can mark it in the [ProcessedLedger] once it is buffered into a chunk. */
     private sealed interface DecodedOrFail {
-        data class Decoded(val track: RecordedTrack, val lastModified: Long) : DecodedOrFail
+        data class Decoded(val file: File, val track: RecordedTrack, val lastModified: Long) : DecodedOrFail
         object Failed : DecodedOrFail
     }
 
@@ -77,7 +84,16 @@ class HistoryImporter(
             ?.filter(::passesFilter)
             ?.forEach { workList.add(WorkItem(it, Kind.IMPORT_GPX)) }
 
-        val total = workList.size
+        // Ledger filter: drop files already decoded+stored, unchanged since (path, size, mtime) —
+        // these skip DECODE entirely, not just the post-decode sourceKey dedup. Ledger-skipped files
+        // are EXCLUDED from `total` so imported + skippedDuplicates + failed == total still holds
+        // (they are neither imported, skipped-duplicate, nor failed — they were never attempted).
+        val ledger = ProcessedLedger(processedLedgerFile)
+        val ledgerMap = ledger.load()
+        val skippedByLedger = workList.count { ledger.isProcessed(ledgerMap, it.file) }
+        val work = workList.filterNot { ledger.isProcessed(ledgerMap, it.file) }
+        val total = work.size
+        if (skippedByLedger > 0) Timber.d("import: ledger skipped %d already-processed files", skippedByLedger)
         emit(ImportProgress(ImportProgress.Phase.SCANNING, current = 0, total = total, 0, 0, 0))
 
         // --- PARSING ---
@@ -105,6 +121,11 @@ class HistoryImporter(
         val chunkLastModified = ArrayList<Long>(FLUSH_EVERY)
         // L-F2: highest lastModified among files whose decoded tracks have been FLUSHED so far.
         var maxFlushedLastModified = Long.MIN_VALUE
+        // Files that successfully decoded (reached a chunk), to be marked in the ledger + saved once
+        // in the finally below — alongside sink.commit() so a cancel still persists the ledger for
+        // work already buffered, same as the sink already persists flushed chunks. Failures are never
+        // added here, so they keep retrying on the next run.
+        val processedFiles = HashSet<File>()
 
         // Flush the current chunk into the store, fold its counts into the running totals, advance
         // lastScan past the flushed files (success-only), and clear the buffer. Called per full
@@ -140,7 +161,7 @@ class HistoryImporter(
                 Timber.w("import dropped %s: decimated to %d point(s)", item.file.name, decimated.points.size)
                 DecodedOrFail.Failed
             } else {
-                DecodedOrFail.Decoded(decimated, item.file.lastModified())
+                DecodedOrFail.Decoded(item.file, decimated, item.file.lastModified())
             }
         } catch (e: CancellationException) {
             throw e
@@ -161,7 +182,7 @@ class HistoryImporter(
 
                 // Producer: feed every work item, then close so workers drain and exit.
                 launch {
-                    workList.forEach { items.send(it) }
+                    work.forEach { items.send(it) }
                     items.close()
                 }
                 // Workers: decode in parallel; ensureActive() before each file bounds cancel latency
@@ -201,6 +222,7 @@ class HistoryImporter(
                         is DecodedOrFail.Decoded -> {
                             chunk.add(d.track)
                             chunkLastModified.add(d.lastModified)
+                            processedFiles.add(d.file)
                         }
                     }
 
@@ -230,6 +252,13 @@ class HistoryImporter(
             // the flushed <id>.json files are always reflected in the aggregate bookkeeping. A hard
             // process kill (no finally) leaves a stale index that startup reconcile rebuilds.
             sink.commit()
+            // Mark every successfully-decoded file in the ledger and persist it ONCE, alongside the
+            // sink commit above, so a cancel still keeps the ledger in sync with whatever was
+            // buffered/flushed. Failures were never added to processedFiles, so they keep retrying.
+            if (processedFiles.isNotEmpty()) {
+                processedFiles.forEach { ledger.mark(ledgerMap, it) }
+                ledger.save(ledgerMap)
+            }
         }
 
         // --- DONE ---
