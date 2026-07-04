@@ -194,10 +194,21 @@ class TrackStore(private val dir: File) {
             return added
         }
 
-        /** Persist the accumulated index + sourcekeys once (fsynced). Idempotent. */
+        /** Persist the accumulated index + sourcekeys once (fsynced), UNION-MERGED onto the CURRENT
+         *  on-disk state rather than overwritten from this sink's stale seed. [known]/[index] are
+         *  seeded once at [openBulkSink] and held for the whole import; if a concurrent [add] (e.g.
+         *  a ride finishing mid-import) writes its own index entry + sourceKey to disk between
+         *  chunks, a plain overwrite here would clobber that entry. Reading the RAW on-disk snapshot
+         *  ([readSnapshot], not [readPathCellSnapshot] — the seed already migrated the legacy index,
+         *  so commit must not re-trigger that rebuild) and unioning it with this sink's accumulated
+         *  additions preserves a concurrent add's entry either way. Idempotent: a second commit
+         *  unions the same sink entries onto disk again, same result. */
         fun commit() = synchronized(indexLock) {
-            writeSnapshot(index.snapshot())
-            writeSourceKeys(known)
+            val onDiskIndex = readSnapshot()
+            val onDiskKeys = readSourceKeys()
+            val merged = SpatialIndex(INDEX_PRECISION, onDiskIndex).apply { addAll(index.snapshot()) }.snapshot()
+            writeSnapshot(merged)
+            writeSourceKeys(onDiskKeys + known)
         }
     }
 
