@@ -154,21 +154,22 @@ class GradePaceTest {
     }
 
     @Test fun `a stop inside one stretch is clipped instead of laundering the whole bin`() {
-        // 4 km flat at 8 m/s (0.125 s/m) with a 45 s stop on one 20 m step near the end. Over the 100 m
-        // window that stop reads 1.74 m/s — above AGG_MIN_SPEED_MS, so a window-level clip never fires and
-        // the stretch records 0.575 s/m. Clipped at the STEP it costs the bin ~37 s over 3.9 km.
+        // 4 km flat at 8 m/s (0.125 s/m) with a 1200 s cafe stop on one 20 m step near the end. Clipped at
+        // the STEP the stop costs ~37.5 s over 3.92 km -> ~0.1346 s/m; left unclipped the same stop adds
+        // its full 1200 s -> ~0.4311 s/m. That 3.4x separation means the bound below only holds when the
+        // clip is actually firing (delete the clip line in `build` and this test must fail).
         val stopStep = 198 // step 197 -> 198, inside the last few windows
         val pts = (0 until 201).map { i ->
             TrackPointDto(
                 lat = 41.4 + i * 0.0001, lng = 2.1,
                 distanceM = i * 20.0,
-                timeS = i * 2.5 + if (i >= stopStep) 45.0 else 0.0,
+                timeS = i * 2.5 + if (i >= stopStep) 1200.0 else 0.0,
                 eleM = 0.0,
             )
         }
         val g = GradePace.build(listOf(RecordedTrack(id = "stop", startedAtEpoch = 1L, points = pts)))
         val p = g.pace(0.0, GhostPick.AVERAGE)!!
-        assertTrue("a single stop must not launder the flat bin: $p vs 0.125 s/m", p < 0.125 * 1.15)
+        assertTrue("a cafe stop must not launder the flat bin: $p vs clipped ~0.1346 s/m", p < 0.2)
         assertTrue(p >= 0.125)
     }
 
@@ -183,5 +184,33 @@ class GradePaceTest {
         assertNull("a device-off gap is not 3 km of 10% climbing", g.pace(10.0, GhostPick.AVERAGE))
         assertNotNull("the real riding before the gap still counts", g.pace(0.0, GhostPick.AVERAGE))
         assertEquals(3920.0, g.coveredM, 1e-6)
+    }
+
+    @Test fun `a gap in the middle does not launder its straddled bin from either side's flat pace`() {
+        // 4 km flat @ 8 m/s (ele 0), then a device-off jump to distance 7000 / ele 300, then normal flat
+        // riding resumes at ele ~300. The jump step itself is dropped by the DROPOUT_GAP_M guard, but
+        // without a straddle guard the next few steps still take their trailing window edge from BEFORE the
+        // gap: the step to 7020 sees dd = 7020 - 4000 = 3020, grade = 300 / 3020 * 100 = 9.93% -> bin 10,
+        // pouring that step's real FLAT pace into a bogus "10% climb" bin. Six such tracks pour ~480 m into
+        // bin 10 -- enough to clear GRADE_MIN_BIN_M and answer ~0.125 s/m for a 10% wall.
+        fun trackWithMidGap(id: String, epoch: Long): RecordedTrack {
+            val flatA = (0 until 201).map { i ->
+                TrackPointDto(lat = 41.4 + i * 0.0001, lng = 2.1, distanceM = i * 20.0, timeS = i * 2.5, eleM = 0.0)
+            }
+            val jump = TrackPointDto(lat = 41.5, lng = 2.1, distanceM = 7000.0, timeS = 800.0, eleM = 300.0)
+            val flatB = (1..50).map { k ->
+                TrackPointDto(
+                    lat = 41.5 + k * 0.0001, lng = 2.1,
+                    distanceM = 7000.0 + k * 20.0, timeS = 800.0 + k * 2.5, eleM = 300.0,
+                )
+            }
+            return RecordedTrack(id = id, startedAtEpoch = epoch, points = flatA + jump + flatB)
+        }
+        val g = GradePace.build((1..6).map { trackWithMidGap("gap$it", it.toLong()) })
+        assertNull("a gap-straddling window must not invent a 10% climb", g.pace(10.0, GhostPick.AVERAGE))
+        assertEquals(
+            "the real flat pace either side of the gap must still be answered",
+            0.125, g.pace(0.0, GhostPick.AVERAGE)!!, 1e-3,
+        )
     }
 }

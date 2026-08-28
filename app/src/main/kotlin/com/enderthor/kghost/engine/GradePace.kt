@@ -121,6 +121,13 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                     val backEle = back.eleM ?: continue
                     val dd = here.distanceM - back.distanceM
                     if (dd < GRADE_WINDOW_M) continue
+                    // Reject a window that straddles a dropped gap: `j` is the newest point at least
+                    // GRADE_WINDOW_M back, so on a contiguous track dd < GRADE_WINDOW_M + stepM, and every
+                    // step longer than DROPOUT_GAP_M is already rejected above — so a legitimate dd can
+                    // never exceed this. A bigger dd means the window's trailing edge is still sitting on
+                    // the far side of a rejected gap, dividing the gap's altitude jump by the gap's
+                    // distance and landing a bogus gradient (with the step's real pace) in the wrong bin.
+                    if (dd > GRADE_WINDOW_M + TrackSamples.DROPOUT_GAP_M) continue
                     val gradePct = (ele - backEle) / dd * 100.0
                     // DROP an out-of-range gradient rather than clamping it into the end bin: a barometric
                     // reset reads as +45% and would otherwise pour real road pace into bin 20, mixing a GPS
