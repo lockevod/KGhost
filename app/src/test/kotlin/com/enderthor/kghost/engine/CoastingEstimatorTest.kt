@@ -111,11 +111,13 @@ class CoastingEstimatorTest {
         // Rolling again, but DISTANCE has not caught up yet → the coast branch fires.
         c.update(rawDistanceM = 1000.0, speedMs = 0.8, elapsedS = 121.0)
 
-        // One tick of movement (1 s × the last moving speed), NOT 121 s of it.
-        assertEquals(1006.0, c.effectiveDistanceM, 1e-6)
+        // ONE tick of movement at the speed actually REPORTED (0.8 m/s), not 121 s of it, and not the
+        // remembered 6 m/s: the dead reckoning integrates the speed stream tick by tick.
+        assertEquals(1000.8, c.effectiveDistanceM, 1e-6)
         assertEquals(1.0, c.coastingSeconds, 1e-6)          // the alert clock, not 121 s
         assertEquals(CoastQuality.COASTING, c.quality)      // NOT LONG_LOSS → no false "GPS lost"
-        // Reverting the re-anchor gives 1000 + 6 × 121 = 1726 m: ~726 phantom metres in one tick.
+        // Ageing the anchor across the stop instead gives 1000 + 6 × 121 = 1726 m: ~726 phantom
+        // metres in one tick.
     }
 
     @Test fun `a pause (elapsed frozen) injects no phantom coast distance on resume`() {

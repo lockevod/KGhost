@@ -107,9 +107,11 @@ class AdvNumPipelineTest {
         // TRUTH: 1200 m ridden on a 0.2 s/m road in 200 s of MOVING time = +40 s (the stop is frozen out).
         val correct = 40.0
         println("LOCK 1: rider reads ${"%.0f".format(r.gap)}s AHEAD, truth is ${"%.0f".format(correct)}s (was 184s)")
-        // The coast now spans ONE tick, not the whole stop: 6 m/s * 1 s of out-of-phase ride-elapsed.
-        // (It is still the LAST MOVING speed, deliberately — that is the whole point of dead reckoning.)
-        assertEquals("the coast can only cover the one out-of-phase tick", 6.0, phantom, 0.01)
+        // The coast now spans ONE tick, not the whole stop, and it integrates the speed the device
+        // actually REPORTS on that tick (0.8 m/s) rather than the remembered 6 m/s — so the one
+        // out-of-phase tick is worth 0.8 m, not 6 m. (Was 6.0 m while the coast multiplied the last
+        // moving speed by the frozen span; the number the rider reads is identical either way.)
+        assertEquals("the coast can only cover the one out-of-phase tick", 0.8, phantom, 0.01)
         // ...and LOCK 2 means even that one phantom metre gets no historical verdict, so the number is exact.
         assertEquals("the rider reads the truth", correct, r.gap, 0.5)
     }
@@ -280,8 +282,15 @@ class AdvNumPipelineTest {
         rideS(600)
         println("LOCK 5: 6 h at exactly historical pace, $stops stops, $dropouts dropouts -> " +
             "gap=${"%.0f".format(r.gap)}s (truth 0 s; was +1060s, all in the rider's favour)")
-        // Zero drift, to the bit: every stop re-anchors the coast, and every blind metre is neutral-filled.
-        assertEquals("a whole day of stops and dropouts must not drift at all", 0.0, r.gap, 1e-6)
+        // Drift is bounded and ONE-SIGNED AGAINST the rider: the only residue is the out-of-phase
+        // pull-away tick at each stop, whose 0.8 m is neutral-filled (LOCK 2) and therefore never
+        // earns its historical credit — 0.14 s per stop here, 1.68 s over six hours and 12 stops.
+        // (It read exactly 0.0 while the coast used the remembered 6 m/s, but only by luck: that
+        // OVERSHOT the real 5 m, and the overshoot froze the moving-time clock for exactly one tick.
+        // Under-coasting is the conservative side of the same coin and is what bounds a parked bike
+        // whose GPS speed noise sits above the moving threshold — see CoastingEstimator's KDoc.)
+        assertTrue("a whole day of stops and dropouts drifts less than 2 s", kotlin.math.abs(r.gap) < 2.0)
+        assertTrue("and never in the rider's favour", r.gap <= 0.0)
     }
 
     // =============================================================================================
