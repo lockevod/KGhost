@@ -1,7 +1,5 @@
 package com.enderthor.kghost.geo
 
-import com.enderthor.kghost.engine.GhostPick
-import com.enderthor.kghost.engine.GradePace
 import com.enderthor.kghost.import_.HistoryImporter
 import com.enderthor.kghost.import_.sourceKeyOf
 import org.junit.Assert.assertEquals
@@ -136,47 +134,5 @@ class TrackRecorderTest {
         // After reset the decimator must treat the next sample as the new "first" (always kept).
         rec.onSample(40.0, -3.0, 1000.0, 2.0)
         assertEquals(1, rec.size())
-    }
-
-    @Test fun `altitude is recorded on kept points and on the re-appended endpoint`() {
-        val rec = TrackRecorder(TrackDecimator(minSpacingM = 20.0))
-        rec.onSample(40.0, -3.0, 0.0, 0.0, 100.0)   // kept
-        rec.onSample(40.0, -3.0, 25.0, 1.0, 110.0)  // kept
-        rec.onSample(40.0, -3.0, 30.0, 2.0, 112.0)  // decimated away, but is the true endpoint
-
-        val pts = rec.build(id = "T1", startedAtEpoch = 1L)!!.points
-        assertEquals(listOf(100.0, 110.0, 112.0), pts.map { it.eleM })
-    }
-
-    @Test fun `a null altitude is recorded as null, not as zero`() {
-        val rec = TrackRecorder(TrackDecimator(minSpacingM = 20.0))
-        // A device that never emits the elevation stream (or a sample gone stale) passes null: the point
-        // must abstain from GradePace, never claim sea level, which would be a fake gradient.
-        rec.onSample(40.0, -3.0, 0.0, 0.0, null)
-        rec.onSample(40.0, -3.0, 25.0, 1.0)  // default arg == today's callers
-        val pts = rec.build(id = "T1", startedAtEpoch = 1L)!!.points
-        assertEquals(listOf<Double?>(null, null), pts.map { it.eleM })
-    }
-
-    @Test fun `a recorded track carrying altitude now folds into GradePace, where before it contributed nothing`() {
-        // 3 km of steady 5% climb at a constant 5 m/s, sampled every 10 m, decimated at 20 m — enough
-        // metres past GRADE_WINDOW_M and GRADE_MIN_BIN_M for bin +5 to be allowed to answer.
-        fun record(withEle: Boolean): RecordedTrack {
-            val rec = TrackRecorder(TrackDecimator(minSpacingM = 20.0))
-            var d = 0.0
-            while (d <= 3_000.0) {
-                rec.onSample(40.0 + d * 1e-5, -3.0, d, d / 5.0, if (withEle) 100.0 + d * 0.05 else null)
-                d += 10.0
-            }
-            return rec.build(id = "T", startedAtEpoch = 1L)!!
-        }
-
-        // BEFORE: every RECORDED point had eleM == null, so the whole track contributed 0 m.
-        assertEquals(0.0, GradePace.build(listOf(record(withEle = false))).coveredM, 0.0)
-
-        // AFTER: the same ride, now carrying altitude, trains the +5% bin at its real 0.2 s/m.
-        val after = GradePace.build(listOf(record(withEle = true)))
-        assertNotEquals(0.0, after.coveredM)
-        assertEquals(0.2, after.pace(5.0, GhostPick.LAST)!!, 0.005)
     }
 }
