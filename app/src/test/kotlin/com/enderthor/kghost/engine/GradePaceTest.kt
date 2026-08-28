@@ -186,6 +186,52 @@ class GradePaceTest {
         assertEquals(3920.0, g.coveredM, 1e-6)
     }
 
+    @Test fun `a long track dominates a short errand ride over the same flat bin`() {
+        // The motivating case: 100 km at 0.12 s/m, then a 5 km errand at 0.20 s/m, both flat. Unweighted
+        // (the old fold) that's a plain mean of the two per-track samples = 0.16 s/m — a 33% error on the
+        // bin 95% of the metres say is 0.12. Metre-weighted: (0.12*99920 + 0.20*4920) / (99920+4920) =
+        // 0.12375429... — within 0.4% of the long track's own pace, as it should be.
+        val g = GradePace.build(
+            listOf(
+                track("century", n = 5001, stepM = 20.0, gradePct = 0.0, speedMs = 1.0 / 0.12),
+                track("errand", n = 251, stepM = 20.0, gradePct = 0.0, speedMs = 5.0, startEpoch = 2L),
+            )
+        )
+        val ema = g.pace(0.0, GhostPick.AVERAGE)!!
+        assertEquals(0.12375429225486455, ema, 1e-9)
+        assertTrue("the long track must dominate, not split the difference at 0.16", ema < 0.13)
+    }
+
+    @Test fun `two tracks at or above the trust floor fold exactly as the old unweighted EMA did`() {
+        // Regression guard: once w == AGG_ALPHA for both tracks (each contributes >= GRADE_MIN_BIN_M to the
+        // bin), the new weighted update `w*tpm + (1-w)*r.ema` is textually the old `AGG_ALPHA*tpm +
+        // (1-AGG_ALPHA)*r.ema` — this proves the change only bites tracks below the trust floor.
+        // 4 identical 0.2 s/m rides (3920 m each) seed the bin at ema = 0.2 exactly, count = 4 (EMA phase
+        // from here on). Then: track5 = 420 m at 0.1 s/m -> ema = 0.25*0.1 + 0.75*0.2 = 0.175.
+        // track6 = 1920 m at 0.5 s/m -> ema = 0.25*0.5 + 0.75*0.175 = 0.25625.
+        val seeds = (1..4).map { track("seed$it", n = 201, stepM = 20.0, gradePct = 8.0, speedMs = 5.0, startEpoch = it.toLong()) }
+        val track5 = track("t5", n = 26, stepM = 20.0, gradePct = 8.0, speedMs = 10.0, startEpoch = 5L)
+        val track6 = track("t6", n = 101, stepM = 20.0, gradePct = 8.0, speedMs = 2.0, startEpoch = 6L)
+        val g = GradePace.build(seeds + track5 + track6)
+        assertEquals(0.25625, g.pace(8.0, GhostPick.AVERAGE)!!, 1e-9)
+    }
+
+    @Test fun `the seed phase is metre-weighted, not a plain average of the two tracks`() {
+        // Two tracks under AGG_SEED_LAPS history: a 20 km ride at 1/6 s/m and a 1 km ride at 0.5 s/m over
+        // the same 2% bin. Metre-weighted: (1/6*19920 + 0.5*920) / (19920+920) = 0.18138195... The plain
+        // arithmetic mean of the two paces would be (1/6 + 0.5)/2 = 0.33333... — far enough apart (0.181 vs
+        // 0.333) that this assertion actually discriminates between the two formulas.
+        val g = GradePace.build(
+            listOf(
+                track("big", n = 1001, stepM = 20.0, gradePct = 2.0, speedMs = 6.0),
+                track("small", n = 51, stepM = 20.0, gradePct = 2.0, speedMs = 2.0, startEpoch = 2L),
+            )
+        )
+        val ema = g.pace(2.0, GhostPick.AVERAGE)!!
+        assertEquals(0.1813819577735125, ema, 1e-9)
+        assertTrue("must differ from the plain mean of 0.33333", ema < 0.25)
+    }
+
     @Test fun `a gap in the middle does not launder its straddled bin from either side's flat pace`() {
         // 4 km flat @ 8 m/s (ele 0), then a device-off jump to distance 7000 / ele 300, then normal flat
         // riding resumes at ele ~300. The jump step itself is dropped by the DROPOUT_GAP_M guard, but
