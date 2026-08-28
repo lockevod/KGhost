@@ -28,6 +28,8 @@ enum class CoastQuality {
  *     Remembers `lastChangedDistanceM`, `lastChangeElapsedS`, and the last moving speed.
  *  2. **Frozen + essentially stopped** (`speed < minMovingMs`): legitimate stop → effective = raw
  *     (frozen), quality = LIVE, coasting = 0 (the gap stays valid because the ghost keeps moving).
+ *     The coast anchor is RE-ANCHORED here too, so a stop can never age it and later be dead-reckoned
+ *     away as one giant phantom jump (see the branch comment).
  *  3. **Frozen + moving (or speed unavailable)**: GPS dropout → COAST: effective =
  *     `lastChangedDistanceM + lastMovingSpeedMs * coastingSeconds`. quality = COASTING while
  *     `coastingSeconds * 1000 <= coastWindowMs`, else LONG_LOSS. Either way we keep extrapolating —
@@ -104,6 +106,16 @@ class CoastingEstimator(
 
         if (speedMs != null && speedMs < minMovingMs) {
             // Legitimate stop (e.g. red light): frozen distance is valid, no extrapolation.
+            // RE-ANCHOR the coast on every stopped tick. Without this the anchor keeps ageing through
+            // a stop that ELAPSED_TIME still counts (auto-pause is a user setting, and many riders
+            // leave it off), so the first tick that reports speed >= minMovingMs — or a null speed —
+            // before the DISTANCE stream has re-emitted would coast
+            // `lastMovingSpeedMs * the WHOLE stop` in ONE tick: a 2 min light minted ~726 phantom
+            // metres, which the gap engine then charged at historical pace and never refunded.
+            // Anchoring to the raw (frozen) value is exactly what we publish this tick, so the coast
+            // always resumes from the last distance the rider actually saw.
+            lastChangedDistanceM = rawDistanceM
+            lastChangeElapsedS = elapsedS
             effectiveDistanceM = rawDistanceM
             quality = CoastQuality.LIVE
             coastingSeconds = 0.0
