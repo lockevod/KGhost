@@ -109,11 +109,14 @@ class AdversarialGhostIntegratorTest {
     }
 
     // ---------------------------------------------------------------------------------------------
-    // #4  restore() does not reset prevElapsedS. Today the resume tick forces dd==0 so it cannot bite,
-    //     but a SECOND restore on a live integrator computes de across the resume discontinuity.
-    //     This documents the landmine: restore() clears bcDist/bcTime/lastRiderDist but not prevElapsedS.
+    // #4  restore() DOES reset prevElapsedS (to NaN, so the resume tick's `de > 0.0` check is false and
+    //     dd is forced to 0 on that tick regardless). This pins that the tick AFTER the resume tick reads
+    //     a correct prevElapsedS (the resume tick's own elapsedS, assigned at the bottom of onTick) —
+    //     a future edit that moves the `prevElapsedS = elapsedS` assignment above the resume branch (so
+    //     it runs before pendingResumeLead is consumed, and gets clobbered by restore()'s NaN reset, or
+    //     reordered some other way that stops the resume tick from stamping prevElapsedS) fails here.
     // ---------------------------------------------------------------------------------------------
-    @Test fun `restore leaves a stale prevElapsedS behind`() {
+    @Test fun `neutral fill survives the resume discontinuity`() {
         val g = newInt()
         // Live race, race clock at 1000 s.
         for (i in 0..100) g.onTick(i * 10.0, 0.0, i * 10.0, 90.0, i * 10.0) { _, _, _ -> null }
@@ -121,9 +124,9 @@ class AdversarialGhostIntegratorTest {
         g.restore(leadS = 60.0, lastRiderDist = 1000.0)
         g.onTick(1000.0, 0.0, 1000.0, 90.0, 0.0) { _, _, _ -> null }
         assertEquals(60.0, g.gapTimeS, 1e-6) // the guarded path is fine
-        // Second restore WITHOUT the dd==0 protection being enough: the tick after the resume tick
-        // reads prevElapsedS from the resume tick, which is correct. Assert that, so a future edit that
-        // moves the `prevElapsedS = elapsedS` assignment above the resume branch fails here.
+        // The tick after the resume tick reads prevElapsedS from the resume tick, which is correct. Assert
+        // that, so a future edit that moves the `prevElapsedS = elapsedS` assignment above the resume
+        // branch fails here.
         g.onTick(1010.0, 0.0, 1010.0, 90.0, 1.0) { _, _, _ -> null }
         assertEquals("neutral fill must survive the resume discontinuity", 60.0, g.gapTimeS, 1e-6)
     }

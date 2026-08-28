@@ -12,13 +12,24 @@ import java.io.File
  * rather than failing loudly — the same behaviour [B2Sergi1ReplayTest] had inline before this was
  * extracted so [GradeFillReplayTest] could share it instead of duplicating it.
  *
- * Pull it to the repo root with: adb pull /sdcard/FitFiles/<ride>.fit
- * /Users/sergi/AndroidStudioProjects/KGhost/sergi1.fit
+ * Pull it to the repo root with: adb pull /sdcard/FitFiles/<ride>.fit sergi1.fit
  */
 fun loadSergi1(): RecordedTrack {
-    val file = File(System.getenv("SERGI1_FIT") ?: "/Users/sergi/AndroidStudioProjects/KGhost/sergi1.fit")
+    val file = File(System.getenv("SERGI1_FIT") ?: File(repoRoot(), "sergi1.fit").path)
     assumeTrue("sergi1.fit present at ${file.path}", file.exists())
     val track = FitDecoder.decode(file, Source.FIT_IMPORT)
     assumeTrue("sergi1.fit decoded", track != null)
     return requireNotNull(track)
+}
+
+/** Walk up from the JVM working directory to find the repo root (marked by settings.gradle.kts), so the
+ *  fixture path isn't gated to gradle's test-task working directory (module dir vs. repo root) or to any
+ *  one machine's home directory. Falls back to the starting directory if no marker is found nearby. */
+private fun repoRoot(): File {
+    var dir = File(System.getProperty("user.dir") ?: ".").absoluteFile
+    repeat(6) {
+        if (File(dir, "settings.gradle.kts").exists()) return dir
+        dir = dir.parentFile ?: return dir
+    }
+    return dir
 }
