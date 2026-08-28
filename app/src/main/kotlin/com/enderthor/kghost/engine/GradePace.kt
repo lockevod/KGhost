@@ -125,16 +125,19 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                     while (j < i - 1 && here.distanceM - pts[j + 1].distanceM >= GRADE_WINDOW_M) j++
                     val stepM = here.distanceM - prev.distanceM
                     val stepT = here.timeS - prev.timeS
-                    if (stepM <= 0.0 || stepT <= 0.0) continue
                     if (stepM > TrackSamples.DROPOUT_GAP_M) {
                         // A device-off / tunnel jump, not riding. RESTART the gradient window here: left
                         // alone, the trailing edge stays on the far side of the gap for the next ~100 m and
                         // divides the gap's whole altitude jump by (gap + a few steps), landing a bogus
                         // gradient — carrying the step's real, flat pace — in a steep bin. Costs the first
-                        // GRADE_WINDOW_M after every gap, which is the right trade.
+                        // GRADE_WINDOW_M after every gap, which is the right trade. Checked BEFORE the
+                        // stepT guard below: a dropout's landing point can carry a duplicate/backward
+                        // timestamp (stepT <= 0), and that must still restart the window — a timestamp
+                        // fault must never suppress a distance-based dropout restart.
                         j = i
                         continue
                     }
+                    if (stepM <= 0.0 || stepT <= 0.0) continue
                     val stepSpeed = stepM / stepT
                     if (stepSpeed > AGG_MAX_SPEED_MS) continue       // a GPS spike, not riding
                     // Dwell clip over the STEP, exactly as TrackSamples does. Clipping over the 100 m window

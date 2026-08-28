@@ -313,4 +313,35 @@ class GradePaceTest {
             0.125, g.pace(0.0, GhostPick.AVERAGE)!!, 1e-3,
         )
     }
+
+    @Test fun `a dropout whose landing point duplicates the previous timestamp still restarts the window`() {
+        // Same shape as the mid-track gap above, but the jump point's timeS DUPLICATES the last flat
+        // point's timeS (stepT == 0), a real failure class (backward/duplicate clock on the landing
+        // point). If the stepT<=0 guard ran before the stepM>DROPOUT_GAP_M guard, it would `continue`
+        // without restarting the window (j stays on the pre-gap side), reopening the exact bin-10 leak
+        // the mid-track-gap test guards against.
+        fun trackWithDupTimestampGap(id: String, epoch: Long): RecordedTrack {
+            val flatA = (0 until 201).map { i ->
+                TrackPointDto(lat = 41.4 + i * 0.0001, lng = 2.1, distanceM = i * 20.0, timeS = i * 2.5, eleM = 0.0)
+            }
+            // timeS = 500.0 duplicates flatA's last point (i=200 -> timeS = 500.0): stepT == 0 here.
+            val jump = TrackPointDto(lat = 41.5, lng = 2.1, distanceM = 7000.0, timeS = 500.0, eleM = 300.0)
+            val flatB = (1..50).map { k ->
+                TrackPointDto(
+                    lat = 41.5 + k * 0.0001, lng = 2.1,
+                    distanceM = 7000.0 + k * 20.0, timeS = 500.0 + k * 2.5, eleM = 300.0,
+                )
+            }
+            return RecordedTrack(id = id, startedAtEpoch = epoch, points = flatA + jump + flatB)
+        }
+        val g = GradePace.build((1..6).map { trackWithDupTimestampGap("dup$it", it.toLong()) })
+        assertNull(
+            "a duplicate-timestamp dropout landing must not invent a 10% climb",
+            g.pace(10.0, GhostPick.AVERAGE),
+        )
+        assertEquals(
+            "the real flat pace either side of the gap must still be answered",
+            0.125, g.pace(0.0, GhostPick.AVERAGE)!!, 1e-3,
+        )
+    }
 }
