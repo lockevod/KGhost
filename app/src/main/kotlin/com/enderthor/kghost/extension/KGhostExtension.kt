@@ -331,8 +331,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          */
         private const val ROUTE_END_GIVEUP_MS = 20_000L
 
-        /** How often the diagnostic-log uploader sends the new tail of the current ride's log. */
-        private const val LOG_SEND_INTERVAL_MS = 20 * 60_000L
+        /** How often the diagnostic-log uploader sends the new tail of the current ride's log. Kept
+         *  short so the tail streams out DURING the ride and the ride-end flush stays tiny — a long
+         *  interval piles the whole last window onto the finish, exactly when the other extensions
+         *  (KPower/KSafe) are also uploading, and the sends contend for the uplink. */
+        private const val LOG_SEND_INTERVAL_MS = 5 * 60_000L
 
         /**
          * Max BYTES per uploaded chunk. The Karoo `httpRequest` body crosses the host Binder
@@ -344,6 +347,18 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
 
         /** Chunks per PERIODIC cycle, so one window can't monopolise the link draining a huge backlog. */
         private const val LOG_PERIODIC_MAX_CHUNKS = 6
+
+        /** Retry cadence while the uploader is BEHIND (a send failed/offline, or the backlog didn't fully
+         *  drain this cycle). Much shorter than [LOG_SEND_INTERVAL_MS] so a no-coverage window's backlog
+         *  is cleared as soon as the Companion is back in range — instead of sitting until the next slow
+         *  cycle and dumping onto the ride-end flush. Relaxes back to the normal interval once caught up. */
+        private const val LOG_RETRY_INTERVAL_MS = 60_000L
+
+        /** Consecutive SEND_FAILED cycles (reachable, but the upload failed with no progress) after which
+         *  the loop drops back to the normal cadence. Caps a doomed/rejected send (bad token, sustained
+         *  429) at ~this many expensive 60s probe+POST retries instead of hammering all ride. Offline
+         *  (RETRY) never trips this, so genuine coverage loss keeps its fast catch-up. */
+        private const val LOG_MAX_STALL_RETRIES = 5
 
         /** Device model sanitised for the upload filename/caption (e.g. "Karoo 3" → "Karoo-3"). */
         private val DEVICE_LABEL: String by lazy {
@@ -669,10 +684,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private var sentLogFilePath: String? = null
     @Volatile
     private var logChunkSeq: Int = 0
-    // Guards against a periodic drain and the ride-end drain running concurrently (both advance
-    // sentLogBytes), which could skip or duplicate a chunk.
-    @Volatile
-    private var logSendInFlight = false
+    // Serializes the periodic drain and the ride-end drain (both advance sentLogBytes → could skip or
+    // duplicate a chunk if interleaved). A MUTEX, not a boolean skip-guard: the ride-end flush must WAIT
+    // for an in-flight periodic and then run, never be silently skipped (and left un-retried once the
+    // tick — and so the periodic loop — has stopped).
+    private val logSendMutex = Mutex()
 
     // Debounce for non-route nav-state teardown. The host emits transient Idle/NavigatingToDestination
     // blips between NavigatingRoute re-emits; this delayed job clears route mode only if no route comes
@@ -977,14 +993,38 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // starving the periodic send on a flaky link. Survives reconnects untouched.
         if (logSendJob?.isActive == true) return
         logSendJob = scope.launch {
+            var delayMs = LOG_SEND_INTERVAL_MS
+            var sendFails = 0 // consecutive SEND_FAILED cycles → backoff
             while (true) {
-                delay(LOG_SEND_INTERVAL_MS)
-                if (!FileLogTree.enabled) continue
-                if (tickJob?.isActive != true) continue // only during an active ride
-                sendLogTail("periodic", LOG_PERIODIC_MAX_CHUNKS)
+                delay(delayMs)
+                if (!FileLogTree.enabled || tickJob?.isActive != true) {
+                    delayMs = LOG_SEND_INTERVAL_MS // idle / no active ride → relax to the normal cadence
+                    sendFails = 0
+                    continue
+                }
+                delayMs = when (sendLogTail("periodic", LOG_PERIODIC_MAX_CHUNKS)) {
+                    // Nothing left → relax. RETRY (offline / made progress) → retry SOON to clear the
+                    // backlog the moment the link returns; both reset the failure streak.
+                    LogSendOutcome.CAUGHT_UP -> { sendFails = 0; LOG_SEND_INTERVAL_MS }
+                    LogSendOutcome.RETRY -> { sendFails = 0; LOG_RETRY_INTERVAL_MS }
+                    // Reachable but the send keeps failing with no progress → retry fast a few times,
+                    // then fall back to the normal cadence so a doomed/rejected upload can't hammer.
+                    LogSendOutcome.SEND_FAILED ->
+                        if (++sendFails >= LOG_MAX_STALL_RETRIES) LOG_SEND_INTERVAL_MS else LOG_RETRY_INTERVAL_MS
+                }
             }
         }
     }
+
+    /** Outcome of one [sendLogTail] cycle, driving the [startLogSendLoop] retry cadence + backoff.
+     *  - [CAUGHT_UP]: nothing left to send (or can't) → relax to the normal interval.
+     *  - [RETRY]: more to send and the link looks usable — OFFLINE (cheap probe bail, catch coverage
+     *    returning) OR a partial drain that made progress → retry SOON; does NOT count toward backoff,
+     *    so a real no-coverage window keeps draining fast the moment it clears.
+     *  - [SEND_FAILED]: reachable but the upload itself failed with ZERO progress (a doomed/rejected
+     *    send — bad token, 429…) → retry soon, but back off after [LOG_MAX_STALL_RETRIES] so it can't
+     *    hold an expensive 60s probe+POST loop for the whole ride. */
+    private enum class LogSendOutcome { CAUGHT_UP, RETRY, SEND_FAILED }
 
     /**
      * Uploads the part of the current ride's log not yet sent ([sentLogBytes]) to the developer's
@@ -1004,12 +1044,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
      * retries from the same point next cycle; an in-flight guard stops the periodic and ride-end drains
      * overlapping, and [sentLogFilePath] resets the offset when the ride file changed under us.
      */
-    private suspend fun sendLogTail(prefix: String, maxChunks: Int) = withContext(Dispatchers.IO) {
-        if (!FileLogTree.enabled || !::karooSystem.isInitialized) return@withContext
-        if (logSendInFlight) return@withContext
-        val file = FileLogTree.currentLogFile() ?: return@withContext
-        logSendInFlight = true
-        try {
+    private suspend fun sendLogTail(prefix: String, maxChunks: Int): LogSendOutcome = withContext(Dispatchers.IO) {
+        if (!FileLogTree.enabled || !::karooSystem.isInitialized) return@withContext LogSendOutcome.CAUGHT_UP
+        val file = FileLogTree.currentLogFile() ?: return@withContext LogSendOutcome.CAUGHT_UP
+        // A concurrent send (periodic vs ride-end) WAITS here instead of being skipped — see logSendMutex.
+        logSendMutex.withLock {
             // A new (or rotated) ride file → start its offset/sequence from the top.
             if (file.path != sentLogFilePath) {
                 sentLogFilePath = file.path
@@ -1020,10 +1059,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             FileLogTree.requestFlush()
             delay(400)
             // Snapshot the length now; anything appended after is next call's tail.
-            val len = runCatching { file.length() }.getOrNull() ?: return@withContext
-            if (len <= sentLogBytes) return@withContext
+            val len = runCatching { file.length() }.getOrNull() ?: return@withContext LogSendOutcome.RETRY
+            if (len <= sentLogBytes) return@withContext LogSendOutcome.CAUGHT_UP
             val id = installId ?: runCatching { configManager.getOrCreateInstallId() }.getOrNull()
-                ?.also { installId = it } ?: return@withContext
+                ?.also { installId = it } ?: return@withContext LogSendOutcome.CAUGHT_UP
+            // Coverage check BEFORE the heavy POSTs: out of range → bail in a few seconds (the probe
+            // timeout) and let the caller retry on the short cadence, instead of the first doomed chunk
+            // burning the full 60s send timeout. A live link falls straight through. Offline is RETRY
+            // (cheap, keeps catching the link's return), NOT a SEND_FAILED (which would trip the backoff).
+            if (!LogReporter.isReachable(karooSystem)) return@withContext LogSendOutcome.RETRY
             val sid = FileLogTree.sessionId
             val ver = BuildConfig.VERSION_NAME
             var sent = 0
@@ -1069,8 +1113,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 }
             }
             if (sent > 0) Timber.i("KVP log upload ($prefix) ✓ — $sent chunk(s), through byte $sentLogBytes")
-        } finally {
-            logSendInFlight = false
+            // Fully delivered → CAUGHT_UP. Made progress but hit maxChunks → RETRY (drain the rest soon).
+            // Zero progress with bytes still pending → the reachable link accepted the probe but the
+            // upload failed → SEND_FAILED (counts toward backoff).
+            when {
+                sentLogBytes >= len -> LogSendOutcome.CAUGHT_UP
+                sent > 0 -> LogSendOutcome.RETRY
+                else -> LogSendOutcome.SEND_FAILED
+            }
         }
     }
 

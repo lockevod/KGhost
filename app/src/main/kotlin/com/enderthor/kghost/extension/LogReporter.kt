@@ -3,6 +3,7 @@ package com.enderthor.kghost.extension
 import com.enderthor.kghost.BuildConfig
 import io.hammerhead.karooext.KarooSystemService
 import io.hammerhead.karooext.models.HttpResponseState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 
@@ -31,6 +32,11 @@ object LogReporter {
 
     private const val API_BASE = "https://api.telegram.org/bot"
     private const val TIMEOUT_MS = 60_000L
+
+    /** Short timeout for the [isReachable] probe. A tiny `getMe` either answers in a second or two on a
+     *  live link, or the link is down — so a few seconds is enough; no need to wait the full upload
+     *  [TIMEOUT_MS] to learn the Companion is out of coverage. */
+    private const val PROBE_TIMEOUT_MS = 8_000L
 
     /** A coordinate token anywhere in the log (`lat=41.4863`, `lng=-2.31`) → redacted to `lat=•`. */
     private val COORD = Regex("(lat|lng)=-?\\d+(\\.\\d+)?")
@@ -116,6 +122,32 @@ object LogReporter {
             Timber.e(e, "LogReporter: error during send")
             SendResult.Failure("Send error: ${e.javaClass.simpleName} — ${e.message ?: "no message"}")
         }
+    }
+
+    /**
+     * Cheap reachability probe — a tiny `getMe` GET with a short [PROBE_TIMEOUT_MS] timeout. Lets the
+     * uploader learn in seconds that the Companion is out of coverage and SKIP the drain, whose first
+     * chunk would otherwise burn the full [TIMEOUT_MS] pushing 58 KB into a dead link before it gives up,
+     * retrying on the next short cycle instead. "Reachable" = we got ANY HTTP response back (even a 4xx
+     * auth error means the network round-trip completed); only a timeout/exception counts as offline.
+     * No creds → not reachable (the feature is a no-op anyway).
+     */
+    suspend fun isReachable(karooSystem: KarooSystemService): Boolean {
+        if (BOT_TOKEN.isBlank() || BOT_TOKEN.startsWith("REPLACE") ||
+            CHAT_ID.isBlank() || CHAT_ID.startsWith("REPLACE")
+        ) return false
+        return withTimeoutOrNull(PROBE_TIMEOUT_MS) {
+            try {
+                // Any HTTP response back = the network round-trip completed = reachable (a 4xx auth
+                // error still means the link is up). Only a timeout or a transport error is "offline".
+                karooSystem.httpRequest("GET", "$API_BASE$BOT_TOKEN/getMe", emptyMap(), null)
+                true
+            } catch (e: CancellationException) {
+                throw e // let withTimeoutOrNull cancel cleanly — never swallow the timeout
+            } catch (e: Exception) {
+                false
+            }
+        } ?: false
     }
 
     /** Builds a `multipart/form-data` body for the Telegram Bot API `sendDocument` endpoint. */
