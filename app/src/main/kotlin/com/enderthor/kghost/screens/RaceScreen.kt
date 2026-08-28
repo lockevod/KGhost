@@ -343,6 +343,7 @@ internal fun ImportSection(
     val pendingCompletion by HistoryImportRunner.pendingCompletion.collectAsStateWithLifecycle()
     val preparing by HistoryImportRunner.preparing.collectAsStateWithLifecycle()
     val rebuilding by HistoryImportRunner.rebuilding.collectAsStateWithLifecycle()
+    val shortfall by HistoryImportRunner.shortfall.collectAsStateWithLifecycle()
 
     // Disarm on ANY import starting or finishing — arming Rebuild, running "All" instead and coming back
     // to a still-armed (i.e. one-tap-destructive) button is the same trap as the stale arm above.
@@ -467,10 +468,20 @@ internal fun ImportSection(
             style = MaterialTheme.typography.bodyMedium,
         )
         p == null -> Unit
-        p.phase == ImportProgress.Phase.DONE -> Text(
-            text = stringResource(R.string.import_summary, p.imported, p.skippedDuplicates, p.failed),
-            style = MaterialTheme.typography.bodyMedium,
-        )
+        p.phase == ImportProgress.Phase.DONE -> {
+            Text(
+                text = stringResource(R.string.import_summary, p.imported, p.skippedDuplicates, p.failed),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            // A rebuild that archived more rides than the re-import brought back. The counts above look
+            // healthy ("0 imported · 70 duplicates" is a perfectly ordinary line), so the strand is only
+            // visible as this comparison — and only recoverable if the rider is told where to look.
+            if (shortfall > 0) Text(
+                text = stringResource(R.string.import_rebuild_shortfall, shortfall),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
         p.phase == ImportProgress.Phase.SCANNING -> Text(
             text = stringResource(R.string.import_scanning),
             style = MaterialTheme.typography.bodyMedium,

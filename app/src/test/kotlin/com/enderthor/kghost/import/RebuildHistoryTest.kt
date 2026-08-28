@@ -59,7 +59,7 @@ class RebuildHistoryTest {
 
         val archived = prepareRebuild(dir, fitFilesDir = empty, importDir = sources("empty2"))
 
-        assertFalse("nothing may be archived when no source file can re-import it", archived)
+        assertEquals("nothing may be archived when no source file can re-import it", 0, archived)
         assertTrue(isLive(dir, "scan1"))
         assertTrue(isLive(dir, "scan2"))
         assertTrue(isLive(dir, "live"))
@@ -72,22 +72,39 @@ class RebuildHistoryTest {
         val dir = library(track("scan1", Source.FITFILES_SCAN, "k:1"))
         val gone = File(tmp.root, "never-mounted") // listFiles() -> null, the silent "total = 0" case
 
-        assertFalse(prepareRebuild(dir, fitFilesDir = gone, importDir = gone))
+        assertEquals(0, prepareRebuild(dir, fitFilesDir = gone, importDir = gone))
         assertTrue(isLive(dir, "scan1"))
         assertEquals(setOf("k:1"), TrackStore(dir).knownSourceKeys())
     }
 
-    @Test fun `a source folder that lost most of its files is refused`() {
+    @Test fun `a source folder that lost even ONE of its files is refused`() {
         val dir = library(
             track("a", Source.FIT_IMPORT, "k:a"),
             track("b", Source.FIT_IMPORT, "k:b"),
             track("c", Source.FIT_IMPORT, "k:c"),
         )
-        // 1 file left for 3 tracks: below the half threshold, so archiving would strand two rides.
-        assertFalse(prepareRebuild(dir, sources("one", "a.fit"), sources("none")))
+        // 2 files left for 3 tracks. The OLD rule (available * 2 < ids.size) let this through — it
+        // tolerated stranding half the library by construction. One file per archived track is the
+        // floor: in a healthy library the count is INFLATED relative to the tracks (see prepareRebuild),
+        // so a count that has fallen below them means at least one ride has nothing to come back from.
+        assertEquals(0, prepareRebuild(dir, sources("two", "a.fit", "b.fit"), sources("none")))
         assertTrue(isLive(dir, "a"))
         assertTrue(isLive(dir, "b"))
         assertTrue(isLive(dir, "c"))
+        assertTrue("a refusal never touches the ledger", File(dir, "processed.json").exists())
+        assertEquals(setOf("k:a", "k:b", "k:c"), TrackStore(dir).knownSourceKeys())
+    }
+
+    @Test fun `exactly one source file per archived track is enough`() {
+        val dir = library(
+            track("a", Source.FIT_IMPORT, "k:a"),
+            track("b", Source.FIT_IMPORT, "k:b"),
+            track("live", Source.RECORDED, "k:live"), // never archived, so never counted against
+        )
+        assertEquals(2, prepareRebuild(dir, sources("two-ok", "a.fit", "b.fit"), sources("none-ok")))
+        assertTrue(isArchived(dir, "a"))
+        assertTrue(isArchived(dir, "b"))
+        assertTrue(isLive(dir, "live"))
     }
 
     @Test fun `a rebuild with the source files present archives and drops their keys`() {
@@ -103,7 +120,7 @@ class RebuildHistoryTest {
             importDir = sources("import", "ride2.gpx"),
         )
 
-        assertTrue(archived)
+        assertEquals(2, archived)
         assertTrue(isArchived(dir, "scan1"))
         assertTrue(isArchived(dir, "drop1"))
         assertTrue("a live-recorded ride is never archived", isLive(dir, "live"))
@@ -115,7 +132,7 @@ class RebuildHistoryTest {
 
     @Test fun `a library with nothing file-sourced archives nothing and reports it`() {
         val dir = library(track("live", Source.RECORDED, "k:3"))
-        assertFalse(prepareRebuild(dir, sources("fit", "ride1.fit"), sources("import")))
+        assertEquals(0, prepareRebuild(dir, sources("fit", "ride1.fit"), sources("import")))
         assertTrue(isLive(dir, "live"))
         assertTrue("an untouched library keeps its ledger", File(dir, "processed.json").exists())
     }
@@ -207,7 +224,7 @@ class RebuildHistoryTest {
         val fit = sources("fit-ro", "ride1.fit")
         assumeTrue("needs a filesystem that honours a read-only dir", dir.setWritable(false))
         try {
-            assertFalse(prepareRebuild(dir, fitFilesDir = fit, importDir = sources("import-ro")))
+            assertEquals(0, prepareRebuild(dir, fitFilesDir = fit, importDir = sources("import-ro")))
             assertTrue("the library must stay live when its keys could not be reset", isLive(dir, "scan1"))
             assertFalse(isArchived(dir, "scan1"))
         } finally {

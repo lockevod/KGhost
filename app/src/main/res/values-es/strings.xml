@@ -122,6 +122,7 @@
     <string name="import_scanning">Buscando archivos…</string>
     <string name="import_parsing">Analizando %1$d / %2$d…</string>
     <string name="import_summary">%1$d importados · %2$d duplicados · %3$d no válidos</string>
+    <string name="import_rebuild_shortfall">%1$d rutas no han vuelto: están en la carpeta archive/.</string>
     <string name="import_canceled">Importación cancelada.</string>
     <string name="import_canceled_rebuild">Reconstrucción cancelada. Tus rutas antiguas están archivadas: pulsa \"Todos\" para recuperarlas.</string>
     <string name="import_error">La importación falló. Revisa el acceso al almacenamiento e inténtalo de nuevo.</string>
