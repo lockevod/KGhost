@@ -392,4 +392,38 @@ class TrackStoreTest {
         assertEquals(setOf("A"), TrackStore.candidateIds(snapshot, bboxA))
         assertEquals(setOf("B"), TrackStore.candidateIds(snapshot, bboxB))
     }
+
+    @Test fun `allTracksMeta reports id source and sourceKey for every stored track`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        store.save(track("A", 40.0, -3.0).copy(source = Source.RECORDED, sourceKey = "1:2"))
+        store.save(track("B", 50.0, 7.0).copy(source = Source.FITFILES_SCAN, sourceKey = "3:4"))
+
+        assertEquals(
+            setOf(
+                TrackIdentity("A", Source.RECORDED, "1:2"),
+                TrackIdentity("B", Source.FITFILES_SCAN, "3:4"),
+            ),
+            store.allTracksMeta().toSet(),
+        )
+    }
+
+    @Test fun `forEachTrack streams every stored track exactly once`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        store.save(track("A", 40.0, -3.0))
+        store.save(track("B", 50.0, 7.0))
+
+        val seen = ArrayList<String>()
+        store.forEachTrack { seen.add(it.id) }
+
+        assertEquals(listOf("A", "B"), seen.sorted())
+    }
+
+    @Test fun `replaceSourceKeys overwrites the set instead of unioning onto it`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        store.save(track("A", 40.0, -3.0).copy(sourceKey = "keep"))
+        store.replaceSourceKeys(setOf("keep", "drop"))
+        store.replaceSourceKeys(setOf("keep"))
+
+        assertEquals(setOf("keep"), store.knownSourceKeys())
+    }
 }

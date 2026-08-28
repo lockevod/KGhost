@@ -6,6 +6,10 @@ import kotlinx.serialization.encodeToString
 import timber.log.Timber
 import java.io.File
 
+/** A stored track's identity WITHOUT its points — what whole-library passes need to decide what to
+ *  archive and which source keys to keep. See [TrackStore.allTracksMeta]. */
+data class TrackIdentity(val id: String, val source: Source, val sourceKey: String)
+
 /**
  * On-disk store for recorded tracks plus a coarse spatial index for candidate pruning.
  *
@@ -64,10 +68,32 @@ class TrackStore(private val dir: File) {
             .map { it.name.removeSuffix(JSON_SUFFIX) }
     }
 
-    /** Loads + parses every stored (non-archived) track. Whole-library passes only (grade-pace model
-     *  rebuild, rebuild-from-source's file-sourced filter) — NOT the hot match path, which uses the
-     *  spatial index via [loadCandidates]/[loadTopCandidates] instead. */
-    fun allTracks(): List<RecordedTrack> = loadByIds(allTrackIds())
+    /**
+     * The identity fields — id, [Source], sourceKey — of every stored (non-archived) track, parsed ONE
+     * track at a time (same streaming idiom as [sweep]): peak memory is one [RecordedTrack], not the
+     * library. A whole-library `List<RecordedTrack>` is ~230 MB at 1500 rides and OOMs a Karoo.
+     * Unparseable files are skipped.
+     */
+    fun allTracksMeta(): List<TrackIdentity> = allTrackIds().mapNotNull { id ->
+        loadTrack(id)?.let { TrackIdentity(id, it.source, it.sourceKey) }
+    }
+
+    /**
+     * Streams every stored (non-archived) track through [action], parsing ONE at a time and letting each
+     * be collected before the next is read — the whole-library pass that does NOT materialize the whole
+     * library (see [allTracksMeta]). Unparseable files are skipped. Not the hot match path, which prunes
+     * via the spatial index ([loadCandidates]/[loadTopCandidates]).
+     */
+    fun forEachTrack(action: (RecordedTrack) -> Unit) {
+        for (id in allTrackIds()) loadTrack(id)?.let(action)
+    }
+
+    /**
+     * Overwrites `sourcekeys.json` with exactly [keys]. Used by the rebuild, which must DROP the keys of
+     * the tracks it archived (so their files re-decode) while KEEPING those of the tracks that survive —
+     * deleting the file outright would let every live-recorded ride's FIT land a permanent duplicate.
+     */
+    fun replaceSourceKeys(keys: Set<String>) = synchronized(indexLock) { writeSourceKeys(keys) }
 
     /**
      * Returns the set of source keys already ingested via [add]. An absent `sourcekeys.json` is a
