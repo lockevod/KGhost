@@ -32,6 +32,16 @@ class GradeFillReplayTest {
         // the one their own pace trained into, and the model answers with another gradient's pace.
         val pts = track.points
         var j = 0
+        // MOVING-TIME race clock, mirroring KGhostExtension.kt's B2 tick handler (~line 2077-2089: "MOVING-TIME
+        // race clock (option B)"). Production feeds onTick a race-elapsed that FREEZES whenever the rider's
+        // odometer hasn't advanced since the previous tick (riderDist <= integLastRiderDist), by pushing the
+        // clock origin (moveStart) forward by the same wall-time delta. Feeding raw FIT p.timeS straight into
+        // onTick — as this test used to — makes the test's clock keep running through every stop while the
+        // ghost's own (odometer-gated) clock does not, so a real stop (this fixture has 2261s of dd==0, incl.
+        // one ~19-minute stop) reads as ghost lag that never happened on the ground.
+        var moveStart = pts.firstOrNull()?.timeS ?: 0.0
+        var prevElapsedS: Double? = null
+        var prevDistM = pts.firstOrNull()?.distanceM ?: 0.0
         for (i in pts.indices) {
             val here = pts[i]
             if (i > 0) {
@@ -47,19 +57,25 @@ class GradeFillReplayTest {
                 val backEle = back.eleM
                 if (e != null && backEle != null) (e - backEle) / dd * 100.0 else 0.0
             } else 0.0
-            g.onTick(here.distanceM, here.lat, here.lng, 90.0, here.timeS) { _, _, _ -> model.pace(grade, GhostPick.AVERAGE) }
+            val elapsedS = here.timeS
+            val prevEl = prevElapsedS
+            if (prevEl != null && elapsedS > prevEl && here.distanceM <= prevDistM) {
+                moveStart += (elapsedS - prevEl) // odometer didn't advance: hold race-elapsed at its last value
+            }
+            prevElapsedS = elapsedS
+            prevDistM = here.distanceM
+            g.onTick(here.distanceM, here.lat, here.lng, 90.0, elapsedS - moveStart) { _, _, _ -> model.pace(grade, GhostPick.AVERAGE) }
         }
 
         val elapsed = track.points.last().timeS
         println("GradeFill self-replay: elapsed=${elapsed}s gapTimeS=${g.gapTimeS} coveredM=${model.coveredM}")
-        // Band: matching the lookup gradient to build()'s trailing window (above) barely moves the gap
-        // (-2315.7s -> -2301.9s, i.e. ~-27% both times) — so the build/lookup window mismatch this test
-        // used to blame is NOT the dominant driver. BLOCKED: see task-6-report.md for the root-cause
-        // analysis (the dwell/stop time in this fixture, not the gradient model). Band left UNCHANGED
-        // (not widened, not tightened) pending a maintainer decision — see the report.
+        // With the moving-time clock, a self-replay collapses to near a dead heat: observed gap -40.9s on
+        // 8551s elapsed (-0.48%), down from -2302s (-27%) with the raw FIT clock — see task-6-report.md.
+        // Tight absolute bound (~2.2x the observed magnitude) so a regression in the gradient fill that
+        // reintroduces a real drift still trips this test.
         assertTrue(
-            "gap ${g.gapTimeS}s must stay well inside the ride's own elapsed ${elapsed}s",
-            kotlin.math.abs(g.gapTimeS) < elapsed * 0.35,
+            "gap ${g.gapTimeS}s must be near a dead heat (self-replay, moving-time clock)",
+            kotlin.math.abs(g.gapTimeS) < 90.0,
         )
     }
 }
