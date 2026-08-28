@@ -103,15 +103,24 @@ class TrackStore(private val dir: File) {
      * reports nothing: a caller about to archive its whole library must be able to tell the reset did not
      * take, instead of archiving against a keys file that still dedups every re-decoded track away.
      *
-     * Fails CLOSED on a PRESENT-but-unparseable keys file, which is why it reads via [readSourceKeysOrNull]
-     * rather than [readSourceKeys]: the lenient read maps corruption to the empty set, so subtracting from
-     * it would write `[]` — erasing every LIVE-recorded ride's key — and then "prove" the reset took by
-     * comparing empty to empty. Nothing is written at all in that case; the caller REFUSES instead, leaving
-     * the second dedup gate (the processed ledger) in place. A corrupt file is not something this can
-     * repair — the keys it held are unknowable — so refusing is the only answer that cannot twin a ride.
+     * A PRESENT-but-unparseable keys file is REBUILT from the library rather than trusted or refused, which
+     * is why it reads via [readSourceKeysOrNull] rather than [readSourceKeys]: the lenient read maps
+     * corruption to the empty set, so subtracting from it would write `[]` — erasing every LIVE-recorded
+     * ride's key — and then "prove" the reset took by comparing empty to empty. Refusing outright is no
+     * better, because [add] rewrites this file (leniently, so from the empty set) on the very next recorded
+     * ride: the corruption would "self-heal" into a VALID file holding that one key, the next rebuild would
+     * pass, and every earlier ride's `.fit` would twin — the same damage, one ride later. The keys are NOT
+     * unknowable: [recoveredSourceKeys] reads them back off the surviving `RECORDED` tracks, which are
+     * exactly the keys that must survive (the archived, file-sourced ones are what [drop] removes anyway).
+     *
+     * Still fails CLOSED on an IO ERROR, which is a different failure: there the old file survives intact
+     * and rewriting it could destroy real state. [writeSourceKeys] goes through [atomicWriteText], which
+     * PRESERVES the old file on a failed write and reports nothing — so the read-back below is what tells
+     * the two apart. Corrupt-but-present → the rebuilt set reads back → true. Could-not-write → the old
+     * (or corrupt) file reads back instead → false, and the caller REFUSES with the ledger still in place.
      */
     fun dropSourceKeys(drop: Set<String>): Boolean = synchronized(indexLock) {
-        val current = readSourceKeysOrNull() ?: return@synchronized false
+        val current = readSourceKeysOrNull() ?: recoveredSourceKeys()
         val remaining = current - drop
         writeSourceKeys(remaining)
         readSourceKeysOrNull() == remaining
@@ -521,6 +530,21 @@ class TrackStore(private val dir: File) {
 
     /** [readSourceKeysOrNull] with corruption folded into "empty" — see its doc for who may use this. */
     private fun readSourceKeys(): Set<String> = readSourceKeysOrNull() ?: emptySet()
+
+    /**
+     * The keys a corrupt `sourcekeys.json` MUST still hold, read back off the library itself: the
+     * `sourceKey` of every surviving [Source.RECORDED] track. Those are the only keys whose loss does
+     * permanent damage — a live ride's key is what stops the Karoo's own `.fit` for that ride being
+     * stored a second time as a twin, and `selectArchivable` never breaks up a twin group of <= 3.
+     * File-sourced keys are deliberately NOT recovered: the rebuild's whole job is to drop them so
+     * their files re-decode. See [dropSourceKeys] for why this beats refusing.
+     *
+     * Costs one streamed pass over the library ([allTracksMeta] parses one track at a time), only on
+     * the corrupt path.
+     */
+    private fun recoveredSourceKeys(): Set<String> = allTracksMeta()
+        .filter { it.source == Source.RECORDED }
+        .mapNotNullTo(HashSet()) { it.sourceKey.takeIf(String::isNotEmpty) }
 
     private fun writeSourceKeys(keys: Set<String>) {
         ensureDir()

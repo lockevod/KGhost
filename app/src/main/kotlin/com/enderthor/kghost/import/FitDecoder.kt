@@ -20,21 +20,34 @@ import kotlin.math.pow
 import com.garmin.fit.File as FitFileType
 
 /**
+ * The sports that count as "a ride on my bike". `CYCLING` is the ordinary case; `E_BIKING` (21) is what
+ * an e-bike profile writes and is still the rider on a bicycle; `GENERIC` (0) is the SDK's zero value
+ * and is what plenty of converters/re-exporters emit when they have nothing better — dropping it would
+ * silently lose a real ride, which is worse than the leak (that is the same judgement the empty-set case
+ * below makes). `subSport` is deliberately ignored — an INDOOR_CYCLING trainer ride is still cycling.
+ */
+private val RIDING_SPORTS = setOf(Sport.CYCLING, Sport.E_BIKING, Sport.GENERIC)
+
+/**
  * Is this FIT file a bike ride, given the activity type and the sports its session/sport messages
  * declare? Pure and total, so the rejection path is testable without a car-ride FIT file.
  *
- * Rejects only on PRESENT, non-cycling data: a legitimate re-export can omit `sport` entirely, and
+ * Rejects only on PRESENT, KNOWN, non-riding data: a legitimate re-export can omit `sport` entirely, and
  * dropping real rides is worse than the leak this closes. `Sport.INVALID` is the SDK's "no value", so
- * the caller must not collect it. `subSport` is deliberately ignored — an INDOOR_CYCLING trainer ride
- * is still cycling. A multisport file counts as cycling if ANY session does (the brick's bike leg is
- * real history).
+ * the caller must not collect it. A multisport file counts as cycling if ANY session does (the brick's
+ * bike leg is real history).
+ *
+ * The file-type half rejects a KNOWN non-ACTIVITY type — a `COURSE` carries positioned records and would
+ * otherwise decode as a fake ride — but ACCEPTS [FitFileType.INVALID], which is not a known-bad type: it
+ * is what `File.getByValue` returns for a value THIS SDK version does not recognise. Rejecting unknown
+ * would drop a real activity written by a newer device for no gain.
  *
  * Motivation: `AGG_MAX_SPEED_MS` is 30 m/s, so an unstopped drive home over a col imports as riding
  * and permanently teaches `GradePace` that 6% is a 23 km/h gradient — the model has no recency decay.
  */
 internal fun isCyclingActivity(fileType: FitFileType?, sports: Set<Sport>): Boolean =
-    (fileType == null || fileType == FitFileType.ACTIVITY) &&
-        (sports.isEmpty() || Sport.CYCLING in sports)
+    (fileType == null || fileType == FitFileType.ACTIVITY || fileType == FitFileType.INVALID) &&
+        (sports.isEmpty() || sports.any { it in RIDING_SPORTS })
 
 /**
  * Decodes a Garmin FIT activity file into a [RecordedTrack] using the official Garmin FIT Java SDK.

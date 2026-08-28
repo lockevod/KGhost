@@ -2172,7 +2172,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // they must get a neutral fill too. Without this, coast OVERSHOOT is a one-signed
                         // ratchet: the odometer's snap BACK when the fix returns hits GhostIntegrator's dd<0
                         // branch, which keeps ghostTime by design, so the lead bought with phantom metres is
-                        // never refunded (measured ~+38 s per dropout, linear in dropouts).
+                        // never refunded (measured ~+7.0 s over a dropout, and explicitly NOT linear in
+                        // the number of dropouts — the earlier "~+38 s per dropout, linear" figure came
+                        // from an experiment that never froze the DISTANCE stream, so what it measured
+                        // was a legitimate gain, not phantom metres).
                         val fixFresh = fix != null && SystemClock.elapsedRealtime() - fix.ms <= GPS_FIX_FRESH_MS &&
                             coast.quality == CoastQuality.LIVE
                         // Tier 1: this exact road, ridden before (PacePatch). Tier 2: my historical pace at THIS

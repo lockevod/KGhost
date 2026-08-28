@@ -44,13 +44,31 @@ class FitSportGateTest {
         assertTrue("a file with no file-id type must still import", isCyclingActivity(null, emptySet()))
         // Accepted: a multisport/brick file whose bike leg is real history.
         assertTrue(isCyclingActivity(act, setOf(Sport.RUNNING, Sport.CYCLING)))
+        // Accepted: an E-BIKE profile ride (Sport 21). Still the rider on a bicycle, and the pace it
+        // teaches the model is pace they can actually reproduce on that bike.
+        assertTrue("an e-bike ride is a ride", isCyclingActivity(act, setOf(Sport.E_BIKING)))
+        // Accepted: GENERIC (Sport 0) — the SDK's zero value, which converters emit when they have
+        // nothing better. "Present but says nothing" must behave like absent, not like "not a bike".
+        assertTrue("sport=0 is not a statement that it isn't cycling", isCyclingActivity(act, setOf(Sport.GENERIC)))
+        assertTrue("...and still counts inside a multisport set", isCyclingActivity(act, setOf(Sport.GENERIC, Sport.RUNNING)))
+        // Accepted: a file-id type this SDK version does not recognise. File.getByValue maps ANY unknown
+        // value to File.INVALID, so INVALID means "unknown to us", NOT "known to be a non-activity" —
+        // rejecting it would drop a real ride written by a newer device.
+        assertTrue("an unknown file type is not a known-bad one", isCyclingActivity(FitFileType.INVALID, setOf(Sport.CYCLING)))
+        assertTrue(isCyclingActivity(FitFileType.INVALID, emptySet()))
 
-        // Rejected: present and not cycling.
+        // Rejected: present, known, and not a bicycle.
         assertFalse("the drive home", isCyclingActivity(act, setOf(Sport.MOTORCYCLING)))
         assertFalse(isCyclingActivity(act, setOf(Sport.RUNNING)))
         assertFalse(isCyclingActivity(act, setOf(Sport.DRIVING)))
         // Rejected: not an activity at all (a course/route file also carries positioned records).
         assertFalse(isCyclingActivity(FitFileType.COURSE, setOf(Sport.CYCLING)))
+    }
+
+    @Test fun `an e-bike FIT decodes end to end`() {
+        val ebike = FitDecoder.decode(writeFit("ebike", Sport.E_BIKING, speedMs = 6.0), Source.FIT_IMPORT)
+        assertNotNull("an e-bike profile ride must not be silently dropped", ebike)
+        assertTrue(ebike!!.points.size > 100)
     }
 
     // ------------------------------------------------------------------ end-to-end, synthetic FIT

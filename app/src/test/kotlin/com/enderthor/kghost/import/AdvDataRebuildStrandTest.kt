@@ -7,6 +7,7 @@ import com.enderthor.kghost.geo.TrackStore
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -94,7 +95,7 @@ class AdvDataRebuildStrandTest {
         assertEquals(190, liveIds(dir).size)
         val ledger = File(dir, "processed.json").also { it.writeText("""{"entries":{}}""") }
 
-        assertEquals("REFUSED: nothing may be archived", 0, prepareRebuild(dir, fitFiles, importDir))
+        assertNull("REFUSED: nothing may be archived", prepareRebuild(dir, fitFiles, importDir))
 
         assertEquals("the whole library is still live", 190, liveIds(dir).size)
         assertEquals("nothing was archived", emptySet<String>(), archivedIds(dir))
@@ -127,7 +128,7 @@ class AdvDataRebuildStrandTest {
         }
 
         assertEquals(50, HistoryImporter.sourceFileCount(fitFiles, importDir))
-        assertEquals("50 files can never bring back 100 rides", 0, prepareRebuild(dir, fitFiles, importDir))
+        assertNull("50 files can never bring back 100 rides", prepareRebuild(dir, fitFiles, importDir))
         assertEquals(100, liveIds(dir).size)
         assertEquals(emptySet<String>(), archivedIds(dir))
     }
@@ -167,7 +168,7 @@ class AdvDataRebuildStrandTest {
             if (i <= 50) decode["r$i.fit"] = RecordedTrack("fit-$epoch", epoch, pts(), source = Source.FITFILES_SCAN)
         }
 
-        val archived = prepareRebuild(dir, fitFiles, importDir)
+        val archived = prepareRebuild(dir, fitFiles, importDir)!!
         assertEquals("100 files for 100 tracks: the guard cannot know they are unreadable", 100, archived)
 
         val done = runImport(dir, fitFiles, importDir, decode)
@@ -193,7 +194,7 @@ class AdvDataRebuildStrandTest {
             decode["r$i.fit"] = RecordedTrack("fit-$epoch", epoch, pts(), source = Source.FITFILES_SCAN)
         }
 
-        val archived = prepareRebuild(dir, fitFiles, importDir)
+        val archived = prepareRebuild(dir, fitFiles, importDir)!!
         assertEquals(20, archived)
         val done = runImport(dir, fitFiles, importDir, decode)
         assertEquals(20, done.imported)

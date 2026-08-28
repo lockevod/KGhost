@@ -95,6 +95,29 @@ class CoastingEstimatorTest {
         assertEquals(0.0, c.coastingSeconds, 1e-6)
     }
 
+    @Test fun `a stop WITHOUT auto-pause coasts one tick on resume, not the whole stop`() {
+        // ROOT-CAUSE LOCK for the stop re-anchor. Auto-pause is a user setting and many riders leave it
+        // off, so ELAPSED_TIME keeps counting through a red light while DISTANCE is frozen. Without the
+        // re-anchor on every STOPPED tick the coast anchor ages across the whole stop, and the first
+        // tick that reports movement again — before the DISTANCE stream has re-emitted — dead-reckons
+        // `lastMovingSpeed × the WHOLE stop` in ONE tick.
+        //
+        // This is the ONLY lock on the two consumers that layer 1 alone protects: the no-route
+        // Ghost-Pace gap (charged at historical pace and never refunded) and the GPS-lost alert clock
+        // (coastingSeconds, which must be ~1 s here and not ~121 s → no false "GPS lost").
+        val c = newEstimator(coastWindowMs = 30_000L)
+        c.update(rawDistanceM = 1000.0, speedMs = 6.0, elapsedS = 0.0) // rolling at 6 m/s, anchor at 1000 m
+        for (t in 1..120) c.update(rawDistanceM = 1000.0, speedMs = 0.0, elapsedS = t.toDouble()) // 2 min stopped
+        // Rolling again, but DISTANCE has not caught up yet → the coast branch fires.
+        c.update(rawDistanceM = 1000.0, speedMs = 0.8, elapsedS = 121.0)
+
+        // One tick of movement (1 s × the last moving speed), NOT 121 s of it.
+        assertEquals(1006.0, c.effectiveDistanceM, 1e-6)
+        assertEquals(1.0, c.coastingSeconds, 1e-6)          // the alert clock, not 121 s
+        assertEquals(CoastQuality.COASTING, c.quality)      // NOT LONG_LOSS → no false "GPS lost"
+        // Reverting the re-anchor gives 1000 + 6 × 121 = 1726 m: ~726 phantom metres in one tick.
+    }
+
     @Test fun `a pause (elapsed frozen) injects no phantom coast distance on resume`() {
         // Simulates a long café stop: DISTANCE stays frozen and ELAPSED_TIME is frozen by the ride
         // app during pause, so the resume tick sees a frozen distance at the SAME elapsedS as the last
