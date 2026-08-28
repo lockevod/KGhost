@@ -7,12 +7,34 @@ import com.enderthor.kghost.geo.Source
 import com.enderthor.kghost.geo.TrackPoint
 import com.enderthor.kghost.geo.toDto
 import com.garmin.fit.Decode
+import com.garmin.fit.FileIdMesgListener
 import com.garmin.fit.MesgBroadcaster
 import com.garmin.fit.RecordMesgListener
+import com.garmin.fit.SessionMesgListener
+import com.garmin.fit.Sport
+import com.garmin.fit.SportMesgListener
 import timber.log.Timber
 import java.io.File
 import java.io.FileInputStream
 import kotlin.math.pow
+import com.garmin.fit.File as FitFileType
+
+/**
+ * Is this FIT file a bike ride, given the activity type and the sports its session/sport messages
+ * declare? Pure and total, so the rejection path is testable without a car-ride FIT file.
+ *
+ * Rejects only on PRESENT, non-cycling data: a legitimate re-export can omit `sport` entirely, and
+ * dropping real rides is worse than the leak this closes. `Sport.INVALID` is the SDK's "no value", so
+ * the caller must not collect it. `subSport` is deliberately ignored — an INDOOR_CYCLING trainer ride
+ * is still cycling. A multisport file counts as cycling if ANY session does (the brick's bike leg is
+ * real history).
+ *
+ * Motivation: `AGG_MAX_SPEED_MS` is 30 m/s, so an unstopped drive home over a col imports as riding
+ * and permanently teaches `GradePace` that 6% is a 23 km/h gradient — the model has no recency decay.
+ */
+internal fun isCyclingActivity(fileType: FitFileType?, sports: Set<Sport>): Boolean =
+    (fileType == null || fileType == FitFileType.ACTIVITY) &&
+        (sports.isEmpty() || Sport.CYCLING in sports)
 
 /**
  * Decodes a Garmin FIT activity file into a [RecordedTrack] using the official Garmin FIT Java SDK.
@@ -40,7 +62,21 @@ object FitDecoder {
         var cumulativeM = 0.0
         var lastDistanceM = 0.0
 
+        // Activity-type gate, evaluated after the read: `session` sits at the END of the file, so an
+        // early abort would need an exception for no real gain (a rejected file is rare).
+        // TYPED listeners are mandatory: MesgBroadcaster's generic MesgListener hands back the RAW
+        // unconverted Mesg, so `is FileIdMesg` / `is SessionMesg` never match there.
+        var fitFileType: FitFileType? = null
+        val sports = HashSet<Sport>()
+
         val broadcaster = MesgBroadcaster(decode)
+        broadcaster.addListener(FileIdMesgListener { mesg -> mesg.type?.let { fitFileType = it } })
+        broadcaster.addListener(
+            SessionMesgListener { mesg -> mesg.sport?.takeIf { it != Sport.INVALID }?.let { sports += it } },
+        )
+        broadcaster.addListener(
+            SportMesgListener { mesg -> mesg.sport?.takeIf { it != Sport.INVALID }?.let { sports += it } },
+        )
         broadcaster.addListener(
             RecordMesgListener { mesg ->
                 val latSemi = mesg.positionLat
@@ -84,7 +120,12 @@ object FitDecoder {
         )
         FileInputStream(file).use { decode.read(it, broadcaster, broadcaster) }
 
-        buildTrack(points, firstEpochMs, source)
+        if (!isCyclingActivity(fitFileType, sports)) {
+            Timber.i("FIT skipped, not a cycling activity (type=%s sports=%s): %s", fitFileType, sports, file.name)
+            null
+        } else {
+            buildTrack(points, firstEpochMs, source)
+        }
     }.getOrElse { e ->
         Timber.w(e, "FIT decode failed: %s", file.name)
         null

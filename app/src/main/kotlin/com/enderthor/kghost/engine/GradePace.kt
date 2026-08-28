@@ -157,11 +157,18 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                 }
                 if (stepM <= 0.0 || stepT <= 0.0) continue
                 val stepSpeed = stepM / stepT
-                if (stepSpeed > AGG_MAX_SPEED_MS) continue       // a GPS spike, not riding
-                // Dwell clip over the STEP, exactly as TrackSamples does. Clipping over the 100 m window
-                // instead would let a 45 s red light inside a 100 m stretch read 1.74 m/s — above the
-                // floor, so the clip never fires and the flat bin records 0.575 s/m for a 0.125 s/m road.
-                val stepDt = if (stepSpeed < AGG_MIN_SPEED_MS) stepM / AGG_MIN_SPEED_MS else stepT
+                if (stepSpeed > AGG_MAX_SPEED_MS) {
+                    // A GPS spike (30-200 m in one step): not riding, so it is no pace sample — and, like a
+                    // dropout, it must RESTART the window. Left alone the spike's metres stay in `dd` for the
+                    // next ~100 m and dilute the gradient ~2.5x, filing an 8% climb's crawl in bin +3.
+                    j = i
+                    continue
+                }
+                // A DWELL (red light, cafe, a photo) is DROPPED, not clipped to the floor: a stop says
+                // nothing about pace-at-gradient, and a GradePace bin is GLOBAL — bin 0 holds 80-90% of a
+                // rider's metres, so a clipped city stop moves the pace used on a country lane. (`PacePatch`
+                // can afford the clip: its 18 m cells keep the poison at the junction it happened in.)
+                if (stepSpeed < AGG_MIN_SPEED_MS) continue
                 val ele = here.eleM ?: continue
                 val back = pts[j]
                 val backEle = back.eleM ?: continue
@@ -179,7 +186,7 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                 // reading legitimately maps to bin 20.
                 if (!gradePct.isFinite() || kotlin.math.abs(gradePct) > GRADE_MAX_PCT) continue
                 val bin = binOf(gradePct)
-                sumDt[bin] = (sumDt[bin] ?: 0.0) + stepDt
+                sumDt[bin] = (sumDt[bin] ?: 0.0) + stepT
                 sumDd[bin] = (sumDd[bin] ?: 0.0) + stepM
             }
             if (sumDd.isNotEmpty()) folds.add(Fold(track.startedAtEpoch, sumDt, sumDd))
