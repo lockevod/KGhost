@@ -74,6 +74,15 @@ object HistoryImportRunner {
      */
     val rebuilding: StateFlow<Boolean> = _rebuilding.asStateFlow()
 
+    private val _rebuildRefused = MutableStateFlow(false)
+    /**
+     * True when [rebuildAll]'s destructive phase REFUSED (see [prepareRebuild]) and the ordinary import
+     * ran in its place. Without this the refusal is log-only: the import that follows ends on a normal
+     * "0 imported · N duplicates" and the rider, who was told nothing, taps Rebuild again. Cleared at
+     * the next [start]/[rebuildAll].
+     */
+    val rebuildRefused: StateFlow<Boolean> = _rebuildRefused.asStateFlow()
+
     private val _shortfall = MutableStateFlow(0)
     /**
      * How many of the tracks a [rebuildAll] ARCHIVED did not come back from the re-import ([rebuildShortfall]).
@@ -100,6 +109,7 @@ object HistoryImportRunner {
         _progress.value = null
         _canceled.value = false
         _rebuilding.value = false
+        _rebuildRefused.value = false
         _shortfall.value = 0
         // Deliberately NOT cleared here: if a prior import finished while the screen was away and the
         // host never refreshed its count, clearing it would lose that refresh. Every terminal path
@@ -135,14 +145,19 @@ object HistoryImportRunner {
         if (!beginRun()) return
         _rebuilding.value = true
         job = scope.launch {
-            val archived = try {
+            val prepared = try {
                 _preparing.value = true
                 runCatching { prepareRebuild(TrackStorage.tracksDir(appContext), fitFilesDir, importDir) }
                     .onFailure { Timber.w(it, "rebuild: prepare failed; running an ordinary import instead") }
+                    // A THROWN prepare folds into 0, NOT into a refusal: it is already logged with a
+                    // stack trace and may have archived before it threw, so the shortfall line — not the
+                    // refusal line — is the one that can still catch it.
                     .getOrDefault(0)
             } finally {
                 _preparing.value = false
             }
+            _rebuildRefused.value = prepared == null // null ⇒ prepareRebuild REFUSED; the screen says so.
+            val archived = prepared ?: 0
             runImport(appContext, configManager, onlyNew = false, lastScanEpoch = lastScanEpoch)
             // After runImport, so it sees the terminal counts. A cancel rethrows out of runImport and
             // never reaches here — that path already has its own "your rides are in archive/" line.
@@ -224,8 +239,10 @@ object HistoryImportRunner {
 /**
  * The rebuild's DESTRUCTIVE prepare, hoisted out of [HistoryImportRunner.rebuildAll] (which needs a
  * `Context`) so it is plain-JVM testable: the tracks dir plus the two source dirs [HistoryImporter]
- * scans. Returns HOW MANY tracks it archived — 0 when it archived nothing, whether because there was
- * nothing to do or because it refused.
+ * scans. Returns HOW MANY tracks it archived, or NULL when it REFUSED. Null and 0 are distinct on
+ * purpose: both archive nothing, but a refusal is a decision the rider has to be TOLD about (the
+ * ordinary import that follows reports a perfectly cheerful "0 imported · N duplicates", so a
+ * log-only refusal reads as "the button did nothing" and gets tapped again).
  *
  * It refuses to touch anything unless the RECOVERABLE half is demonstrably there:
  *
@@ -254,8 +271,9 @@ object HistoryImportRunner {
  *    free: [atomicWriteText] preserves the old keys file on an IO error and reports nothing, so a reset
  *    that silently failed AFTER archiving would leave every old key in place, dedup every re-decoded
  *    track away, and end at "0 imported · N duplicates" with the whole library in `archive/`. This also
- *    covers a CORRUPT `sourcekeys.json`: [TrackStore.dropSourceKeys] fails closed on one rather than
- *    writing `[]` over every live-recorded ride's key while reporting success.
+ *    A CORRUPT `sourcekeys.json` is NOT this case: [TrackStore.dropSourceKeys] rebuilds it from the
+ *    surviving RECORDED tracks and the rebuild proceeds — refusing there only delayed the damage,
+ *    because the next recorded ride rewrites the file (validly) holding its own key alone.
  *
  * Counting files can never PROVE recoverability, only disprove it — so the surviving residue is caught
  * after the fact by [rebuildShortfall], which compares what was archived against what came back.
@@ -264,7 +282,7 @@ object HistoryImportRunner {
  * instead is ~230 MB at 1500 rides: the OOM would be swallowed by the caller's `runCatching` and the
  * button would appear to run while doing nothing at all.
  */
-fun prepareRebuild(tracksDir: File, fitFilesDir: File, importDir: File): Int {
+fun prepareRebuild(tracksDir: File, fitFilesDir: File, importDir: File): Int? {
     val store = TrackStore(tracksDir)
     val meta = store.allTracksMeta()
     val ids = fileSourcedIds(meta)
@@ -276,11 +294,11 @@ fun prepareRebuild(tracksDir: File, fitFilesDir: File, importDir: File): Int {
                 "archiving them would be unrecoverable. Running an ordinary import instead.",
             available, ids.size,
         )
-        return 0
+        return null
     }
     if (!resetImportDedup(tracksDir, store, archivedSourceKeys(meta))) {
-        Timber.w("rebuild REFUSED: the sourceKey rewrite did not take (IO error or a corrupt keys file); nothing archived")
-        return 0
+        Timber.w("rebuild REFUSED: the sourceKey rewrite did not take (the keys file could not be written); nothing archived")
+        return null
     }
     val moved = store.archive(ids)
     Timber.i("rebuild: archived %d of %d file-sourced track(s); %d source file(s) to re-read", moved, ids.size, available)

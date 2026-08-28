@@ -7,6 +7,7 @@ import com.enderthor.kghost.geo.TrackPointDto
 import com.enderthor.kghost.geo.TrackStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Rule
@@ -59,7 +60,7 @@ class RebuildHistoryTest {
 
         val archived = prepareRebuild(dir, fitFilesDir = empty, importDir = sources("empty2"))
 
-        assertEquals("nothing may be archived when no source file can re-import it", 0, archived)
+        assertNull("nothing may be archived when no source file can re-import it — a REFUSAL, not a no-op", archived)
         assertTrue(isLive(dir, "scan1"))
         assertTrue(isLive(dir, "scan2"))
         assertTrue(isLive(dir, "live"))
@@ -72,7 +73,7 @@ class RebuildHistoryTest {
         val dir = library(track("scan1", Source.FITFILES_SCAN, "k:1"))
         val gone = File(tmp.root, "never-mounted") // listFiles() -> null, the silent "total = 0" case
 
-        assertEquals(0, prepareRebuild(dir, fitFilesDir = gone, importDir = gone))
+        assertNull(prepareRebuild(dir, fitFilesDir = gone, importDir = gone))
         assertTrue(isLive(dir, "scan1"))
         assertEquals(setOf("k:1"), TrackStore(dir).knownSourceKeys())
     }
@@ -87,7 +88,7 @@ class RebuildHistoryTest {
         // tolerated stranding half the library by construction. One file per archived track is the
         // floor: in a healthy library the count is INFLATED relative to the tracks (see prepareRebuild),
         // so a count that has fallen below them means at least one ride has nothing to come back from.
-        assertEquals(0, prepareRebuild(dir, sources("two", "a.fit", "b.fit"), sources("none")))
+        assertNull(prepareRebuild(dir, sources("two", "a.fit", "b.fit"), sources("none")))
         assertTrue(isLive(dir, "a"))
         assertTrue(isLive(dir, "b"))
         assertTrue(isLive(dir, "c"))
@@ -132,6 +133,7 @@ class RebuildHistoryTest {
 
     @Test fun `a library with nothing file-sourced archives nothing and reports it`() {
         val dir = library(track("live", Source.RECORDED, "k:3"))
+        // 0, NOT null: nothing to do is not a refusal, so the screen must stay quiet about it.
         assertEquals(0, prepareRebuild(dir, sources("fit", "ride1.fit"), sources("import")))
         assertTrue(isLive(dir, "live"))
         assertTrue("an untouched library keeps its ledger", File(dir, "processed.json").exists())
@@ -224,7 +226,7 @@ class RebuildHistoryTest {
         val fit = sources("fit-ro", "ride1.fit")
         assumeTrue("needs a filesystem that honours a read-only dir", dir.setWritable(false))
         try {
-            assertEquals(0, prepareRebuild(dir, fitFilesDir = fit, importDir = sources("import-ro")))
+            assertNull(prepareRebuild(dir, fitFilesDir = fit, importDir = sources("import-ro")))
             assertTrue("the library must stay live when its keys could not be reset", isLive(dir, "scan1"))
             assertFalse(isArchived(dir, "scan1"))
         } finally {

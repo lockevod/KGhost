@@ -344,6 +344,7 @@ internal fun ImportSection(
     val preparing by HistoryImportRunner.preparing.collectAsStateWithLifecycle()
     val rebuilding by HistoryImportRunner.rebuilding.collectAsStateWithLifecycle()
     val shortfall by HistoryImportRunner.shortfall.collectAsStateWithLifecycle()
+    val rebuildRefused by HistoryImportRunner.rebuildRefused.collectAsStateWithLifecycle()
 
     // Disarm on ANY import starting or finishing — arming Rebuild, running "All" instead and coming back
     // to a still-armed (i.e. one-tap-destructive) button is the same trap as the stale arm above.
@@ -468,20 +469,10 @@ internal fun ImportSection(
             style = MaterialTheme.typography.bodyMedium,
         )
         p == null -> Unit
-        p.phase == ImportProgress.Phase.DONE -> {
-            Text(
-                text = stringResource(R.string.import_summary, p.imported, p.skippedDuplicates, p.failed),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            // A rebuild that archived more rides than the re-import brought back. The counts above look
-            // healthy ("0 imported · 70 duplicates" is a perfectly ordinary line), so the strand is only
-            // visible as this comparison — and only recoverable if the rider is told where to look.
-            if (shortfall > 0) Text(
-                text = stringResource(R.string.import_rebuild_shortfall, shortfall),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
+        p.phase == ImportProgress.Phase.DONE -> Text(
+            text = stringResource(R.string.import_summary, p.imported, p.skippedDuplicates, p.failed),
+            style = MaterialTheme.typography.bodyMedium,
+        )
         p.phase == ImportProgress.Phase.SCANNING -> Text(
             text = stringResource(R.string.import_scanning),
             style = MaterialTheme.typography.bodyMedium,
@@ -497,4 +488,23 @@ internal fun ImportSection(
         )
         else -> Unit
     }
+
+    // The two rebuild-specific outcomes, OUTSIDE the when above so they survive every terminal phase.
+    //
+    // Refusal: the destructive phase declined and an ordinary import ran instead, so the line above is a
+    // perfectly cheerful "0 imported · N duplicates" and a log-only refusal reads as "the button did
+    // nothing" — the rider just taps Rebuild again.
+    if (rebuildRefused) Text(
+        text = stringResource(R.string.import_rebuild_refused),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.error,
+    )
+    // Shortfall: a rebuild archived more rides than the re-import brought back. This must render under
+    // ERROR as well as DONE — "Import failed" with 100 rides silently sitting in archive/ is exactly the
+    // case where a strand is most likely and least survivable in silence.
+    if (shortfall > 0) Text(
+        text = stringResource(R.string.import_rebuild_shortfall, shortfall),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.error,
+    )
 }
