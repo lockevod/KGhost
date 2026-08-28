@@ -117,6 +117,8 @@
     <string name="import_permission_grant">Grant access</string>
     <string name="import_all">All</string>
     <string name="import_new_only">New only</string>
+    <string name="import_rebuild">Rebuild history</string>
+    <string name="import_rebuild_hint">Re-reads every ride file from scratch so older rides gain the altitude the gradient model needs. Takes as long as a first import.</string>
     <string name="import_cancel">Cancel</string>
     <string name="import_scanning">Scanning files…</string>
     <string name="import_parsing">Parsing %1$d / %2$d…</string>
