@@ -511,8 +511,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // The last odometer distance handed to the integrator this ride — persisted in the checkpoint so a
     // mid-ride power-off resumes with the accrued lead (GhostIntegrator keeps lastRiderDist private).
     @Volatile private var integLastRiderDist: Double = 0.0
-    // The pick + VP-fill pace SNAPSHOTTED when the integrator was built — persisted in the checkpoint and
-    // required to match on restore (a different pick/target ⇒ a different race ⇒ start fresh, not resume).
+    // The pick SNAPSHOTTED when the integrator was built — persisted in the checkpoint and required to
+    // match on restore (a different pick ⇒ a different race ⇒ start fresh, not resume). integVpTpm is
+    // retained ONLY to satisfy GhostIntegrator's constructor and the GhostCheckpoint schema (persisted-format
+    // compatibility) — since the neutral-fill change it no longer influences the accrued gap and no longer
+    // gates the resume (see the paramMatch comment below). Do not confuse this with RouteGhost's map-marker
+    // VP-fill pace (eff.targetSpeedMs), which IS still live — see the comment where RouteGhost.build is called.
     @Volatile private var integPick: GhostPick? = null
     @Volatile private var integVpTpm: Double = 0.0
     // Monotonic (elapsedRealtime ms) of the last checkpoint write — throttles the ~5 s periodic persist.
@@ -1492,9 +1496,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     } else {
                         Timber.i("KVP grid: racing $pick on ${matched.size} stretch(es)${if (justSeeded) " (just seeded)" else ""}")
                     }
-                    // Build the ONE continuous whole-route ghost (recorded stretches + VP-pace fills).
-                    // Fill pace = the always-present VP target (default 12 km/h), so the ghost always
-                    // flows across gaps with no recorded history.
+                    // Build the ONE continuous whole-route ghost (recorded stretches + VP-pace fills) that
+                    // places the MAP MARKER. Fill pace = the always-present VP target (default 12 km/h), so
+                    // the marker always flows across gaps with no recorded history. This VP-fill pace is
+                    // UNRELATED to GhostIntegrator's (dead) vpTimePerM constructor arg above — that one no
+                    // longer affects anything; this one genuinely drives where the map ghost is drawn.
                     // NOTE: the per-profile target is snapshotted at match time; a mid-route profile
                     // change takes effect only after a re-match (nav state change). The live per-tick gap
                     // still uses the current target via eff.targetSpeedMs — only the VP-fill pace is snapshotted.
@@ -2088,8 +2094,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             firstMoveElapsedS = moveStart
                         }
                         prevTickElapsedS = elapsedS
-                        // Build the integrator ONCE, at first movement — snapshot the pick + the VP-fill pace
-                        // (the always-present target). A route change re-nulls it above → fresh race.
+                        // Build the integrator ONCE, at first movement — snapshot the pick (integVpTpm is also
+                        // captured here but is vestigial, see the comment on its declaration above). A route
+                        // change re-nulls it above → fresh race.
                         var integ = integrator
                         if (integ == null) {
                             val vpTpm = (1.0 / eff.targetSpeedMs.coerceAtLeast(0.1)).coerceIn(0.05, 20.0)
@@ -2099,7 +2106,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             integVpTpm = vpTpm
                             lastCheckpointMs = 0L
                             // Resume an interrupted ride WITH the accrued lead: restore the persisted checkpoint
-                            // iff same pick + VP pace, RECENT enough, AND either the SAME recordingStartedEpoch
+                            // iff same pick, RECENT enough, AND either the SAME recordingStartedEpoch
                             // (in-process tick relaunch / host reconnect) OR a CONTINUOUS odometer within a TIGHT
                             // margin (a power-off resume mints a fresh epoch but the ride's distance carries on;
                             // a genuinely new ride starts near 0, far from a stale checkpoint's lastRiderDist).
@@ -2113,7 +2120,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             if (cp != null) {
                                 val recent = System.currentTimeMillis() - cp.savedAtEpoch in 0..CHECKPOINT_MAX_AGE_MS
                                 val keyMatch = cp.routeKey == curKey
-                                val paramMatch = cp.pick == eff.ghostPick && cp.vpTimePerM == vpTpm
+                                // vpTimePerM is deliberately NOT part of this gate: since the neutral-fill change
+                                // it no longer influences the accrued gap, so gating resume on it only cost riders
+                                // their lead whenever they changed the Ghost-Pace target mid-ride-lifecycle.
+                                val paramMatch = cp.pick == eff.ghostPick
                                 val continuous = cp.rideEpoch == recordingStartedEpoch ||
                                     kotlin.math.abs(riderDistNow - cp.lastRiderDist) <= CHECKPOINT_RESUME_MARGIN_M
                                 if (recent && keyMatch && paramMatch && continuous) {
@@ -2145,21 +2155,26 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // accrual and the SEG/GP tag below (the integrator's paceAt is called with the same
                         // lat/lng/heading, so the neighbourhood scan need not run twice per second). Null → neutral-fill
                         // (and GP tag). PacePatch.pace already returns null for a non-finite heading.
-                        // FRESHNESS GATE: only a RECENT fix may decide the pace. `lastFix` is overwritten
-                        // on a trusted fix but never nulled on staleness, so a dropout otherwise looks up the
-                        // history of the position where the fix FROZE and applies it to every dead-reckoned
-                        // metre CoastingEstimator invents elsewhere (a 60 s loss on a climb minted ~+190 s of
-                        // lead, tagged SEG). The route projection 40 lines down already refuses a stale fix on
-                        // the same GPS_FIX_FRESH_MS gate; the number must too — stale ⇒ null ⇒ neutral fill, so
-                        // dead-reckoned metres get no verdict rather than a fabricated one.
+                        // FRESHNESS GATE: only a RECENT fix may decide the pace, for EVERY tier below.
+                        // `lastFix` is overwritten on a trusted fix but never nulled on staleness, so a dropout
+                        // otherwise looks up the history of the position where the fix FROZE and applies it to
+                        // every dead-reckoned metre CoastingEstimator invents elsewhere (a 60 s loss on a climb
+                        // minted ~+190 s of lead, tagged SEG). The route projection 40 lines down already
+                        // refuses a stale fix on the same GPS_FIX_FRESH_MS gate; the number must too — stale ⇒
+                        // null ⇒ neutral fill, so dead-reckoned metres get no verdict rather than a fabricated
+                        // one. This is why tier 2 below is ALSO gated on fixFresh, not gradeFresh alone:
+                        // ELEVATION_GRADE is barometric/odometer-derived, so it keeps streaming right through a
+                        // GPS dropout — a stale gradeFresh check on its own would happily supply tier 2's
+                        // verdict on the very metres CoastingEstimator invented during the loss.
                         val fixFresh = fix != null && SystemClock.elapsedRealtime() - fix.ms <= GPS_FIX_FRESH_MS
                         // Tier 1: this exact road, ridden before (PacePatch). Tier 2: my historical pace at THIS
                         // gradient on a road I have never ridden (GradePace). Tier 3 lives in the integrator: a
-                        // neutral fill that contributes 0. Tier 2 is gated on a FRESH gradient for the same reason
-                        // as tier 1 — a stale gradient describes a hill the rider left minutes ago.
+                        // neutral fill that contributes 0. Both tier 1 and tier 2 require fixFresh (the GPS fix
+                        // itself, not just the gradient sample, must be recent); tier 2 additionally requires a
+                        // FRESH gradient — a stale gradient describes a hill the rider left minutes ago.
                         val paceHere = if (fixFresh) patch?.pace(gLat, gLng, gHdg, eff.ghostPick) else null
                         val gradeFresh = SystemClock.elapsedRealtime() - lastGradeMs <= GPS_FIX_FRESH_MS
-                        val paceGrade = if (paceHere == null && gradeFresh) {
+                        val paceGrade = if (paceHere == null && fixFresh && gradeFresh) {
                             lastGradePct?.let { rm.gradePace?.pace(it, eff.ghostPick) }
                         } else {
                             null

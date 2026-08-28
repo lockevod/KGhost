@@ -32,6 +32,10 @@ live on a data field and as a marker on the map.
   ride**, comparing your pace to your historical pace metre by metre. It never depends on projecting you
   onto the route, so it **can't teleport** on loops, self-crossing routes, shortcuts or reroutes. A
   reroute to a different route **carries your lead** — the race continues, it doesn't restart.
+- **Judges every stretch it can** — the gap checks your history two ways: first for **this exact road**
+  (if you've ridden it before), and if you haven't, for **your typical pace at the current gradient**
+  elsewhere (so a climb you've never done still gets judged against how you climb). Only when neither
+  applies does the gap simply **hold** rather than guess — see the SEG/GP tag below.
 - **Per ride profile** — each Karoo ride profile can have its own setup: how you race (**fixed pace**
   vs **your rides**), its own Ghost Pace base (e.g. faster on the road bike, slower on the MTB), which
   past ghost to use (**best / last / average**), the map icon, and whether KGhost is on at all. So your
@@ -62,7 +66,7 @@ Add these from the Karoo's data-field picker (Extensions):
 
 | Field | Type id | What it shows |
 |---|---|---|
-| Gap (graphic) | `kghost-gap` | Two-dot track: you vs the ghost, with the gap (time/distance) below, tagged SEG (racing your past self on a recorded stretch) or GP (fixed-pace Ghost Pace) |
+| Gap (graphic) | `kghost-gap` | Two-dot track: you vs the ghost, with the gap (time/distance) below, tagged SEG (this stretch is being judged against your history) or GP (no verdict here — nothing recorded to compare against, so the gap just holds) |
 | Gap (numeric) | `kghost-gap-num` | Numeric gap (time / distance, per your preference) |
 | Ghost Gap (s) | `kghost-gap-time` | Plain number: gap in seconds, positive = ahead (Karoo-native rendering) |
 | Ghost Gap (m) | `kghost-gap-dist` | Plain number: gap in metres, positive = ahead (Karoo-native rendering) |
@@ -188,6 +192,10 @@ Device-level switches and recorded-track-library management (not per profile):
   full import cost once. The recorded-track count also **refreshes when you return to the app** (for
   example after granting access following a reinstall), so it reflects the rides already on the device
   without a re-scan.
+- **Rebuild history** — re-reads every ride file from scratch (tap twice to confirm — it archives your
+  current library first, then re-imports it). Use it if your library predates the gradient-pace tier
+  above, so older rides pick up the elevation data that tier needs. It **takes as long as a first
+  import**.
 - **Auto-clean library** — keeps your recorded rides tidy by archiving near-duplicate rides of a route
   (keeping the **fastest and two most recent** of each), so the ghosts stay meaningful and storage
   stays bounded. Archived rides are moved to `/sdcard/KGhost/tracks/archive` and can be restored. On by

@@ -146,6 +146,28 @@ whose track wasn't actually stored (which would orphan the ride by skipping it f
 the ledger reflect the same flushed prefix. Failed files are never marked (they must keep retrying); a
 missing/corrupt ledger loads empty (tolerant decode) and is rebuilt as files are re-marked.
 
+### 4e. Rebuild history — deliberately resetting the ledger
+
+Imports now carry **altitude** (`FitDecoder`/`GpxParser` capture each point's elevation, needed by the
+gradient pace tier — `engine/GradePace.kt`), so a track imported before that landed has no altitude and
+can't feed that tier. The **Rebuild history** button (`RaceScreen`, `HistoryImportRunner.rebuildAll`) is
+a rider-triggered, deliberate reset that upgrades an existing library: `prepareRebuild()` archives every
+file-sourced track (never a live-`RECORDED` one — those have no source file to re-import) and, via
+`resetImportDedup()`, resets BOTH import dedup gates so the follow-on "import all" re-decodes and re-
+stores every one of them with altitude:
+
+- `processed.json` (the §4d ledger) is **deleted outright** — the whole point is to force every source
+  file to re-decode, not skip it as unchanged.
+- `sourcekeys.json` is **rewritten**, not deleted: only the keys of the tracks just archived are dropped
+  from it (`TrackStore.dropSourceKeys`), so a live-recorded ride's `sourceKey` collapse (the mechanism
+  that stops a ride from being stored twice, once live and once re-imported) keeps working for every
+  track NOT part of the rebuild.
+
+Both resets are guarded — see `prepareRebuild`'s doc comment for the "fewer source files than half the
+tracks about to be archived → refuse" and "dedup reset didn't take → refuse" safety checks — so a rebuild
+can't strand the library in `archive/` with nothing able to re-import it. It takes as long as a first
+import (every file is fully re-decoded), which the button's UI hint says up front.
+
 ## 5. Auto-clean (library tidy)
 
 `autoTidy` keeps the library bounded by archiving near-duplicate rides of a route — keeping the **fastest

@@ -158,9 +158,18 @@ moving on elapsed, so it's a transparent estimate, never blanked for a short gap
 - **You deviate, same route** (the Karoo just guides you back): `ON_ROUTE` goes false → `---` while
   off route; when you rejoin → race **continues** (same polyline → `D0`/anchor preserved).
 - **The Karoo recalculates a NEW route** (new polyline to destination): arrives as a new
-  `NavigatingRoute` → KGhost re-matches recorded tracks → new ghost, and `D0`/anchor/firstMove **reset**
-  with the odometer baseline re-captured, so `D0` is correct on the new route. The race restarts on the
-  new route from where you are. If the new route no longer overlaps your history → VP-pace fallback.
+  `NavigatingRoute` → KGhost re-matches recorded tracks → new **① map-marker** ghost, and
+  `D0`/anchor/firstMove **reset** with the odometer baseline re-captured, so `D0` is correct on the new
+  route. If the new route no longer overlaps your history, the map marker falls back to the VP-pace
+  target — but that fallback is about the marker only. The **② gap number** is unaffected by any of
+  this: it comes from `GhostIntegrator`, a route-agnostic pace integrator that rides the metres the
+  rider actually covers, keyed on the rider's real position — not on `D0` or the loaded polyline — so a
+  reroute **carries the accrued lead** rather than restarting it. Its per-tick pace is a three-tier
+  lookup: tier 1 `PacePatch` (this exact road, ridden before), tier 2 `GradePace` (the rider's
+  historical pace at the current gradient, on a road never ridden), tier 3 a neutral fill baked into
+  the integrator (contributes exactly 0 to the gap). When a rerouted road has no history at either
+  tier, the number simply neutral-fills — it gives no verdict rather than fabricating one from the VP
+  target.
 - **Micro-recalc flapping**: route matching dedups on the polyline (only re-matches when it actually
   changes) and a teardown grace debounces transient `Idle` blips.
 

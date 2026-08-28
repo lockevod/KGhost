@@ -7,7 +7,7 @@ import kotlin.math.roundToInt
 
 /** Persisted-model schema version. Bump when the binning or the reducer layout changes so an old blob is
  *  discarded and rebuilt instead of mis-read. Still 1 after the `ema` -> `meanTpm` rename: nothing has ever
- *  been persisted (the store lands in a later task), so there is no old blob in the field to discard. */
+ *  been persisted, so there is no old blob in the field to discard. */
 const val GRADE_SCHEMA_VERSION = 1
 
 /** Gradient bin width (%). 1% is finer than the noise floor of a smoothed barometric profile and keeps the
