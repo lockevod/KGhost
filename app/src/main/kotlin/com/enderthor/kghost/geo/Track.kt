@@ -2,12 +2,19 @@ package com.enderthor.kghost.geo
 
 import kotlinx.serialization.Serializable
 
-/** One recorded sample: position + cumulative ride distance (m) + elapsed time (s). */
-data class TrackPoint(val lat: Double, val lng: Double, val distanceM: Double, val timeS: Double)
+/** One recorded sample: position + cumulative ride distance (m) + elapsed time (s) + altitude (m, null
+ *  when the source carries none — live recording has no altitude stream on karoo-ext). */
+data class TrackPoint(
+    val lat: Double, val lng: Double, val distanceM: Double, val timeS: Double,
+    val eleM: Double? = null,
+)
 
 /** Serializable DTO (kept separate so the in-memory model can evolve independently). */
 @Serializable
-data class TrackPointDto(val lat: Double, val lng: Double, val distanceM: Double, val timeS: Double)
+data class TrackPointDto(
+    val lat: Double, val lng: Double, val distanceM: Double, val timeS: Double,
+    val eleM: Double? = null,
+)
 
 /** Where a track was ingested from. */
 @Serializable
@@ -23,8 +30,8 @@ data class RecordedTrack(
     val source: Source = Source.RECORDED,
 )
 
-fun TrackPoint.toDto() = TrackPointDto(lat, lng, distanceM, timeS)
-fun TrackPointDto.toModel() = TrackPoint(lat, lng, distanceM, timeS)
+fun TrackPoint.toDto() = TrackPointDto(lat, lng, distanceM, timeS, eleM)
+fun TrackPointDto.toModel() = TrackPoint(lat, lng, distanceM, timeS, eleM)
 
 /**
  * Stateful distance-based decimator: keeps a sample only when it is at least [minSpacingM] metres
