@@ -18,11 +18,20 @@ class TrackRecorder(private val decimator: TrackDecimator = TrackDecimator()) {
     // drops it; [build] re-appends it so the track is not truncated and the sourceKey is stable.
     private var lastFed: TrackPoint? = null
 
-    /** Appends a [TrackPoint] iff the [decimator] decides this sample is far enough from the last. */
-    fun onSample(lat: Double, lng: Double, distanceM: Double, timeS: Double) {
-        lastFed = TrackPoint(lat, lng, distanceM, timeS)
+    /**
+     * Appends a [TrackPoint] iff the [decimator] decides this sample is far enough from the last.
+     *
+     * [eleM] is the absolute altitude (m above sea level) at this sample, or null when the device is
+     * not emitting a fresh one. It is what makes a RECORDED track usable by `GradePace`, which derives
+     * its gradient key from the altitude difference over a ~100 m window; a track whose points carry
+     * null altitude contributes none of its metres to that model. Pass null rather than a guess: a
+     * wrong altitude becomes a fake gradient and poisons a GLOBAL bin, which is far worse than a track
+     * that simply abstains.
+     */
+    fun onSample(lat: Double, lng: Double, distanceM: Double, timeS: Double, eleM: Double? = null) {
+        lastFed = TrackPoint(lat, lng, distanceM, timeS, eleM)
         if (decimator.shouldKeep(lat, lng, distanceM)) {
-            buffer.add(TrackPoint(lat, lng, distanceM, timeS))
+            buffer.add(TrackPoint(lat, lng, distanceM, timeS, eleM))
         }
     }
 
