@@ -159,11 +159,12 @@ class GradePaceTest {
         assertEquals(0.18761980830670927, coarseFirst, 1e-9)
     }
 
-    @Test fun `a stop inside one stretch is clipped instead of laundering the whole bin`() {
-        // 4 km flat at 8 m/s (0.125 s/m) with a 1200 s cafe stop on one 20 m step near the end. Clipped at
-        // the STEP the stop costs ~37.5 s over 3.92 km -> ~0.1346 s/m; left unclipped the same stop adds
-        // its full 1200 s -> ~0.4311 s/m. That 3.4x separation means the bound below only holds when the
-        // clip is actually firing (delete the clip line in `build` and this test must fail).
+    @Test fun `a stop inside one stretch is dropped instead of laundering the whole bin`() {
+        // 4 km flat at 8 m/s (0.125 s/m) with a 1200 s cafe stop on one 20 m step near the end. The stop
+        // step is DROPPED (it says nothing about pace-at-gradient and a gradient bin is global), so the
+        // bin answers the rider's moving pace exactly and loses that one step's 20 m. Left in, the stop
+        // reads 0.4311 s/m; clipped to the dwell floor it still read 0.1346 s/m — both far outside the
+        // 1e-9 below, so this pins the DROP specifically.
         val stopStep = 198 // step 197 -> 198, inside the last few windows
         val pts = (0 until 201).map { i ->
             TrackPointDto(
@@ -175,8 +176,9 @@ class GradePaceTest {
         }
         val g = GradePace.build(listOf(RecordedTrack(id = "stop", startedAtEpoch = 1L, points = pts)))
         val p = g.pace(0.0, GhostPick.AVERAGE)!!
-        assertTrue("a cafe stop must not launder the flat bin: $p vs clipped ~0.1346 s/m", p < 0.2)
-        assertTrue(p >= 0.125)
+        assertEquals("a cafe stop must not touch the flat bin at all", 0.125, p, 1e-9)
+        // The drop costs exactly the stopped step's metres, nothing more.
+        assertEquals(3900.0, g.coveredM, 1e-6)
     }
 
     @Test fun `a dropout jump does not invent a bin`() {
