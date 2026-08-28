@@ -89,7 +89,8 @@ class GradePaceTest {
         )
         val avg = g.pace(0.0, GhostPick.AVERAGE)!!
         val best = g.pace(0.0, GhostPick.BEST)!!
-        assertEquals(0.12, avg, 1e-9)                      // seed running mean of the two rides
+        // Metre-weighted mean of the two rides: (0.2*3920 + 0.04*3920) / 7840 = 0.12.
+        assertEquals(0.12, avg, 1e-9)
         assertEquals(avg / BEST_MAX_SPEEDUP, best, 1e-9)   // the clamp binds, exactly
     }
 
@@ -112,7 +113,7 @@ class GradePaceTest {
     }
 
     @Test fun `the dto round-trip preserves every bin`() {
-        // Three flat rides at DIFFERENT paces so ema (0.1417), last (0.125) and min (0.1) all differ —
+        // Three flat rides at DIFFERENT paces so mean (0.1417), last (0.125) and min (0.1) all differ —
         // a field swap between toDto/fromDto is invisible on a constant-pace fixture.
         val g = GradePace.build(
             listOf(
@@ -202,27 +203,45 @@ class GradePaceTest {
                 track("errand", n = 251, stepM = 20.0, gradePct = 0.0, speedMs = 5.0, startEpoch = 2L),
             )
         )
-        val ema = g.pace(0.0, GhostPick.AVERAGE)!!
-        assertEquals(0.12375429225486455, ema, 1e-9)
-        assertTrue("the long track must dominate, not split the difference at 0.16", ema < 0.13)
+        val avg = g.pace(0.0, GhostPick.AVERAGE)!!
+        assertEquals(0.12375429225486455, avg, 1e-9)
+        assertTrue("the long track must dominate, not split the difference at 0.16", avg < 0.13)
     }
 
-    @Test fun `two tracks at or above the trust floor fold exactly as the old unweighted EMA did`() {
-        // Regression guard: once w == AGG_ALPHA for both tracks (each contributes >= GRADE_MIN_BIN_M to the
-        // bin), the new weighted update `w*tpm + (1-w)*r.ema` is textually the old `AGG_ALPHA*tpm +
-        // (1-AGG_ALPHA)*r.ema` — this proves the change only bites tracks below the trust floor.
-        // 4 identical 0.2 s/m rides (3920 m each) seed the bin at ema = 0.2 exactly, count = 4 (EMA phase
-        // from here on). Then: track5 = 420 m at 0.1 s/m -> ema = 0.25*0.1 + 0.75*0.2 = 0.175.
-        // track6 = 1920 m at 0.5 s/m -> ema = 0.25*0.5 + 0.75*0.175 = 0.25625.
+    @Test fun `six rides keep folding as one metre-weighted mean, with no EMA phase after four`() {
+        // The old fold switched to an EMA after AGG_SEED_LAPS rides, at which point ride 6 alone carried
+        // 25% of the answer. There is no phase switch any more: every ride is just its metres.
+        // 4 identical 0.2 s/m rides (3920 m each) -> mean 0.2 over 15680 m.
+        // track5 = 420 m at 0.1 s/m -> (0.2*15680 + 0.1*420) / 16100.
+        // track6 = 1920 m at 0.5 s/m -> (that * 16100 + 0.5*1920) / 18020
+        //        = (0.2*15680 + 0.1*420 + 0.5*1920) / 18020 = 4138 / 18020 = 0.2296337402885682.
+        // The old EMA ladder answered 0.25625 here — ride 6 (11% of the metres) moving the bin by 0.06.
         val seeds = (1..4).map { track("seed$it", n = 201, stepM = 20.0, gradePct = 8.0, speedMs = 5.0, startEpoch = it.toLong()) }
         val track5 = track("t5", n = 26, stepM = 20.0, gradePct = 8.0, speedMs = 10.0, startEpoch = 5L)
         val track6 = track("t6", n = 101, stepM = 20.0, gradePct = 8.0, speedMs = 2.0, startEpoch = 6L)
         val g = GradePace.build(seeds + track5 + track6)
-        assertEquals(0.25625, g.pace(8.0, GhostPick.AVERAGE)!!, 1e-9)
+        assertEquals(4138.0 / 18020.0, g.pace(8.0, GhostPick.AVERAGE)!!, 1e-9)
     }
 
-    @Test fun `the seed phase is metre-weighted, not a plain average of the two tracks`() {
-        // Two tracks under AGG_SEED_LAPS history: a 20 km ride at 1/6 s/m and a 1 km ride at 0.5 s/m over
+    @Test fun `one short ride barely moves a bin that already holds a lot of history`() {
+        // The motivating case, in STEADY state (well past the old AGG_SEED_LAPS boundary): 20 flat rides of
+        // 20 km at 0.12 s/m (19920 m folded each -> 398400 m), then ONE 5 km errand at 0.20 s/m (4920 m).
+        // Metre-weighted: (0.12*398400 + 0.2*4920) / 403320 = 48792 / 403320 = 0.120975900... — the errand
+        // is 1.2% of the metres and moves the bin by 0.8%. The old EMA ladder gave the errand full weight
+        // (w = AGG_ALPHA, since 4920 m >= GRADE_MIN_BIN_M) and answered 0.25*0.2 + 0.75*0.12 = 0.14: a 17%
+        // swing from 1.2% of the history. That is the failure this model exists to stop.
+        val history = (1..20).map {
+            track("long$it", n = 1001, stepM = 20.0, gradePct = 0.0, speedMs = 1.0 / 0.12, startEpoch = it.toLong())
+        }
+        val errand = track("errand", n = 251, stepM = 20.0, gradePct = 0.0, speedMs = 5.0, startEpoch = 21L)
+        val g = GradePace.build(history + errand)
+        val avg = g.pace(0.0, GhostPick.AVERAGE)!!
+        assertEquals(48792.0 / 403320.0, avg, 1e-9)
+        assertTrue("one errand must not drag an all-time average to 0.14: $avg", avg < 0.1215)
+    }
+
+    @Test fun `the mean is metre-weighted, not a plain average of the two tracks`() {
+        // Two tracks: a 20 km ride at 1/6 s/m and a 1 km ride at 0.5 s/m over
         // the same 2% bin. Metre-weighted: (1/6*19920 + 0.5*920) / (19920+920) = 0.18138195... The plain
         // arithmetic mean of the two paces would be (1/6 + 0.5)/2 = 0.33333... — far enough apart (0.181 vs
         // 0.333) that this assertion actually discriminates between the two formulas.
@@ -232,18 +251,18 @@ class GradePaceTest {
                 track("small", n = 51, stepM = 20.0, gradePct = 2.0, speedMs = 2.0, startEpoch = 2L),
             )
         )
-        val ema = g.pace(2.0, GhostPick.AVERAGE)!!
-        assertEquals(0.1813819577735125, ema, 1e-9)
-        assertTrue("must differ from the plain mean of 0.33333", ema < 0.25)
+        val avg = g.pace(2.0, GhostPick.AVERAGE)!!
+        assertEquals(0.1813819577735125, avg, 1e-9)
+        assertTrue("must differ from the plain mean of 0.33333", avg < 0.25)
     }
 
     @Test fun `a gap in the middle does not launder its straddled bin from either side's flat pace`() {
         // 4 km flat @ 8 m/s (ele 0), then a device-off jump to distance 7000 / ele 300, then normal flat
         // riding resumes at ele ~300. The jump step itself is dropped by the DROPOUT_GAP_M guard, but
-        // without a straddle guard the next few steps still take their trailing window edge from BEFORE the
-        // gap: the step to 7020 sees dd = 7020 - 4000 = 3020, grade = 300 / 3020 * 100 = 9.93% -> bin 10,
-        // pouring that step's real FLAT pace into a bogus "10% climb" bin. Six such tracks pour ~480 m into
-        // bin 10 -- enough to clear GRADE_MIN_BIN_M and answer ~0.125 s/m for a 10% wall.
+        // unless the window RESTARTS at the gap the next few steps still take their trailing edge from
+        // BEFORE it: the step to 7020 sees dd = 7020 - 4000 = 3020, grade = 300 / 3020 * 100 = 9.93% ->
+        // bin 10, pouring that step's real FLAT pace into a bogus "10% climb" bin. Six such tracks pour
+        // ~480 m into bin 10 -- enough to clear GRADE_MIN_BIN_M and answer ~0.125 s/m for a 10% wall.
         fun trackWithMidGap(id: String, epoch: Long): RecordedTrack {
             val flatA = (0 until 201).map { i ->
                 TrackPointDto(lat = 41.4 + i * 0.0001, lng = 2.1, distanceM = i * 20.0, timeS = i * 2.5, eleM = 0.0)
@@ -259,6 +278,36 @@ class GradePaceTest {
         }
         val g = GradePace.build((1..6).map { trackWithMidGap("gap$it", it.toLong()) })
         assertNull("a gap-straddling window must not invent a 10% climb", g.pace(10.0, GhostPick.AVERAGE))
+        assertEquals(
+            "the real flat pace either side of the gap must still be answered",
+            0.125, g.pace(0.0, GhostPick.AVERAGE)!!, 1e-3,
+        )
+    }
+
+    @Test fun `a 250 m gap is too small for a span bound to catch and must still not invent a bin`() {
+        // The leak a dd upper bound of GRADE_WINDOW_M + DROPOUT_GAP_M (= 300 m) could not close. 4 km flat
+        // @ 8 m/s (ele 0), a 250 m device-off jump to distance 4250 / ele 25, then flat riding at ele 25.
+        // The jump step is dropped, but with the trailing edge left at 4000 the next two steps still pass a
+        // 300 m span bound: 4270 -> dd = 270, grade = 25/270 = 9.26% -> bin 9; 4290 -> dd = 290, grade =
+        // 8.62% -> bin 9. Each leaks its flat 20 m, so 11 such rides put 440 m into bin 9 -- over
+        // GRADE_MIN_BIN_M, so the table would confidently answer a FLAT 0.125 s/m for a 9% climb.
+        // Restarting the window at the gap leaves bin 9 empty at any gap size.
+        fun trackWithSmallGap(id: String, epoch: Long): RecordedTrack {
+            val flatA = (0 until 201).map { i ->
+                TrackPointDto(lat = 41.4 + i * 0.0001, lng = 2.1, distanceM = i * 20.0, timeS = i * 2.5, eleM = 0.0)
+            }
+            val jump = TrackPointDto(lat = 41.43, lng = 2.1, distanceM = 4250.0, timeS = 530.0, eleM = 25.0)
+            val flatB = (1..50).map { k ->
+                TrackPointDto(
+                    lat = 41.43 + k * 0.0001, lng = 2.1,
+                    distanceM = 4250.0 + k * 20.0, timeS = 530.0 + k * 2.5, eleM = 25.0,
+                )
+            }
+            return RecordedTrack(id = id, startedAtEpoch = epoch, points = flatA + jump + flatB)
+        }
+        val g = GradePace.build((1..11).map { trackWithSmallGap("small$it", it.toLong()) })
+        assertNull("a 250 m dropout is not a 9% climb", g.pace(9.0, GhostPick.AVERAGE))
+        assertTrue("nothing may leak into bin 9 at all", g.toDto().bins.none { it.bin == 9 })
         assertEquals(
             "the real flat pace either side of the gap must still be answered",
             0.125, g.pace(0.0, GhostPick.AVERAGE)!!, 1e-3,
