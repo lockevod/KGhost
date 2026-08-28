@@ -15,26 +15,38 @@ enum class CoastQuality {
 
 /**
  * Dead-reckoning estimator for a distance signal that re-emits its LAST value when GPS is lost.
- * While the raw distance is frozen but the rider was moving, it extrapolates distance at the last
- * known speed (coasting, like a real GPS unit) and NEVER stops producing a value — a prolonged loss
- * is reported as [CoastQuality.LONG_LOSS] (an estimate to be shown marked + alerted) rather than
- * blanked. A genuine stop (speed below [minMovingMs]) is treated as legitimate, not coasted.
+ * While the raw distance is frozen but the rider was moving, it extrapolates distance at the reported
+ * speed (coasting, like a real GPS unit) and NEVER stops producing a value — a prolonged loss is
+ * reported as [CoastQuality.LONG_LOSS] (an estimate to be shown marked + alerted) rather than blanked.
+ * A genuine stop (speed below [minMovingMs]) is treated as legitimate, not coasted.
  * Pure; the caller supplies the ride-elapsed clock via [update]'s `elapsedS`. Confined to the
  * single tick coroutine (no cross-thread use).
  *
+ * ## Two independent clocks
+ * A stop has to do two OPPOSITE things, so they are tracked separately:
+ *  * the **odometer** ([effectiveDistanceM]) INTEGRATES speed tick by tick while blind. A stop simply
+ *    holds it: the stop adds nothing (no phantom metres), and takes nothing away (metres already
+ *    dead-reckoned were really ridden and are kept). Integrating per tick — rather than multiplying
+ *    one speed sample by the whole frozen span — also makes it monotone: a speed sample that drops
+ *    late in a dropout can never yank the odometer backwards.
+ *  * the **loss clock** ([coastingSeconds]) is what the rider is TOLD. It accumulates only while the
+ *    raw distance is frozen AND we cannot prove the rider is stopped, and it is cleared ONLY when the
+ *    raw distance genuinely changes. A stop therefore neither advances it (a parked bike is not a GPS
+ *    failure) nor clears it (a dropout broken by a red light is still one dropout), so the "GPS lost"
+ *    alert, the `estimated` mark and the give-up blank stay honest across stop-and-go riding.
+ *
  * Per tick, [update] classifies the raw distance and produces an EFFECTIVE distance + a [quality] +
  * [coastingSeconds]:
- *  1. **Distance changing** (new value): real movement → effective = raw, quality = LIVE, coasting = 0.
- *     Remembers `lastChangedDistanceM`, `lastChangeElapsedS`, and the last moving speed.
- *  2. **Frozen + essentially stopped** (`speed < minMovingMs`): legitimate stop → effective = raw
- *     (frozen), quality = LIVE, coasting = 0 (the gap stays valid because the ghost keeps moving).
- *     The coast anchor is RE-ANCHORED here too, so a stop can never age it and later be dead-reckoned
- *     away as one giant phantom jump (see the branch comment).
- *  3. **Frozen + moving (or speed unavailable)**: GPS dropout → COAST: effective =
- *     `lastChangedDistanceM + lastMovingSpeedMs * coastingSeconds`. quality = COASTING while
- *     `coastingSeconds * 1000 <= coastWindowMs`, else LONG_LOSS. Either way we keep extrapolating —
- *     we never blank, because a bike computer should keep estimating through a dropout and snap back
- *     when the fix returns.
+ *  1. **Distance changing** (new value): real movement → effective = raw, quality = LIVE, both clocks
+ *     reset. Remembers the last moving speed.
+ *  2. **Frozen + provably stopped** (`speed < minMovingMs`): legitimate stop → hold everything.
+ *  3. **Frozen + moving (or speed unavailable)**: GPS dropout → COAST: `effective += speed * dt`, and
+ *     the loss clock advances. quality is COASTING while the loss is within `coastWindowMs`, else
+ *     LONG_LOSS. Either way we keep extrapolating — we never blank, because a bike computer should
+ *     keep estimating through a dropout and snap back when the fix returns. With a NULL speed we fall
+ *     back to the last moving speed, BOUNDED to one coast window's worth: a silent SPEED stream (a
+ *     paired wheel/ANT+ sensor stops broadcasting exactly when the wheel stops) is indistinguishable
+ *     from a dropout by speed alone, so we cap the invention instead of guessing.
  *
  * Unlike the old design there is no "untrustworthy → blank" regime: even speed-unavailable frozen
  * data is coasted at the last remembered moving speed (0 if the rider was stopped), so the field
@@ -60,7 +72,11 @@ class CoastingEstimator(
     var quality: CoastQuality = CoastQuality.LIVE
         private set
 
-    /** Seconds the distance has been frozen-while-moving (dead-reckoned). 0 when [quality] is LIVE. */
+    /**
+     * The loss clock: seconds the raw distance has been frozen while the rider was NOT provably
+     * stopped. 0 when [quality] is LIVE. It is what the GPS-lost alert and the give-up blank run on,
+     * and it SURVIVES a stop (see the class KDoc) — only a real change in the raw distance clears it.
+     */
     var coastingSeconds: Double = 0.0
         private set
 
@@ -68,14 +84,15 @@ class CoastingEstimator(
     /** The last raw value seen (to detect change). NaN until the first call. */
     private var lastRawM: Double = Double.NaN
 
-    /** The raw value at the last time it actually changed — the coast anchor. */
-    private var lastChangedDistanceM: Double = 0.0
-
-    /** Ride-elapsed seconds at the last time the raw value actually changed (NaN until first call). */
-    private var lastChangeElapsedS: Double = Double.NaN
+    /** Previous tick's ride-elapsed seconds, for the per-tick integration step (NaN until first call). */
+    private var prevElapsedS: Double = Double.NaN
 
     /** The last speed (m/s) observed while the rider was moving (>= [minMovingMs]). */
     private var lastMovingSpeedMs: Double = 0.0
+
+    /** Seconds already dead-reckoned on a NULL speed since the last real distance change — the budget
+     *  for the bound described in the class KDoc. */
+    private var unprovenCoastS: Double = 0.0
 
     /**
      * Feed the latest raw distance (m), speed (m/s, or null if unavailable) and the ride's elapsed
@@ -86,39 +103,35 @@ class CoastingEstimator(
         // Guard non-finite inputs: ignore the sample and keep the previous state (no NaN propagation).
         if (!rawDistanceM.isFinite() || !elapsedS.isFinite()) return
 
-        val firstCall = lastChangeElapsedS.isNaN()
+        val firstCall = prevElapsedS.isNaN()
+        // Elapsed-based, so a pause (ELAPSED_TIME frozen) advances nothing. coerceAtLeast(0) guards a
+        // non-monotonic elapsed glitch.
+        val dt = if (firstCall) 0.0 else (elapsedS - prevElapsedS).coerceAtLeast(0.0)
+        prevElapsedS = elapsedS
         val changed = rawDistanceM != lastRawM || firstCall
+        lastRawM = rawDistanceM
 
         if (changed) {
-            // Real movement (or first call): trust the raw value and re-anchor the coast.
-            lastChangedDistanceM = rawDistanceM
-            lastChangeElapsedS = elapsedS
+            // Real movement (or first call): trust the raw value and clear both clocks — a raw change
+            // is the ONLY proof that the fix is back.
             if (speedMs != null && speedMs >= minMovingMs) lastMovingSpeedMs = speedMs
-            lastRawM = rawDistanceM
             effectiveDistanceM = rawDistanceM
             quality = CoastQuality.LIVE
             coastingSeconds = 0.0
+            unprovenCoastS = 0.0
             return
         }
 
-        // Frozen (re-emitted last value).
-        lastRawM = rawDistanceM
-
         if (speedMs != null && speedMs < minMovingMs) {
-            // Legitimate stop (e.g. red light): frozen distance is valid, no extrapolation.
-            // RE-ANCHOR the coast on every stopped tick. Without this the anchor keeps ageing through
-            // a stop that ELAPSED_TIME still counts (auto-pause is a user setting, and many riders
-            // leave it off), so the first tick that reports speed >= minMovingMs — or a null speed —
-            // before the DISTANCE stream has re-emitted would coast
-            // `lastMovingSpeedMs * the WHOLE stop` in ONE tick: a 2 min light minted ~726 phantom
-            // metres, which the gap engine then charged at historical pace and never refunded.
-            // Anchoring to the raw (frozen) value is exactly what we publish this tick, so the coast
-            // always resumes from the last distance the rider actually saw.
-            lastChangedDistanceM = rawDistanceM
-            lastChangeElapsedS = elapsedS
-            effectiveDistanceM = rawDistanceM
-            quality = CoastQuality.LIVE
-            coastingSeconds = 0.0
+            // Legitimate stop (e.g. red light): the wheel is provably still, so add nothing — and take
+            // nothing away. HOLDING the odometer is what makes a stop safe in both directions: it
+            // cannot age into phantom metres (auto-pause is a user setting many riders leave off, so
+            // ELAPSED_TIME counts through a light, and multiplying the last moving speed by the whole
+            // stop used to mint ~726 m in one tick), and it cannot throw away real dead-reckoned ones
+            // (a junction stop mid-dropout used to rewind the odometer to where the fix died and then
+            // hand every discarded metre back as one huge LIVE step when it returned).
+            // The loss clock is frozen but NOT cleared: a dropout is still a dropout after a red light.
+            quality = qualityOf(coastingSeconds)
             return
         }
 
@@ -133,14 +146,26 @@ class CoastingEstimator(
             return
         }
 
-        // Frozen while moving — or speed unavailable, in which case we coast at the last remembered
-        // moving speed (0 if the rider was stopped before). Gap is ride-elapsed time since the last
-        // real change, so a pause (ELAPSED_TIME frozen) contributes nothing. coerceAtLeast(0) guards a
-        // non-monotonic elapsed glitch. We NEVER blank — a prolonged loss is flagged LONG_LOSS.
-        val gapS = (elapsedS - lastChangeElapsedS).coerceAtLeast(0.0)
-        coastingSeconds = gapS
-        effectiveDistanceM = lastChangedDistanceM + lastMovingSpeedMs * gapS
-        quality = if (gapS * 1000.0 <= coastWindowMs) CoastQuality.COASTING else CoastQuality.LONG_LOSS
+        // Frozen while moving — or speed unavailable. We NEVER blank; a prolonged loss is LONG_LOSS.
+        coastingSeconds += dt
+        if (speedMs != null) {
+            // Positive evidence of movement: dead-reckon at the speed we are actually being told, for
+            // as long as it lasts. This is the genuine-dropout-while-moving path.
+            effectiveDistanceM += speedMs * dt
+        } else {
+            // No speed at all: fall back to the last moving speed, but spend at most one coast window
+            // of it — beyond that we would be inventing a ride out of pure silence.
+            val budgetS = (coastWindowMs / 1000.0 - unprovenCoastS).coerceIn(0.0, dt)
+            unprovenCoastS += budgetS
+            effectiveDistanceM += lastMovingSpeedMs * budgetS
+        }
+        quality = qualityOf(coastingSeconds)
+    }
+
+    private fun qualityOf(lossS: Double): CoastQuality = when {
+        lossS <= 0.0 -> CoastQuality.LIVE
+        lossS * 1000.0 <= coastWindowMs -> CoastQuality.COASTING
+        else -> CoastQuality.LONG_LOSS
     }
 
     companion object {
