@@ -2166,7 +2166,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // ELEVATION_GRADE is barometric/odometer-derived, so it keeps streaming right through a
                         // GPS dropout — a stale gradeFresh check on its own would happily supply tier 2's
                         // verdict on the very metres CoastingEstimator invented during the loss.
-                        val fixFresh = fix != null && SystemClock.elapsedRealtime() - fix.ms <= GPS_FIX_FRESH_MS
+                        // COAST GATE (same invariant, second layer): the fix can be perfectly FRESH while the
+                        // odometer is dead-reckoned — a rider parked in the open, or the first seconds of a
+                        // dropout before GPS_FIX_FRESH_MS expires. Those metres were invented, not ridden, so
+                        // they must get a neutral fill too. Without this, coast OVERSHOOT is a one-signed
+                        // ratchet: the odometer's snap BACK when the fix returns hits GhostIntegrator's dd<0
+                        // branch, which keeps ghostTime by design, so the lead bought with phantom metres is
+                        // never refunded (measured ~+38 s per dropout, linear in dropouts).
+                        val fixFresh = fix != null && SystemClock.elapsedRealtime() - fix.ms <= GPS_FIX_FRESH_MS &&
+                            coast.quality == CoastQuality.LIVE
                         // Tier 1: this exact road, ridden before (PacePatch). Tier 2: my historical pace at THIS
                         // gradient on a road I have never ridden (GradePace). Tier 3 lives in the integrator: a
                         // neutral fill that contributes 0. Both tier 1 and tier 2 require fixFresh (the GPS fix
