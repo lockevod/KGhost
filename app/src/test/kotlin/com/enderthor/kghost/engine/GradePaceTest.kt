@@ -139,18 +139,23 @@ class GradePaceTest {
         assertEquals(g.toDto(), back.toDto())
     }
 
-    @Test fun `a dense track does not outvote a decimated one over the same road`() {
-        // Same 4% road twice, same length, different point spacing AND different pace. One sample per track
-        // per bin means the fold is the plain mean of the two rides, whichever order they are folded in.
+    @Test fun `a dense track does not outvote a decimated one by point count over the same road`() {
+        // Same 4% road twice, same length, different point spacing AND different pace. The vote is
+        // metre-weighted, not per-sample, so the dense track's ~4x point count over the coarse one must not
+        // skew the result toward its own pace.
         fun coarse(epoch: Long) = track("coarse", n = 201, stepM = 20.0, gradePct = 4.0, speedMs = 4.0, startEpoch = epoch)
         fun dense(epoch: Long) = track("dense", n = 801, stepM = 5.0, gradePct = 4.0, speedMs = 8.0, startEpoch = epoch)
 
         val coarseFirst = GradePace.build(listOf(coarse(1L), dense(2L))).pace(4.0, GhostPick.AVERAGE)!!
         val denseFirst = GradePace.build(listOf(dense(1L), coarse(2L))).pace(4.0, GhostPick.AVERAGE)!!
         assertEquals("fold order must not matter at 2 rides", coarseFirst, denseFirst, 1e-9)
-        // Plain mean of 0.25 s/m and 0.125 s/m. A per-sample fold would land on whichever ride was last
-        // (the dense one contributes ~4x the updates).
-        assertEquals(0.1875, coarseFirst, 1e-9)
+        // Metre-weighted mean of 0.25 s/m (coarse) and 0.125 s/m (dense). Each track folds a 4 km road
+        // through the 100 m grade window, but window-edge loss differs slightly by point spacing: coarse
+        // covers 3920 m, dense covers 3905 m (confirmed via GradePace.build(...).coveredM on each alone).
+        // (0.25*3920 + 0.125*3905) / (3920+3905) = 0.18761980830670927 - slightly ABOVE the arithmetic mean
+        // 0.1875, toward coarse's pace, because coarse contributes the (slightly) larger share of metres
+        // despite having 4x fewer points than dense. That's the actual claim of this test.
+        assertEquals(0.18761980830670927, coarseFirst, 1e-9)
     }
 
     @Test fun `a stop inside one stretch is clipped instead of laundering the whole bin`() {
