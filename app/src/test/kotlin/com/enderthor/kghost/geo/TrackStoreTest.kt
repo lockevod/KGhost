@@ -418,11 +418,12 @@ class TrackStoreTest {
         assertEquals(listOf("A", "B"), seen.sorted())
     }
 
-    @Test fun `replaceSourceKeys overwrites the set instead of unioning onto it`() {
+    @Test fun `dropSourceKeys subtracts from what is on disk and keeps the rest`() {
         val store = TrackStore(tmp.newFolder("tracks"))
-        store.save(track("A", 40.0, -3.0).copy(sourceKey = "keep"))
-        store.replaceSourceKeys(setOf("keep", "drop"))
-        store.replaceSourceKeys(setOf("keep"))
+        store.add(track("A", 40.0, -3.0).copy(sourceKey = "keep"))
+        store.add(track("B", 41.0, -3.0).copy(sourceKey = "drop"))
+
+        assertTrue(store.dropSourceKeys(setOf("drop", "never-there")))
 
         assertEquals(setOf("keep"), store.knownSourceKeys())
     }

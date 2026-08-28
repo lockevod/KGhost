@@ -89,11 +89,26 @@ class TrackStore(private val dir: File) {
     }
 
     /**
-     * Overwrites `sourcekeys.json` with exactly [keys]. Used by the rebuild, which must DROP the keys of
-     * the tracks it archived (so their files re-decode) while KEEPING those of the tracks that survive —
-     * deleting the file outright would let every live-recorded ride's FIT land a permanent duplicate.
+     * SUBTRACTIVE rewrite of `sourcekeys.json`: removes [drop] from whatever is on disk RIGHT NOW, under
+     * ONE [indexLock] hold, and returns whether the new set actually reads back. Used by the rebuild,
+     * which must drop the keys of the tracks it archives (so their files re-decode) while keeping every
+     * other key — deleting the file outright would let every live-recorded ride's FIT land a duplicate.
+     *
+     * Subtractive rather than "overwrite with the survivors the caller sampled earlier": a ride finishing
+     * between that snapshot and this call — or a track whose json was momentarily unparseable — is absent
+     * from the snapshot, so an overwrite would erase its key, and its FIT would then land a PERMANENT twin
+     * ([selectArchivable] leaves twin groups of <= 3 alone forever). Reading and subtracting under the same
+     * lock hold closes that window.
+     *
+     * The Boolean matters because [atomicWriteText] deliberately PRESERVES the old file on an IO error and
+     * reports nothing: a caller about to archive its whole library must be able to tell the reset did not
+     * take, instead of archiving against a keys file that still dedups every re-decoded track away.
      */
-    fun replaceSourceKeys(keys: Set<String>) = synchronized(indexLock) { writeSourceKeys(keys) }
+    fun dropSourceKeys(drop: Set<String>): Boolean = synchronized(indexLock) {
+        val remaining = readSourceKeys() - drop
+        writeSourceKeys(remaining)
+        readSourceKeys() == remaining
+    }
 
     /**
      * Returns the set of source keys already ingested via [add]. An absent `sourcekeys.json` is a

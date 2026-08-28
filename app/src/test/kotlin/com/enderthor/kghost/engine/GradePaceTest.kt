@@ -344,4 +344,15 @@ class GradePaceTest {
             0.125, g.pace(0.0, GhostPick.AVERAGE)!!, 1e-3,
         )
     }
+
+    @Test fun `the builder is single-use, so a second build cannot double-count the history`() {
+        val b = GradePace.Builder()
+        b.add(track("a", n = 201, stepM = 20.0, gradePct = 0.0, speedMs = 10.0))
+        val first = b.build()
+        // A second build() on the same builder used to re-fold every track: `count` doubled (so an
+        // AVERAGE gated on ride count answered on one ride) and `coveredM` claimed twice the history.
+        val second = runCatching { b.build() }
+        assertTrue("a second build() must be refused, not silently double-count", second.isFailure)
+        assertTrue("the first build must still be a real model", first.coveredM > 0.0)
+    }
 }

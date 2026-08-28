@@ -318,12 +318,18 @@ internal fun ImportSection(
     // Re-check permission whenever the screen resumes so granting it elsewhere and returning here
     // flips the UI from the permission card to the import buttons without a manual refresh.
     var hasAccess by remember { mutableStateOf(StoragePermission.hasAllFilesAccess(context)) }
+    // Confirm-arm for the DESTRUCTIVE rebuild (see the button below). Declared up here so the lifecycle
+    // observer can disarm it: this Composable is never scrolled out of composition and survives
+    // backgrounding, so an arm left standing would still be live days later — and one tap on a button
+    // that reads "Tap again to confirm" long after the rider forgot arming it is the whole risk.
+    var rebuildArmed by remember { mutableStateOf(false) }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 hasAccess = StoragePermission.hasAllFilesAccess(context)
             }
+            if (event == Lifecycle.Event.ON_PAUSE) rebuildArmed = false
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -336,6 +342,11 @@ internal fun ImportSection(
     val canceled by HistoryImportRunner.canceled.collectAsStateWithLifecycle()
     val pendingCompletion by HistoryImportRunner.pendingCompletion.collectAsStateWithLifecycle()
     val preparing by HistoryImportRunner.preparing.collectAsStateWithLifecycle()
+    val rebuilding by HistoryImportRunner.rebuilding.collectAsStateWithLifecycle()
+
+    // Disarm on ANY import starting or finishing — arming Rebuild, running "All" instead and coming back
+    // to a still-armed (i.e. one-tap-destructive) button is the same trap as the stale arm above.
+    LaunchedEffect(running) { rebuildArmed = false }
 
     // Refresh the recorded-track count once per completion — even one that finished while we were on
     // another screen. We key on the runner's consumable [pendingCompletion] flag (NOT progress.phase,
@@ -397,7 +408,8 @@ internal fun ImportSection(
     // Rebuild ARCHIVES the whole imported library before re-importing it, so it is confirm-then-run: the
     // first tap only arms the button (the hint below already says what it does and how long it takes),
     // the second starts it. A modal dialog would be the usual gesture but does not fit a 2.2" screen.
-    var rebuildArmed by remember { mutableStateOf(false) }
+    // `rebuildArmed` is declared at the top of this Composable so it can be disarmed on pause / on any
+    // import starting or ending.
     OutlinedButton(
         onClick = {
             if (!rebuildArmed) {
@@ -441,6 +453,13 @@ internal fun ImportSection(
     when {
         preparing -> Text(
             text = stringResource(R.string.import_rebuild_preparing),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        // A cancel right after a rebuild's archive leaves the library in archive/ with nothing having
+        // re-imported it. That IS recoverable — the keys of the archived tracks are gone and the ledger
+        // was deleted, so a plain "All" re-imports every one of them — but only if the rider is TOLD.
+        canceled && rebuilding -> Text(
+            text = stringResource(R.string.import_canceled_rebuild),
             style = MaterialTheme.typography.bodyMedium,
         )
         canceled -> Text(
