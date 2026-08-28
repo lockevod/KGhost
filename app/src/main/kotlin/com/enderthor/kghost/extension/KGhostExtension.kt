@@ -616,7 +616,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         /**
          * B2 path-following pace map for this route's area (2D `(cell,bearing)→pace`), built from the
          * overlapping history at match time and published ATOMICALLY with the route so the tick never
-         * pairs a new route with a stale patch. Null when no history overlaps → the integrator VP-fills
+         * pairs a new route with a stale patch. Null when no history overlaps → the integrator neutral-fills
          * the whole route. Not persisted; rebuilt on every route load.
          */
         val pacePatch: PacePatch?,
@@ -1976,7 +1976,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     if (rm != null) {
                         // ==================== B2 path-following ghost ====================
                         // The gap NUMBER comes from GhostIntegrator: it accrues the rider's HISTORICAL pace
-                        // (PacePatch, VP-fill on novel ground) over the metres ACTUALLY ridden, so reroutes /
+                        // (PacePatch, neutral-fill on novel ground) over the metres ACTUALLY ridden, so reroutes /
                         // shortcuts / loops are irrelevant BY CONSTRUCTION — no route-distance projection feeds
                         // the number, so it can never teleport. The map MARKER is placed in the ROUTE frame
                         // from that gap + the historical-pace curve (rg): it trails you when you are AHEAD and
@@ -1996,7 +1996,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 // ROUTE-AGNOSTIC — it accrues historical time per ridden metre on the ACTUAL path —
                                 // so a new polyline does NOT restart the race. KEEP the integrator, its accrued lead,
                                 // and the race clock (firstMoveElapsedS); only the route-SPECIFIC marker anchor +
-                                // finish state re-bootstrap on the new line (the pace lookup/VP-fill and the route-
+                                // finish state re-bootstrap on the new line (the pace lookup/neutral-fill and the route-
                                 // ghost curve follow rm.pacePatch / rm.routeGhost automatically from the next tick).
                                 // On the FIRST load these are all already null/fresh, so this is a normal cold start.
                                 lastGoodRouteDistM = null // the held rider route position that anchors the marker
@@ -2088,16 +2088,24 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             }
                         }
                         // Rider odometer + the trusted GPS fix (lat/lng/heading). A null/stale fix → NaN, and
-                        // the integrator VP-fills (no history lookup) while the marker holds its last route pos.
+                        // the integrator neutral-fills (no history lookup) while the marker holds its last route pos.
                         val fix = lastFix
                         val gLat = fix?.lat ?: Double.NaN
                         val gLng = fix?.lng ?: Double.NaN
                         val gHdg = fix?.headingDeg ?: Double.NaN
                         // Historical pace at THIS tick's fix — computed ONCE and reused for both the integrator
                         // accrual and the SEG/GP tag below (the integrator's paceAt is called with the same
-                        // lat/lng/heading, so the neighbourhood scan need not run twice per second). Null → VP-fill
+                        // lat/lng/heading, so the neighbourhood scan need not run twice per second). Null → neutral-fill
                         // (and GP tag). PacePatch.pace already returns null for a non-finite heading.
-                        val paceNow = patch?.pace(gLat, gLng, gHdg, eff.ghostPick)
+                        // FRESHNESS GATE: only a RECENT fix may decide the pace. `lastFix` is overwritten
+                        // on a trusted fix but never nulled on staleness, so a dropout otherwise looks up the
+                        // history of the position where the fix FROZE and applies it to every dead-reckoned
+                        // metre CoastingEstimator invents elsewhere (a 60 s loss on a climb minted ~+190 s of
+                        // lead, tagged SEG). The route projection 40 lines down already refuses a stale fix on
+                        // the same GPS_FIX_FRESH_MS gate; the number must too — stale ⇒ null ⇒ neutral fill, so
+                        // dead-reckoned metres get no verdict rather than a fabricated one.
+                        val fixFresh = fix != null && SystemClock.elapsedRealtime() - fix.ms <= GPS_FIX_FRESH_MS
+                        val paceNow = if (fixFresh) patch?.pace(gLat, gLng, gHdg, eff.ghostPick) else null
                         integ.onTick(riderDist, gLat, gLng, gHdg, elapsedS - moveStart) { _, _, _ -> paceNow }
                         integLastRiderDist = riderDist
                         // Persist the scalar race state ~every CHECKPOINT_INTERVAL_MS so a mid-ride power-off /
@@ -2270,7 +2278,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         }
                         GapStateHolder.update(gap)
                         // SEG/GP tag: SEG when the rider is on recorded history this tick (patch has pace at
-                        // the fix), GP on VP-fill. The field reads only non-null (SEG) — the label is unused,
+                        // the fix), GP on neutral-fill. The field reads only non-null (SEG) — the label is unused,
                         // so a stable instance (deduped by the holder) avoids per-tick churn.
                         val onHistory = paceNow != null
                         if (onHistory) SegmentInfoHolder.set(B2_ON_HISTORY) else SegmentInfoHolder.clear()
@@ -2292,6 +2300,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                         "gapT=${"%.0f".format(gap.gapTimeS)}s gapD=${"%.0f".format(gap.gapDistanceM)}m " +
                                         "${if (gap.ahead) "AHEAD" else "BEHIND"} ghostTime=${"%.0f".format(integ.ghostTime)} " +
                                         "seg=${if (onHistory) "SEG" else "GP"} " +
+                                        "cov=${"%.0f".format(100.0 * integ.matchedM / (integ.matchedM + integ.filledM).coerceAtLeast(1.0))}% " +
                                         "riderR=${lastGoodRouteDistM?.let { "%.0f".format(it) } ?: "--"} " +
                                         "elapsed=${"%.0f".format(elapsedS)} fresh=$fresh " +
                                         "onRoute=$lastOnRoute rejoin=$lastRejoinActive " +

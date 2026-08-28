@@ -2,8 +2,9 @@ package com.enderthor.kghost.engine
 
 /**
  * Path-following ghost race engine (pure). Accrues the rider's HISTORICAL time per metre ACTUALLY ridden
- * (from a pace source, VP-fill where there is no history), so the ghost rides the rider's own path —
- * reroutes / shortcuts / loops are irrelevant. A decimated breadcrumb places the map-ghost marker.
+ * (from a pace source; where there is no history the fill is NEUTRAL — the rider's own pace over that
+ * tick, so novel ground moves the gap by 0), so the ghost rides the rider's own path — reroutes /
+ * shortcuts / loops are irrelevant. A decimated breadcrumb places the map-ghost marker.
  *
  * gapTimeS = ghostTime − riderElapsed  (positive → rider faster than historical-self over ground covered)
  * gapDistM = riderDist − D_ghost       (D_ghost = path distance where cumGhostTime == riderElapsed)
@@ -24,14 +25,22 @@ class GhostIntegrator(
     var ghostLat = Double.NaN; private set
     var ghostLng = Double.NaN; private set
 
+    /** Metres accrued against real history, and metres neutral-filled. The gap is a verdict on
+     *  [matchedM] ONLY — [filledM] metres moved it by 0 — so `matchedM / (matchedM + filledM)` is the
+     *  coverage the number actually speaks for. Nothing measured this before; without it neither the
+     *  rider nor the code can tell a verdict from a silence. */
+    var matchedM = 0.0; private set
+    var filledM = 0.0; private set
+
     private var lastRiderDist = Double.NaN
+    private var prevElapsedS = Double.NaN
     private var pendingResumeLead: Double? = null
     private val bcDist = ArrayList<Double>()
     private val bcTime = ArrayList<Double>()
     private val bcLat = ArrayList<Double>()
     private val bcLng = ArrayList<Double>()
 
-    /** [paceAt] = the pace lookup (lat, lng, bearing) -> s/m or null (→ VP-fill). */
+    /** [paceAt] = the pace lookup (lat, lng, bearing) -> s/m or null (→ neutral-fill). */
     fun onTick(riderDist: Double, lat: Double, lng: Double, bearingDeg: Double, elapsedS: Double,
                paceAt: (Double, Double, Double) -> Double?) {
         val resumeLead = pendingResumeLead
@@ -51,7 +60,23 @@ class GhostIntegrator(
         if (bcDist.isEmpty()) push(riderDist, lat, lng) // seed: fresh OR post-restore (never NaN ghost)
         val dd = riderDist - lastRiderDist
         if (dd > 0.0) {
-            ghostTime += (paceAt(lat, lng, bearingDeg) ?: vpTimePerM) * dd
+            // NEUTRAL fill on ground with no history: accrue the rider's OWN pace over this tick, so those
+            // metres move the gap by exactly 0 and the number only ever judges ground the rider has ridden
+            // before. The old fixed VP-fill (the 12 km/h Ghost-Pace target) fabricated a verdict on novel
+            // ground: a rider averaging more than 2x the target came out "ahead" by more than their own
+            // elapsed time, and by kilometres.
+            //
+            // When the race clock did NOT advance (a repeated ELAPSED_TIME value against a fresh distance —
+            // the caller's combine+sample can emit one, and its own freeze is gated on `elapsedS > prev`)
+            // the neutral contribution is 0, NOT the VP pace: charging vpTimePerM there would mint
+            // `vpTimePerM * dd` of unearned lead on every such tick, one-signed and never given back —
+            // the same fabricated verdict, re-entering through the back door. Also covers the NaN
+            // prevElapsed of the very first tick (which carries dd == 0 anyway).
+            val de = elapsedS - prevElapsedS
+            val fill = if (de > 0.0) de / dd else 0.0 // NaN prevElapsed → false → 0
+            val hist = paceAt(lat, lng, bearingDeg)
+            if (hist != null) matchedM += dd else filledM += dd
+            ghostTime += (hist ?: fill) * dd
             lastRiderDist = riderDist
             if (riderDist - bcDist.last() >= decimateM) push(riderDist, lat, lng)
         } else if (dd < 0.0) {
@@ -61,6 +86,7 @@ class GhostIntegrator(
             // (A true odometer reset = a new activity, which gets a fresh integrator — never reached here.)
             lastRiderDist = riderDist
         }
+        prevElapsedS = elapsedS
         gapTimeS = ghostTime - elapsedS
         place(elapsedS, riderDist, lat, lng)
     }
@@ -70,7 +96,7 @@ class GhostIntegrator(
      *  resumed elapsed origin can't inflate the gap. [lastRiderDist] restores the odometer baseline (a
      *  reset odometer just re-baselines via the backward-Δd branch). Breadcrumb re-seeds on that tick. */
     fun restore(leadS: Double, lastRiderDist: Double) {
-        this.lastRiderDist = lastRiderDist; this.pendingResumeLead = leadS
+        this.lastRiderDist = lastRiderDist; this.pendingResumeLead = leadS; this.prevElapsedS = Double.NaN
         bcDist.clear(); bcTime.clear(); bcLat.clear(); bcLng.clear()
     }
 
