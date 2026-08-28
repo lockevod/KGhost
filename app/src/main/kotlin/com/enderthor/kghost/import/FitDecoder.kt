@@ -32,8 +32,8 @@ object FitDecoder {
         // Build lightweight TrackPoints AS records stream in, instead of buffering every heavy
         // RecordMesg first. A multi-hour FIT is ~20k records; holding them all is tens of MB of SDK
         // objects on a 1–2 GB device (OOM risk in a bulk import). The listener processes each record
-        // and drops it; only the TrackPoint list (4 doubles each) is retained. Captured vars are safe:
-        // decode.read drives the listener sequentially on this thread.
+        // and drops it; only the TrackPoint list (4 doubles + an optional altitude each) is retained.
+        // Captured vars are safe: decode.read drives the listener sequentially on this thread.
         val points = ArrayList<TrackPoint>()
         var firstEpochMs: Long? = null
         var prev: LatLng? = null
@@ -64,12 +64,18 @@ object FitDecoder {
                     val distanceM = if (rawDistance < lastDistanceM) lastDistanceM else rawDistance
                     lastDistanceM = distanceM
 
+                    // enhanced_altitude is the modern field (wider range, metres); altitude is the legacy fallback.
+                    // Both are nullable Float in the Garmin SDK and are already metres — no scaling.
+                    // NOT part of the lat/lng/timestamp gate: a record with no altitude is still a usable point.
+                    val eleM = (mesg.enhancedAltitude ?: mesg.altitude)?.toDouble()
+
                     points.add(
                         TrackPoint(
                             lat = lat,
                             lng = lng,
                             distanceM = distanceM,
                             timeS = (epochMs - firstEpochMs!!) / 1000.0,
+                            eleM = eleM,
                         ),
                     )
                     prev = here
