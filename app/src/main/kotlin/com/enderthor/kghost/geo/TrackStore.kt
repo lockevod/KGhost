@@ -104,8 +104,8 @@ class TrackStore(private val dir: File) {
      * take, instead of archiving against a keys file that still dedups every re-decoded track away.
      *
      * A PRESENT-but-unparseable keys file is REBUILT from the library rather than trusted or refused, which
-     * is why it reads via [keysForWrite] rather than [readSourceKeys]: the lenient read maps corruption to
-     * the empty set, so subtracting from it would write `[]` — erasing every LIVE-recorded ride's key —
+     * is why it reads via [keysForWrite] rather than the raw file: a lenient "corrupt → empty" read
+     * would make this write `[]` — erasing every LIVE-recorded ride's key —
      * and then "prove" the reset took by comparing empty to empty. Refusing outright is no better, because
      * EVERY writer of this file ([add], [addAll], [BulkSink.commit]) now goes through the same
      * corruption-aware read: refusing here alone would only delay the damage until the next import. The
@@ -125,20 +125,27 @@ class TrackStore(private val dir: File) {
      * the two apart. Corrupt-but-present → the rebuilt set reads back → true. Could-not-write → the old
      * (or corrupt) file reads back instead → false, and the caller REFUSES with the ledger still in place.
      */
-    fun dropSourceKeys(drop: Set<String>): Boolean = synchronized(indexLock) {
+    fun dropSourceKeys(drop: Set<String>, onUnvouchable: () -> Unit = {}): Boolean = synchronized(indexLock) {
         val current = keysForWrite()
-        if (!current.writable) return@synchronized false
+        if (!current.writable) {
+            // Distinguishable from an IO failure, which returns false WITHOUT this: the caller needs to
+            // tell "a stored ride file is damaged" from "the keys file could not be written", both
+            // because the two need different words on the screen and because only this one is escapable
+            // by re-decoding the source files. See prepareRebuild.
+            onUnvouchable()
+            return@synchronized false
+        }
         val remaining = current.keys - drop
         writeSourceKeys(remaining)
         readSourceKeysOrNull() == remaining
     }
 
     /**
-     * Returns the set of source keys already ingested via [add]. An absent `sourcekeys.json` is a
-     * normal cold-start state → empty, no log; a present-but-unparseable file is treated as empty
-     * and logged (mirrors [readSnapshot]'s corruption handling).
+     * Read-only view of the source keys currently deduped against — the same [keysForWrite] answer the
+     * writers use, so there is exactly ONE read of this state: the file when it parses, the library
+     * (live + archived) when it does not. An absent `sourcekeys.json` is a normal cold-start → empty.
      */
-    fun knownSourceKeys(): Set<String> = synchronized(indexLock) { readSourceKeys() }
+    fun knownSourceKeys(): Set<String> = synchronized(indexLock) { keysForWrite().keys }
 
     /**
      * Pays the index's LAZY one-time costs up front and repairs index/file drift. Call from service
@@ -526,13 +533,13 @@ class TrackStore(private val dir: File) {
 
     /**
      * The keys on disk, or NULL when the file is PRESENT but unparseable — the one distinction the
-     * lenient [readSourceKeys] cannot make (it maps both "absent" and "corrupt" to the empty set).
+     * a lenient read cannot make (it would map both "absent" and "corrupt" to the empty set).
      * An ABSENT file is a normal cold-start state and reads as an empty set, not null.
      *
-     * Every caller that WRITES the file back needs the distinction, and they all get it through
-     * [keysForWrite]. The lenient [readSourceKeys] is for READ-ONLY callers ([knownSourceKeys]) only,
-     * where "corrupt → empty" is the conservative answer: it re-dedups from scratch and loses nothing.
-     * A WRITER using it, by contrast, rewrites the corruption away as a valid empty-of-RECORDED file.
+     * EVERY caller goes through [keysForWrite], which is the only read of this state: writers ([add],
+     * [addAll], [BulkSink], [dropSourceKeys]) need the distinction because a lenient "corrupt → empty"
+     * read rewrites the corruption away as a valid file with every key erased, and the one read-only
+     * caller ([knownSourceKeys]) wants the same truthful answer.
      */
     private fun readSourceKeysOrNull(): Set<String>? {
         val f = File(dir, SOURCEKEYS_FILE)
@@ -547,18 +554,22 @@ class TrackStore(private val dir: File) {
         }
     }
 
-    /** [readSourceKeysOrNull] with corruption folded into "empty" — see its doc for who may use this. */
-    private fun readSourceKeys(): Set<String> = readSourceKeysOrNull() ?: emptySet()
-
     /**
      * The keys a corrupt `sourcekeys.json` MUST still hold, read back off the library itself: the
-     * `sourceKey` of every surviving track, plus whether EVERY track file parsed. A [Source.RECORDED]
-     * key is the one whose loss is unrecoverable — it is what stops the Karoo's own `.fit` for that ride
-     * being stored a second time as a twin, and `selectArchivable` never breaks up a twin group of <= 3
-     * — but a file-sourced key twins its ride just the same on the next scan, so ALL of them are
-     * recovered. The rebuild still gets its file-sourced keys dropped: [dropSourceKeys] SUBTRACTS
-     * exactly those (`archivedSourceKeys`) from whatever this returns. See [dropSourceKeys] for why this
-     * beats refusing.
+     * `sourceKey` of every stored track — LIVE **and** ARCHIVED — plus whether every track file parsed.
+     * A [Source.RECORDED] key is the one whose loss is unrecoverable — it is what stops the Karoo's own
+     * `.fit` for that ride being stored a second time as a twin, and `selectArchivable` never breaks up
+     * a twin group of <= 3 — but a file-sourced key twins its ride just the same on the next scan, so
+     * ALL of them are recovered. The rebuild still gets its file-sourced keys dropped: [dropSourceKeys]
+     * SUBTRACTS exactly those (`archivedSourceKeys`) from whatever this returns. See [dropSourceKeys]
+     * for why this beats refusing.
+     *
+     * [ARCHIVE_SUBDIR] is walked too, and that is not an optimisation detail: [archive] deliberately
+     * LEAVES an archived track's sourceKey in the file ("a re-scan won't re-add it" — its own doc), so
+     * a recovery blind to `archive/` writes back a set with every archived ride's key erased. On a
+     * library of heavily-repeated routes that is most of the keys, and the very next scan RESURRECTS
+     * those rides as live tracks — undoing the auto-clean, which does not re-apply because [sweep] is
+     * one-shot per install. This runs on every ride end and every import commit, not only on Rebuild.
      *
      * [complete] is the honesty flag. A recovery that skipped an unparseable `<id>.json` — bulk-import
      * track writes are deliberately `fsync = false`, so a torn one after a power cut is a MODELLED
@@ -567,13 +578,20 @@ class TrackStore(private val dir: File) {
      * still good enough to DEDUP against (a partial set can only fail to catch a twin, never create
      * one) but must not be WRITTEN back; see [keysForWrite].
      *
-     * Costs one streamed pass over the library (one track parsed at a time), only on the corrupt path.
+     * Costs one streamed pass over live + archived tracks (one parsed at a time), only on the corrupt
+     * path. Archived files are strictly extra IO over the old live-only walk — no way around it: a
+     * sourceKey is derived from the track's own points, so it can only be read out of the file.
      */
     private fun recoveredSourceKeys(): Recovered {
+        val live = dir.listFiles().orEmpty()
+            .filter { it.isFile && it.name.endsWith(JSON_SUFFIX) && it.name !in BOOKKEEPING_FILES }
+        val archived = File(dir, ARCHIVE_SUBDIR).listFiles().orEmpty()
+            .filter { it.isFile && it.name.endsWith(JSON_SUFFIX) }
         val keys = HashSet<String>()
         var complete = true
-        for (id in allTrackIds()) {
-            val track = loadTrack(id)
+        for (f in live + archived) {
+            val track = runCatching { jsonWithUnknownKeys.decodeFromString<RecordedTrack>(f.readText()) }
+                .getOrNull()
             if (track == null) {
                 complete = false
                 continue
@@ -594,8 +612,8 @@ class TrackStore(private val dir: File) {
      *
      *  - Healthy or absent file → the keys on disk, writable.
      *  - PRESENT but unparseable, every track file readable → the set rebuilt from the surviving
-     *    tracks ([recoveredSourceKeys]), writable. The lenient [readSourceKeys] maps corruption to the EMPTY set, so a
-     *    writer using it rewrites the file as VALID JSON with every live-recorded ride's key erased —
+     *    tracks, live AND archived ([recoveredSourceKeys]), writable. A lenient "corrupt → empty" read
+     *    would rewrite the file as VALID JSON with every ride's key erased —
      *    twinning those rides permanently AND destroying the "present but unparseable" evidence, so the
      *    recovery can never fire again. That is why this is not just the rebuild's business.
      *  - PRESENT but unparseable AND at least one `<id>.json` unparseable → NOT writable. The recovered

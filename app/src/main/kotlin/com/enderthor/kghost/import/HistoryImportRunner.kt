@@ -93,6 +93,16 @@ object HistoryImportRunner {
      */
     val refusedCounts: StateFlow<Pair<Int, Int>?> = _refusedCounts.asStateFlow()
 
+    private val _refusedDamaged = MutableStateFlow(false)
+    /**
+     * True for a rebuild refused because a STORED RIDE FILE is unparseable while `sourcekeys.json` is
+     * corrupt (see [prepareRebuild]). Its own flag because it needs its own words: the file-count
+     * message tells the rider to restore ride files they already have, which is the wrong instruction
+     * and the reason the refusal read as "the button does nothing". Cleared at the next
+     * [start]/[rebuildAll].
+     */
+    val refusedDamaged: StateFlow<Boolean> = _refusedDamaged.asStateFlow()
+
     private val _shortfall = MutableStateFlow(0)
     /**
      * How many of the tracks a [rebuildAll] ARCHIVED did not come back from the re-import ([rebuildShortfall]).
@@ -121,6 +131,7 @@ object HistoryImportRunner {
         _rebuilding.value = false
         _rebuildRefused.value = false
         _refusedCounts.value = null
+        _refusedDamaged.value = false
         _shortfall.value = 0
         // Deliberately NOT cleared here: if a prior import finished while the screen was away and the
         // host never refreshed its count, clearing it would lose that refresh. Every terminal path
@@ -159,9 +170,13 @@ object HistoryImportRunner {
             val prepared = try {
                 _preparing.value = true
                 runCatching {
-                    prepareRebuild(TrackStorage.tracksDir(appContext), fitFilesDir, importDir) { available, tracks ->
-                        _refusedCounts.value = available to tracks
-                    }
+                    prepareRebuild(
+                        TrackStorage.tracksDir(appContext),
+                        fitFilesDir,
+                        importDir,
+                        onShortOfFiles = { available, tracks -> _refusedCounts.value = available to tracks },
+                        onDamagedTrack = { _refusedDamaged.value = true },
+                    )
                 }
                     .onFailure { Timber.w(it, "rebuild: prepare failed; running an ordinary import instead") }
                     // A THROWN prepare folds into 0, NOT into a refusal: it is already logged with a
@@ -296,9 +311,21 @@ object HistoryImportRunner {
  *    free: [atomicWriteText] preserves the old keys file on an IO error and reports nothing, so a reset
  *    that silently failed AFTER archiving would leave every old key in place, dedup every re-decoded
  *    track away, and end at "0 imported · N duplicates" with the whole library in `archive/`. This also
- *    A CORRUPT `sourcekeys.json` is NOT this case: [TrackStore.dropSourceKeys] rebuilds it from the
- *    surviving RECORDED tracks and the rebuild proceeds — refusing there only delayed the damage,
- *    because the next recorded ride rewrites the file (validly) holding its own key alone.
+ *    A CORRUPT `sourcekeys.json` alone is NOT this case: [TrackStore.dropSourceKeys] rebuilds the set
+ *    from the surviving tracks (live AND archived) and the rebuild proceeds.
+ *  - A corrupt `sourcekeys.json` AND an unparseable `<id>.json` → REFUSE, with its OWN message. The
+ *    rebuilt set is missing the torn track's key, so writing it back would erase that key for good;
+ *    [TrackStore.keysForWrite] reports it un-writable and nothing is archived. That refusal used to be
+ *    a DEAD END — the torn file can only be repaired by re-decoding its source file, the ledger skips
+ *    that file as unchanged, and the only thing that clears the ledger is this function, AFTER the
+ *    refusal. So the ledger is cleared HERE, on the refusal path, before returning: the ordinary import
+ *    that [rebuildAll] runs next re-decodes every source file, rewrites the torn `<id>.json`, and its
+ *    commit then finds the recovery complete and heals the keys file. Clearing the ledger cannot
+ *    discard a key — it holds no keys, the corrupt file is still left in place, and every write is
+ *    still blocked while un-writable; it only costs one full re-decode. A torn track with NO source
+ *    file (a RECORDED ride) cannot be repaired this way, which is what [onDamagedTrack]'s message is
+ *    for: the rider is told a stored ride file is damaged instead of being told to restore ride files
+ *    they already have.
  *
  * Counting files can never PROVE recoverability, only disprove it — so the surviving residue is caught
  * after the fact by [rebuildShortfall], which compares what was archived against what came back.
@@ -311,6 +338,9 @@ fun prepareRebuild(
     tracksDir: File,
     fitFilesDir: File,
     importDir: File,
+    // onShortOfFiles stays LAST so the many `prepareRebuild(...) { available, tracks -> }` call sites
+    // keep binding their trailing lambda to it.
+    onDamagedTrack: () -> Unit = {},
     onShortOfFiles: (available: Int, tracks: Int) -> Unit = { _, _ -> },
 ): Int? {
     val store = TrackStore(tracksDir)
@@ -327,8 +357,22 @@ fun prepareRebuild(
         )
         return null
     }
-    if (!resetImportDedup(tracksDir, store, archivedSourceKeys(meta))) {
-        Timber.w("rebuild REFUSED: the sourceKey rewrite did not take (the keys file could not be written); nothing archived")
+    var damaged = false
+    if (!resetImportDedup(tracksDir, store, archivedSourceKeys(meta)) { damaged = true }) {
+        if (damaged) {
+            // Not a dead end any more: clear the ledger so the ordinary import that follows re-decodes
+            // every source file and rewrites the torn `<id>.json`. Nothing was archived and no key was
+            // written — see this function's doc.
+            File(tracksDir, LEDGER_FILE).delete()
+            onDamagedTrack()
+            Timber.w(
+                "rebuild REFUSED: sourcekeys.json is corrupt AND a stored ride file is unparseable, so the " +
+                    "rebuilt key set cannot be vouched for; nothing archived. Ledger cleared so the " +
+                    "follow-up import re-decodes every source file and can repair it.",
+            )
+        } else {
+            Timber.w("rebuild REFUSED: the sourceKey rewrite did not take (the keys file could not be written); nothing archived")
+        }
         return null
     }
     val moved = store.archive(ids)
@@ -368,11 +412,19 @@ fun rebuildShortfall(archived: Int, imported: Int): Int = (archived - imported).
  * archived tracks' keys lets their files re-decode while every other key — including one written by a
  * ride that finished mid-rebuild — keeps that collapse working.
  */
-fun resetImportDedup(tracksDir: File, store: TrackStore, dropKeys: Set<String>): Boolean {
-    if (!store.dropSourceKeys(dropKeys)) return false
-    File(tracksDir, "processed.json").delete() // absent is normal, not an error
+fun resetImportDedup(
+    tracksDir: File,
+    store: TrackStore,
+    dropKeys: Set<String>,
+    onUnvouchable: () -> Unit = {},
+): Boolean {
+    if (!store.dropSourceKeys(dropKeys, onUnvouchable)) return false
+    File(tracksDir, LEDGER_FILE).delete() // absent is normal, not an error
     return true
 }
+
+/** The import's processed-file ledger, written into the tracks dir (see `ProcessedLedger`). */
+private const val LEDGER_FILE = "processed.json"
 
 /**
  * PURE data-safety rule of the rebuild: the ids safe to archive are exactly the tracks that came from a

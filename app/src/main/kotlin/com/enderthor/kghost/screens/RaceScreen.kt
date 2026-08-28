@@ -345,6 +345,7 @@ internal fun ImportSection(
     val rebuilding by HistoryImportRunner.rebuilding.collectAsStateWithLifecycle()
     val shortfall by HistoryImportRunner.shortfall.collectAsStateWithLifecycle()
     val rebuildRefused by HistoryImportRunner.rebuildRefused.collectAsStateWithLifecycle()
+    val refusedDamaged by HistoryImportRunner.refusedDamaged.collectAsStateWithLifecycle()
     val refusedCounts by HistoryImportRunner.refusedCounts.collectAsStateWithLifecycle()
 
     // Disarm on ANY import starting or finishing — arming Rebuild, running "All" instead and coming back
@@ -498,12 +499,16 @@ internal fun ImportSection(
     //
     // When it refused on the FILE COUNT the numbers come with it, because "they aren't all there" leaves
     // the rider nothing to do: they cannot know how many files to put back, so the button stays retired.
+    // A DAMAGED stored ride file is checked first: it is the one refusal the file-count wording
+    // actively misdirects ("put the ride files back" — they are all there, one is torn).
     if (rebuildRefused) Text(
-        text = refusedCounts
-            ?.let { (files, rides) ->
+        text = when {
+            refusedDamaged -> stringResource(R.string.import_rebuild_damaged)
+            refusedCounts != null -> refusedCounts!!.let { (files, rides) ->
                 stringResource(R.string.import_rebuild_missing, files, rides, rides - files)
             }
-            ?: stringResource(R.string.import_rebuild_refused),
+            else -> stringResource(R.string.import_rebuild_refused)
+        },
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.error,
     )
