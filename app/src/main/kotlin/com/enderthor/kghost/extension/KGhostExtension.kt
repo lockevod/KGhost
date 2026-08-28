@@ -436,6 +436,19 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // confirmed from a field log; normalisation, if any, belongs in the collector below and nowhere else.
     @Volatile private var gradeUnitLogged = false
 
+    // Live ABSOLUTE elevation (m above sea level) + the MONOTONIC ms it arrived. Recorded onto every
+    // TrackPoint so a RECORDED track can feed GradePace, which keys off the altitude DIFFERENCE over a
+    // ~100 m window. Deliberately absolute elevation and NOT the ELEVATION_GRADE stream: measured over
+    // 45 rides, the device's instantaneous grade is a WORSE model key than a 100 m-window altitude
+    // difference (leave-one-ride-out R^2 -0.22 vs +0.035), and mixing a ~10-20 m-scale gradient into a
+    // table built on a 100 m scale would put two different physical quantities in the same bins.
+    // Same collector reasoning as the gradient above: own job, written off Main, read on the tick.
+    @Volatile private var lastEleM: Double? = null
+    @Volatile private var lastEleMs: Long = 0L
+    private var eleJob: Job? = null
+    // One-shot probe: the only on-device signal that this stream exists at all on this firmware.
+    @Volatile private var eleProbeLogged = false
+
     // The Karoo's own remaining-distance-to-destination (m) on the navigated route, and whether the
     // rider is on that route. Source of the authoritative route position (routeDist = routeLen −
     // remaining) used by the ② route tick, replacing the local GPS projection. Written by [destJob]
@@ -890,6 +903,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         gradeJob = null
         lastGradePct = null
         lastGradeMs = 0L
+        eleJob?.cancel()
+        eleJob = null
+        lastEleM = null
+        lastEleMs = 0L
         // destJob (route-progress) is wired to the dead binding for the SAME reason as tick/location, so
         // cancel it too — otherwise it silently stops emitting and route mode freezes on `---` for the
         // rest of the ride. Reset its @Volatile outputs so the rebuilt tick can't read a STALE
@@ -1744,6 +1761,20 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 }
             }.launchIn(scope)
         }
+        // Live ABSOLUTE-elevation consumer — recorded onto each TrackPoint so this ride's own track can
+        // train GradePace later. Its own collector for the same reasons as the gradient one, and
+        // cancelled at every site the other stream jobs are.
+        if (eleJob?.isActive != true) {
+            eleJob = karooSystem.streamDataFlow(DataType.Type.PRESSURE_ELEVATION_CORRECTION).onEach { state ->
+                val v = (state as? StreamState.Streaming)?.dataPoint?.values?.get(DataType.Field.PRESSURE_ELEVATION)
+                lastEleM = v?.takeIf { it.isFinite() }
+                lastEleMs = SystemClock.elapsedRealtime()
+                if (!eleProbeLogged) {
+                    eleProbeLogged = true
+                    Timber.i("KVP elevation sample: raw=%s", v?.toString() ?: "null")
+                }
+            }.launchIn(scope)
+        }
         // Route-progress consumer — the Karoo's OWN map-matched distance-to-destination + ON_ROUTE
         // flag. The ② route tick derives the rider's authoritative route position from this (routeDist
         // = routeLen − remaining), so a loop is unambiguous and a bogus cached fix can't place us.
@@ -1865,7 +1896,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // is recording (only when autoRecord is on). Skipped until a finite GPS fix has
                     // arrived. The recorder decimates by distance, so a 1 Hz feed is fine.
                     if (cfg.autoRecord) {
-                        lastFix?.let { recorder.onSample(it.lat, it.lng, distM, elapsedS) }
+                        // Altitude only when the stream produced a FRESH sample (same freshness gate the
+                        // gradient lookup uses). Stale/absent -> null, so a device or firmware that never
+                        // emits PRESSURE_ELEVATION_CORRECTION degrades to exactly the old behaviour instead
+                        // of recording a stale or zero altitude, which would become a fake gradient in the
+                        // model. No allocation on this ~1 Hz path.
+                        val eleNow = lastEleM?.takeIf { SystemClock.elapsedRealtime() - lastEleMs <= GPS_FIX_FRESH_MS }
+                        lastFix?.let { recorder.onSample(it.lat, it.lng, distM, elapsedS, eleNow) }
                     }
                     // GPS-loss handling, fed the ACTIVE mode's staleness seconds: the whole-ride odometer
                     // coast in ① VP mode, the route-position staleness (lastDestChangeMs) in ② route mode.
@@ -2451,9 +2488,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         gradeJob = null
         lastGradePct = null
         lastGradeMs = 0L
+        eleJob?.cancel()
+        eleJob = null
+        lastEleM = null
+        lastEleMs = 0L
         // Reset the one-shot ELEVATION_GRADE diagnostic probe so it's reachable on every ride, not just
         // the first one after a process start.
         gradeUnitLogged = false
+        eleProbeLogged = false
         destJob?.cancel()
         destJob = null
         // Forget the last GPS fix / route position so the NEXT ride starts genuinely cold: D0 is
@@ -2504,6 +2546,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         gradeJob = null
         lastGradePct = null
         lastGradeMs = 0L
+        eleJob?.cancel()
+        eleJob = null
+        lastEleM = null
+        lastEleMs = 0L
         // Stop the map loop and clear its snapshot, then the Idle handler's publishGhostMarker(null)
         // hides. cancelAndJoin (not a bare cancel) so no in-flight loop iteration can re-Show the ghost
         // AFTER the hide — its publishGhostMarker has no suspension point, so a plain cancel wouldn't
