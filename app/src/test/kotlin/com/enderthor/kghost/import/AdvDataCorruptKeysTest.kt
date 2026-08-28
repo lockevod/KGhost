@@ -71,24 +71,26 @@ class AdvDataCorruptKeysTest {
         )
     }
 
-    @Test fun `the lossy self-heal is exactly what a REFUSAL would have waited for`() {
-        // Why refusing was not a fix. [TrackStore.add] reads the keys file leniently (corrupt → empty)
-        // and REWRITES it at the end of the very next ride, so one ride after the corruption the file is
-        // perfectly VALID and holds that ONE key. A guard that only asks "does it parse?" sails through
-        // it, drops the ledger, and every earlier ride's `.fit` twins — the same damage, one ride later.
-        // Refusing therefore only deferred the loss; repairing at the first rebuild (the test above)
-        // is what actually shortens the window.
+    @Test fun `the next ride REPAIRS the corrupt keys file instead of laundering it`() {
+        // This used to be the lossy self-heal, and it is why refusing in the rebuild alone was not a fix:
+        // [TrackStore.add] read the keys file leniently (corrupt → empty) and REWROTE it at the end of the
+        // very next ride, so one ride after the corruption the file was perfectly VALID holding that ONE
+        // key — two live rides' keys gone, nothing saying so, and the "does it parse?" evidence destroyed.
+        // add() now goes through the same corruption-aware read as the rebuild, so the next ride carries
+        // every earlier key back into the repaired file.
         val dir = tmp.newFolder("B1c-tracks")
         val store = TrackStore(dir)
-        store.add(decimated("rec-1", 1_700_000_000_000L, Source.RECORDED))
-        store.add(decimated("rec-2", 1_700_000_060_000L, Source.RECORDED))
+        val first = decimated("rec-1", 1_700_000_000_000L, Source.RECORDED)
+        val second = decimated("rec-2", 1_700_000_060_000L, Source.RECORDED)
+        store.add(first)
+        store.add(second)
         File(dir, "sourcekeys.json").writeText("""["a","b""")
         val third = decimated("rec-3", 1_700_000_120_000L, Source.RECORDED)
         store.add(third)
 
         assertEquals(
-            "a VALID file holding one key: two live rides' keys are gone and nothing says so",
-            setOf(third.sourceKey), store.knownSourceKeys(),
+            "a VALID file holding all three live rides' keys — none erased by the repair",
+            setOf(first.sourceKey, second.sourceKey, third.sourceKey), store.knownSourceKeys(),
         )
     }
 

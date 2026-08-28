@@ -37,7 +37,10 @@ class HistoryImporter(
     private val importDir: File,
     private val trackStore: TrackStore,
     private val decimate: (RecordedTrack) -> RecordedTrack = HistoryImporter::defaultDecimate,
-    private val fitDecode: (File, Source) -> RecordedTrack? = FitDecoder::decode,
+    // decodeForImport, not decode: it is the one that distinguishes the DETERMINISTIC sport/file-type
+    // rejection (an empty FitDecoder.notARide track → Invalid → ledgered once) from a TRANSIENT failure
+    // (null → retried every import). See FitDecoder.notARide.
+    private val fitDecode: (File, Source) -> RecordedTrack? = FitDecoder::decodeForImport,
     private val gpxParse: (File) -> RecordedTrack? = GpxParser::parse,
     private val lastScanProvider: () -> Long = { 0L },
     // suspend so the caller can AWAIT each persist: the lastScan write must be ordered and complete
@@ -209,7 +212,8 @@ class HistoryImporter(
                 if (decimated.points.size < 2) {
                     // L-F1: a <2-point track is unusable/unraceable — and, since it decoded fully, this
                     // is DETERMINISTIC (not transient), so mark it Invalid: the collector ledgers it
-                    // immediately so it isn't re-decoded on every subsequent import.
+                    // immediately so it isn't re-decoded on every subsequent import. Also the landing
+                    // spot for FitDecoder.notARide (a 0-point track): same determinism, same treatment.
                     Timber.w("import dropped %s: decimated to %d point(s)", item.file.name, decimated.points.size)
                     DecodedOrFail.Invalid(item.file, srcSize, srcMtime)
                 } else {

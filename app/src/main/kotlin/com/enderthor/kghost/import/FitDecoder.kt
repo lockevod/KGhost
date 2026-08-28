@@ -61,7 +61,37 @@ object FitDecoder {
     /** Semicircles -> degrees: deg = semicircles * 180 / 2^31. */
     private val SEMICIRCLES_TO_DEGREES = 180.0 / 2.0.pow(31)
 
-    fun decode(file: File, source: Source): RecordedTrack? = runCatching {
+    /**
+     * The verdict "this file decoded perfectly well and is NOT a bike ride": an EMPTY track rather than
+     * null. Null is the importer's TRANSIENT bucket — never ledgered, re-decoded on every import for the
+     * life of the install, and counted in the rider's "N not valid" every time — which is right for a
+     * truncated or mid-write file that may become readable later, and wrong for the sport/file-type gate,
+     * whose verdict is as deterministic as the sibling "decimated to <2 points" one. An empty track lands
+     * in that sibling's bucket ([HistoryImporter]'s `< 2 points` branch → `Invalid`), so the file is
+     * decoded ONCE and then ledgered.
+     *
+     * If the gate later WIDENS (a sport added to `RIDING_SPORTS`), the ledger entry would otherwise skip
+     * the file forever — its size/mtime have not changed. "Rebuild history" is the recovery: it DELETES
+     * `processed.json` ([resetImportDedup]), so every previously-rejected file is re-decoded under the new
+     * gate. ponytail: a gate-version field in the ledger would automate that, at the cost of a schema and
+     * a full re-decode on every version bump; one documented button press is cheaper on a bike computer.
+     */
+    internal fun notARide(source: Source): RecordedTrack =
+        RecordedTrack(id = "", startedAtEpoch = 0L, points = emptyList(), source = source)
+
+    /**
+     * [decodeForImport], with the non-ride sentinel folded back into null — the "null for anything not
+     * usable as a ride" contract every non-importer caller reads this by.
+     */
+    fun decode(file: File, source: Source): RecordedTrack? =
+        decodeForImport(file, source)?.takeIf { it.points.isNotEmpty() }
+
+    /**
+     * [decode] for the import pipeline, which needs the two rejections told apart: a gate rejection comes
+     * back as [notARide] (deterministic → ledgered after one decode), everything else as null (transient
+     * → retried). See [notARide].
+     */
+    fun decodeForImport(file: File, source: Source): RecordedTrack? = runCatching {
         val decode = Decode()
 
         // Build lightweight TrackPoints AS records stream in, instead of buffering every heavy
@@ -135,7 +165,7 @@ object FitDecoder {
 
         if (!isCyclingActivity(fitFileType, sports)) {
             Timber.i("FIT skipped, not a cycling activity (type=%s sports=%s): %s", fitFileType, sports, file.name)
-            null
+            notARide(source)
         } else {
             buildTrack(points, firstEpochMs, source)
         }

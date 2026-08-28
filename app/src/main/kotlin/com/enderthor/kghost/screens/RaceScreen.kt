@@ -345,6 +345,7 @@ internal fun ImportSection(
     val rebuilding by HistoryImportRunner.rebuilding.collectAsStateWithLifecycle()
     val shortfall by HistoryImportRunner.shortfall.collectAsStateWithLifecycle()
     val rebuildRefused by HistoryImportRunner.rebuildRefused.collectAsStateWithLifecycle()
+    val refusedCounts by HistoryImportRunner.refusedCounts.collectAsStateWithLifecycle()
 
     // Disarm on ANY import starting or finishing — arming Rebuild, running "All" instead and coming back
     // to a still-armed (i.e. one-tap-destructive) button is the same trap as the stale arm above.
@@ -494,8 +495,15 @@ internal fun ImportSection(
     // Refusal: the destructive phase declined and an ordinary import ran instead, so the line above is a
     // perfectly cheerful "0 imported · N duplicates" and a log-only refusal reads as "the button did
     // nothing" — the rider just taps Rebuild again.
+    //
+    // When it refused on the FILE COUNT the numbers come with it, because "they aren't all there" leaves
+    // the rider nothing to do: they cannot know how many files to put back, so the button stays retired.
     if (rebuildRefused) Text(
-        text = stringResource(R.string.import_rebuild_refused),
+        text = refusedCounts
+            ?.let { (files, rides) ->
+                stringResource(R.string.import_rebuild_missing, files, rides, rides - files)
+            }
+            ?: stringResource(R.string.import_rebuild_refused),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.error,
     )
