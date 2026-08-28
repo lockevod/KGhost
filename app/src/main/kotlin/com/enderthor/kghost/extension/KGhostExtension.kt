@@ -2336,9 +2336,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             else -> lastReliableGhostRouteDist // off-route: hold the last reliable position
                         }
                         GapStateHolder.update(gap)
-                        // SEG/GP tag: SEG when the rider is on recorded history this tick (patch has pace at
-                        // the fix), GP on neutral-fill. The field reads only non-null (SEG) — the label is unused,
-                        // so a stable instance (deduped by the holder) avoids per-tick churn.
+                        // SEG/GP tag: SEG when the number got a verdict this tick (PacePatch or GradePace, either
+                        // tier), GP on neutral-fill where the number measures nothing. The field reads only
+                        // non-null (SEG) — the label is unused, so a stable instance (deduped by the holder)
+                        // avoids per-tick churn.
                         val onHistory = paceNow != null
                         if (onHistory) SegmentInfoHolder.set(B2_ON_HISTORY) else SegmentInfoHolder.clear()
                         // Marker (BOTH cases, ROUTE frame) — [markerDist] is the live ghostRouteDist, the FROZEN
@@ -2424,6 +2425,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         gradeJob = null
         lastGradePct = null
         lastGradeMs = 0L
+        // Reset the one-shot ELEVATION_GRADE diagnostic probe so it's reachable on every ride, not just
+        // the first one after a process start.
+        gradeUnitLogged = false
         destJob?.cancel()
         destJob = null
         // Forget the last GPS fix / route position so the NEXT ride starts genuinely cold: D0 is

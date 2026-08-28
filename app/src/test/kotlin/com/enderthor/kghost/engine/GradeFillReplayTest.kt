@@ -25,26 +25,38 @@ class GradeFillReplayTest {
 
         // Replay the same ride against a model built from it, with NO positional history (PacePatch null
         // everywhere) — so every metre is filled by gradient. A self-replay must come out near a dead heat.
-        var prevEle: Double? = null
-        var prevDist = 0.0
-        for (p in track.points) {
-            val grade = p.eleM?.let { e ->
-                prevEle?.let { pe -> if (p.distanceM > prevDist) (e - pe) / (p.distanceM - prevDist) * 100.0 else 0.0 }
-            } ?: 0.0
-            g.onTick(p.distanceM, p.lat, p.lng, 90.0, p.timeS) { _, _, _ -> model.pace(grade, GhostPick.AVERAGE) }
-            if (p.eleM != null) { prevEle = p.eleM; prevDist = p.distanceM }
+        //
+        // The lookup gradient MUST mirror GradePace.Builder.add()'s trailing-window walk (a monotonic
+        // index `j`, advanced only while the point after it is still >= GRADE_WINDOW_M behind `here`, and
+        // reset to `i` on a dropout step > DROPOUT_GAP_M) — otherwise ticks query a different bin than
+        // the one their own pace trained into, and the model answers with another gradient's pace.
+        val pts = track.points
+        var j = 0
+        for (i in pts.indices) {
+            val here = pts[i]
+            if (i > 0) {
+                val prev = pts[i - 1]
+                while (j < i - 1 && here.distanceM - pts[j + 1].distanceM >= GRADE_WINDOW_M) j++
+                val stepM = here.distanceM - prev.distanceM
+                if (stepM > TrackSamples.DROPOUT_GAP_M) j = i // device-off/tunnel jump: restart the window
+            }
+            val back = pts[j]
+            val dd = here.distanceM - back.distanceM
+            val grade = if (dd > 0.0) {
+                val e = here.eleM
+                val backEle = back.eleM
+                if (e != null && backEle != null) (e - backEle) / dd * 100.0 else 0.0
+            } else 0.0
+            g.onTick(here.distanceM, here.lat, here.lng, 90.0, here.timeS) { _, _, _ -> model.pace(grade, GhostPick.AVERAGE) }
         }
 
         val elapsed = track.points.last().timeS
         println("GradeFill self-replay: elapsed=${elapsed}s gapTimeS=${g.gapTimeS} coveredM=${model.coveredM}")
-        // Band: on the real fixture this lands at ~-27% of elapsed (gapTimeS=-2315.7s, elapsed=8551.0s) —
-        // just past the brief's proposed 25%. That is the anticipated cause, not a model defect: `build()`
-        // bins on a TRAILING GRADE_WINDOW_M=100m gradient (smoothed), but this test's lookup gradient is a
-        // naive point-to-point delta (noisy), so ticks land in a different bin than the one their own pace
-        // trained — a lookup/build window mismatch that is a test artifact, not present in production (the
-        // real caller feeds live position, not this per-point synthetic grade). 35% keeps real margin over
-        // the observed -27% while staying far short of the old fixed-fill bug this guards against (gap >
-        // elapsed, i.e. >100%) — a regression that pushed the gap materially further out still trips it.
+        // Band: matching the lookup gradient to build()'s trailing window (above) barely moves the gap
+        // (-2315.7s -> -2301.9s, i.e. ~-27% both times) — so the build/lookup window mismatch this test
+        // used to blame is NOT the dominant driver. BLOCKED: see task-6-report.md for the root-cause
+        // analysis (the dwell/stop time in this fixture, not the gradient model). Band left UNCHANGED
+        // (not widened, not tightened) pending a maintainer decision — see the report.
         assertTrue(
             "gap ${g.gapTimeS}s must stay well inside the ride's own elapsed ${elapsed}s",
             kotlin.math.abs(g.gapTimeS) < elapsed * 0.35,
