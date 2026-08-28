@@ -13,8 +13,9 @@ const val GRADE_SCHEMA_VERSION = 1
  *  table at 41 entries. */
 const val GRADE_BIN_PCT = 1.0
 
-/** Bins outside +-20% are clamped into the end bins: beyond that a bike is walking or braking, and the
- *  handful of samples there are almost always altitude glitches. */
+/** Bin range. A LOOKUP outside +-20% is clamped into the end bin (a live 25% reading is still a wall);
+ *  a BUILD-time gradient outside it is DROPPED, because beyond +-20% it is almost always an altitude
+ *  glitch and clamping would pour that road's real pace into the end bin. */
 const val GRADE_MAX_PCT = 20.0
 
 /** Distance over which the gradient is measured. A 20 m decimated step gives a gradient dominated by
@@ -84,39 +85,57 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
          * Folds every track that carries altitude into the table. Tracks are folded oldest-first so `last`
          * and the EMA carry the same "most recent wins" meaning they have in `PacePatch`/`CorridorSeeder`.
          *
-         * For each point the gradient is measured over a TRAILING window of at least [GRADE_WINDOW_M] and
-         * the pace over that same window, so both describe the same stretch of road. The reducer is weighted
-         * by the metres of the step, not by the number of points, so a coarse track and a dense one over the
-         * same road count the same.
+         * The gradient of a step is measured over a TRAILING window of at least [GRADE_WINDOW_M] (a 20 m
+         * step's own altitude delta is pure baro noise); the PACE comes from the step itself. Each track
+         * contributes exactly ONE metre-weighted sample per bin — the `PacePatch` "one pass per track"
+         * rule — so `count` counts RIDES and [AGG_ALPHA]/[AGG_SEED_LAPS]/[AGG_MIN_LAPS] keep the meaning
+         * they have there, and a dense track cannot outvote a decimated one over the same road.
          */
         fun build(tracks: List<RecordedTrack>): GradePace {
             val map = HashMap<Int, Reducer>()
             for (track in tracks.sortedBy { it.startedAtEpoch }) {
                 val pts = track.points
                 if (pts.size < 2) continue
-                var j = 0 // trailing index of the window
+                // Per-bin totals for THIS track: seconds and metres, so the fold below emits one
+                // metre-weighted sample per bin.
+                val sumDt = HashMap<Int, Double>()
+                val sumDd = HashMap<Int, Double>()
+                var j = 0 // trailing index of the gradient window
                 for (i in 1 until pts.size) {
                     val here = pts[i]
-                    if (here.eleM == null) continue
-                    // Advance the trailing edge to the newest point that is still >= GRADE_WINDOW_M behind.
+                    val prev = pts[i - 1]
+                    // Advance the trailing edge FIRST so a skipped step can't strand it.
                     while (j < i - 1 && here.distanceM - pts[j + 1].distanceM >= GRADE_WINDOW_M) j++
+                    val stepM = here.distanceM - prev.distanceM
+                    val stepT = here.timeS - prev.timeS
+                    if (stepM <= 0.0 || stepT <= 0.0) continue
+                    if (stepM > TrackSamples.DROPOUT_GAP_M) continue // a device-off / tunnel jump, not riding
+                    val stepSpeed = stepM / stepT
+                    if (stepSpeed > AGG_MAX_SPEED_MS) continue       // a GPS spike, not riding
+                    // Dwell clip over the STEP, exactly as TrackSamples does. Clipping over the 100 m window
+                    // instead would let a 45 s red light inside a 100 m stretch read 1.74 m/s — above the
+                    // floor, so the clip never fires and the flat bin records 0.575 s/m for a 0.125 s/m road.
+                    val stepDt = if (stepSpeed < AGG_MIN_SPEED_MS) stepM / AGG_MIN_SPEED_MS else stepT
+                    val ele = here.eleM ?: continue
                     val back = pts[j]
                     val backEle = back.eleM ?: continue
                     val dd = here.distanceM - back.distanceM
-                    val dt = here.timeS - back.timeS
-                    if (dd < GRADE_WINDOW_M || dt <= 0.0) continue
-                    val speed = dd / dt
-                    if (speed > AGG_MAX_SPEED_MS) continue // corrupt: a GPS jump, not riding
-                    var tpm = dt / dd
-                    if (speed < AGG_MIN_SPEED_MS) tpm = 1.0 / AGG_MIN_SPEED_MS // clamp a dwell, don't drop it
+                    if (dd < GRADE_WINDOW_M) continue
+                    val gradePct = (ele - backEle) / dd * 100.0
+                    // DROP an out-of-range gradient rather than clamping it into the end bin: a barometric
+                    // reset reads as +45% and would otherwise pour real road pace into bin 20, mixing a GPS
+                    // glitch with a genuine 20% wall. The lookup-side clamp in binOf stays — a live 25%
+                    // reading legitimately maps to bin 20.
+                    if (!gradePct.isFinite() || kotlin.math.abs(gradePct) > GRADE_MAX_PCT) continue
+                    val bin = binOf(gradePct)
+                    sumDt[bin] = (sumDt[bin] ?: 0.0) + stepDt
+                    sumDd[bin] = (sumDd[bin] ?: 0.0) + stepM
+                }
+                for ((bin, dd) in sumDd) {
+                    if (dd <= 0.0) continue
+                    val tpm = (sumDt[bin] ?: continue) / dd
                     if (!tpm.isFinite()) continue
-                    val gradePct = (here.eleM - backEle) / dd * 100.0
-                    if (!gradePct.isFinite()) continue
-                    // Weight by THIS step's metres (the window overlaps between consecutive points; the step
-                    // is what each point actually adds).
-                    val stepM = here.distanceM - pts[i - 1].distanceM
-                    if (stepM <= 0.0) continue
-                    val r = map.getOrPut(binOf(gradePct)) { Reducer() }
+                    val r = map.getOrPut(bin) { Reducer() }
                     r.ema = when {
                         r.count == 0 -> tpm
                         r.count < AGG_SEED_LAPS -> (r.ema * r.count + tpm) / (r.count + 1)
@@ -124,7 +143,7 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                     }
                     r.minTpm = if (r.count == 0) tpm else min(r.minTpm, tpm)
                     r.lastTpm = tpm
-                    r.metres += stepM
+                    r.metres += dd
                     r.count++
                 }
             }
