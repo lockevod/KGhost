@@ -83,6 +83,16 @@ object HistoryImportRunner {
      */
     val rebuildRefused: StateFlow<Boolean> = _rebuildRefused.asStateFlow()
 
+    private val _refusedCounts = MutableStateFlow<Pair<Int, Int>?>(null)
+    /**
+     * (source files found, rides needing them) for a rebuild refused BY THE FILE COUNT, or null when the
+     * refusal had another cause (the keys rewrite not taking) or there was none. A refusal the rider
+     * cannot act on retires the button for good: the ordinary workflow (drop a backup folder in
+     * `/sdcard/KGhost`, import it, delete it to free space) leaves the library permanently short, and
+     * "the ride files aren't all there" does not say WHAT to put back. These are the numbers that do.
+     */
+    val refusedCounts: StateFlow<Pair<Int, Int>?> = _refusedCounts.asStateFlow()
+
     private val _shortfall = MutableStateFlow(0)
     /**
      * How many of the tracks a [rebuildAll] ARCHIVED did not come back from the re-import ([rebuildShortfall]).
@@ -110,6 +120,7 @@ object HistoryImportRunner {
         _canceled.value = false
         _rebuilding.value = false
         _rebuildRefused.value = false
+        _refusedCounts.value = null
         _shortfall.value = 0
         // Deliberately NOT cleared here: if a prior import finished while the screen was away and the
         // host never refreshed its count, clearing it would lose that refresh. Every terminal path
@@ -147,7 +158,11 @@ object HistoryImportRunner {
         job = scope.launch {
             val prepared = try {
                 _preparing.value = true
-                runCatching { prepareRebuild(TrackStorage.tracksDir(appContext), fitFilesDir, importDir) }
+                runCatching {
+                    prepareRebuild(TrackStorage.tracksDir(appContext), fitFilesDir, importDir) { available, tracks ->
+                        _refusedCounts.value = available to tracks
+                    }
+                }
                     .onFailure { Timber.w(it, "rebuild: prepare failed; running an ordinary import instead") }
                     // A THROWN prepare folds into 0, NOT into a refusal: it is already logged with a
                     // stack trace and may have archived before it threw, so the shortfall line — not the
@@ -261,9 +276,19 @@ object HistoryImportRunner {
  *    many-to-one and lossy in the file's favour: `/sdcard/FitFiles` also holds the Karoo's own `.fit`
  *    for every RECORDED ride (each counted, none archivable, each re-importing to nothing), a rider's
  *    backup copy of a FIT folder counts the same ride two or three times, and files below the minimum
- *    distance or that fail to decode are counted but store no track. A count that has fallen BELOW the
- *    number of tracks has therefore lost more than every one of those cushions, and at least one ride
- *    provably has no file to come back from. The old rule tolerated stranding half the library BY
+ *    distance are counted but store no track. A count that has fallen BELOW the number of tracks has
+ *    therefore lost more than every one of those cushions, and at least one ride provably has no file to
+ *    come back from.
+ *
+ *    NOT a cushion (the earlier wording claimed it was): a file that FAILS TO DECODE. A file the current
+ *    build refuses — the sport gate rejects a hike whose FIT the PREVIOUS build imported as a ride — is
+ *    counted in `available` while being unable to bring its track back, so it inflates the count in the
+ *    WRONG direction and the pre-flight passes on a library that cannot be restored. Counting files can
+ *    only disprove recoverability; that residue is caught after the fact by [rebuildShortfall].
+ *
+ *    [onShortOfFiles] is called with (files found, tracks needing them) before the refusal returns, so the
+ *    screen can tell the rider HOW MANY files to put back instead of just "they aren't all there". The old
+ *    rule tolerated stranding half the library BY
  *    CONSTRUCTION, and its slack was consumed by the FitFiles inflation before it protected anything:
  *    70 device FITs "covered" 120 orphaned imports, so the guard passed and every one of them stranded.
  *    A refusal costs only the altitude upgrade, and the next press retries.
@@ -282,13 +307,19 @@ object HistoryImportRunner {
  * instead is ~230 MB at 1500 rides: the OOM would be swallowed by the caller's `runCatching` and the
  * button would appear to run while doing nothing at all.
  */
-fun prepareRebuild(tracksDir: File, fitFilesDir: File, importDir: File): Int? {
+fun prepareRebuild(
+    tracksDir: File,
+    fitFilesDir: File,
+    importDir: File,
+    onShortOfFiles: (available: Int, tracks: Int) -> Unit = { _, _ -> },
+): Int? {
     val store = TrackStore(tracksDir)
     val meta = store.allTracksMeta()
     val ids = fileSourcedIds(meta)
     if (ids.isEmpty()) return 0
     val available = HistoryImporter.sourceFileCount(fitFilesDir, importDir)
     if (available < ids.size) {
+        onShortOfFiles(available, ids.size)
         Timber.w(
             "rebuild REFUSED: only %d source file(s) available to re-import %d file-sourced track(s); " +
                 "archiving them would be unrecoverable. Running an ordinary import instead.",

@@ -10,6 +10,8 @@ import com.garmin.fit.RecordMesg
 import com.garmin.fit.SessionMesg
 import com.garmin.fit.Sport
 import com.garmin.fit.SportMesg
+import kotlinx.coroutines.flow.toList
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -139,5 +141,38 @@ class FitSportGateTest {
         // Same file, sport declared ONLY by the sport message (session omits it).
         val driven = writeFit("sportmesg-drive", sessionSport = null, speedMs = 15.3, sportMesgSport = Sport.MOTORCYCLING)
         assertNull(FitDecoder.decode(driven, Source.FIT_IMPORT))
+    }
+
+    /**
+     * The gate's verdict is DETERMINISTIC, so the import must ledger it after ONE decode instead of
+     * re-decoding the file on every import for the life of the install and padding the rider's "N not
+     * valid" every time. [FitDecoder.decodeForImport] is what carries that distinction: a gate rejection
+     * comes back as an empty [FitDecoder.notARide] track (the same bucket as a ride decimated below 2
+     * points), a truncated file still comes back as null and keeps retrying. Locks all three links —
+     * gate → empty track → ledger — end to end over a REAL encoded FIT.
+     */
+    @Test fun `a gate-rejected FIT is decoded once and then ledgered`() = kotlinx.coroutines.test.runTest {
+        val fits = File.createTempFile("gate-scan", "").let { it.delete(); it.mkdirs(); it }
+        val tracks = File(fits, "tracks").apply { mkdirs() }
+        writeFit("drive-home", Sport.MOTORCYCLING, speedMs = 15.3).copyTo(File(fits, "drive-home.fit"))
+
+        val driven = File(fits, "drive-home.fit")
+        assertNull("the ordinary contract is unchanged", FitDecoder.decode(driven, Source.FIT_IMPORT))
+        val verdict = FitDecoder.decodeForImport(driven, Source.FIT_IMPORT)
+        assertNotNull("the import path must get a VERDICT, not a transient failure", verdict)
+        assertTrue("...carried as an empty track", verdict!!.points.isEmpty())
+
+        // Default-wired importer (no fitDecode override): the real decoder, the real ledger.
+        val ledger = File(tracks, "processed.json")
+        suspend fun once(): ImportProgress = HistoryImporter(
+            fitFilesDir = fits,
+            importDir = File(fits, "none"),
+            trackStore = com.enderthor.kghost.geo.TrackStore(tracks),
+            processedLedgerFile = ledger,
+        ).import(onlyNew = false).toList().last()
+
+        assertEquals(1, once().failed)
+        assertEquals("ledgered: nothing left to decode on the next import", 0, once().total)
+        fits.deleteRecursively()
     }
 }
