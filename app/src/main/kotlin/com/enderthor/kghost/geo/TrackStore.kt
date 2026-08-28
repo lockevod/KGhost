@@ -64,6 +64,11 @@ class TrackStore(private val dir: File) {
             .map { it.name.removeSuffix(JSON_SUFFIX) }
     }
 
+    /** Loads + parses every stored (non-archived) track. Whole-library passes only (grade-pace model
+     *  rebuild, rebuild-from-source's file-sourced filter) — NOT the hot match path, which uses the
+     *  spatial index via [loadCandidates]/[loadTopCandidates] instead. */
+    fun allTracks(): List<RecordedTrack> = loadByIds(allTrackIds())
+
     /**
      * Returns the set of source keys already ingested via [add]. An absent `sourcekeys.json` is a
      * normal cold-start state → empty, no log; a present-but-unparseable file is treated as empty

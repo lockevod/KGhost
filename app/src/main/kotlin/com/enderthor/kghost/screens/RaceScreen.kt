@@ -393,6 +393,25 @@ internal fun ImportSection(
         }
     }
 
+    OutlinedButton(
+        onClick = {
+            HistoryImportRunner.rebuildAll(
+                appContext = context.applicationContext,
+                configManager = configManager,
+                lastScanEpoch = config.lastScanEpoch,
+            )
+        },
+        enabled = !running,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+    ) {
+        Text(stringResource(R.string.import_rebuild), maxLines = 1)
+    }
+    Text(
+        text = stringResource(R.string.import_rebuild_hint),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
     if (running) {
         OutlinedButton(
             onClick = { HistoryImportRunner.cancel() },
