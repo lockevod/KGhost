@@ -55,15 +55,14 @@ class TrackStore(private val dir: File) {
     private val sweepMaxDefault = 2000
 
     /**
-     * Reads all stored track ids by listing the `<id>.json` files (excludes `index.json` and
-     * `sourcekeys.json`, which are bookkeeping files, not tracks).
+     * Reads all stored track ids by listing the `<id>.json` files (excludes `index.json`,
+     * `sourcekeys.json` and `processed.json`, which are bookkeeping files, not tracks).
      */
     fun allTrackIds(): List<String> {
         val files = dir.listFiles() ?: return emptyList()
         return files
             .filter {
-                it.isFile && it.name.endsWith(JSON_SUFFIX) &&
-                    it.name != INDEX_FILE && it.name != SOURCEKEYS_FILE
+                it.isFile && it.name.endsWith(JSON_SUFFIX) && it.name !in BOOKKEEPING_FILES
             }
             .map { it.name.removeSuffix(JSON_SUFFIX) }
     }
@@ -103,11 +102,19 @@ class TrackStore(private val dir: File) {
      * The Boolean matters because [atomicWriteText] deliberately PRESERVES the old file on an IO error and
      * reports nothing: a caller about to archive its whole library must be able to tell the reset did not
      * take, instead of archiving against a keys file that still dedups every re-decoded track away.
+     *
+     * Fails CLOSED on a PRESENT-but-unparseable keys file, which is why it reads via [readSourceKeysOrNull]
+     * rather than [readSourceKeys]: the lenient read maps corruption to the empty set, so subtracting from
+     * it would write `[]` — erasing every LIVE-recorded ride's key — and then "prove" the reset took by
+     * comparing empty to empty. Nothing is written at all in that case; the caller REFUSES instead, leaving
+     * the second dedup gate (the processed ledger) in place. A corrupt file is not something this can
+     * repair — the keys it held are unknowable — so refusing is the only answer that cannot twin a ride.
      */
     fun dropSourceKeys(drop: Set<String>): Boolean = synchronized(indexLock) {
-        val remaining = readSourceKeys() - drop
+        val current = readSourceKeysOrNull() ?: return@synchronized false
+        val remaining = current - drop
         writeSourceKeys(remaining)
-        readSourceKeys() == remaining
+        readSourceKeysOrNull() == remaining
     }
 
     /**
@@ -489,18 +496,31 @@ class TrackStore(private val dir: File) {
         atomicWriteText(File(dir, INDEX_FILE), jsonForStorage.encodeToString(snapshot))
     }
 
-    private fun readSourceKeys(): Set<String> {
+    /**
+     * The keys on disk, or NULL when the file is PRESENT but unparseable — the one distinction the
+     * lenient [readSourceKeys] cannot make (it maps both "absent" and "corrupt" to the empty set).
+     * An ABSENT file is a normal cold-start state and reads as an empty set, not null.
+     *
+     * Only [dropSourceKeys] needs the distinction, because it is the only caller that WRITES back a
+     * set derived from this read; for everyone else (dedup on [add]/[addAll]/[BulkSink],
+     * [knownSourceKeys]) "corrupt → empty" is the conservative answer — it re-dedups from scratch and
+     * loses nothing.
+     */
+    private fun readSourceKeysOrNull(): Set<String>? {
         val f = File(dir, SOURCEKEYS_FILE)
         // An absent file is a normal cold-start state → empty, no log.
         if (!f.isFile) return emptySet()
         return runCatching {
             jsonWithUnknownKeys.decodeFromString<Set<String>>(f.readText())
         }.getOrElse { e ->
-            // A PRESENT-but-unparseable file is corruption; treat as empty (re-dedup) but surface it.
-            Timber.w(e, "sourcekeys.json present but failed to parse; treating as empty (corrupt?)")
-            emptySet()
+            // A PRESENT-but-unparseable file is corruption; surface it and let the caller decide.
+            Timber.w(e, "sourcekeys.json present but failed to parse (corrupt?)")
+            null
         }
     }
+
+    /** [readSourceKeysOrNull] with corruption folded into "empty" — see its doc for who may use this. */
+    private fun readSourceKeys(): Set<String> = readSourceKeysOrNull() ?: emptySet()
 
     private fun writeSourceKeys(keys: Set<String>) {
         ensureDir()
@@ -533,6 +553,17 @@ class TrackStore(private val dir: File) {
 
         /** Stores the serialized `Set<String>` of source keys ingested via [add] (dedup state). */
         private const val SOURCEKEYS_FILE = "sourcekeys.json"
+
+        /**
+         * The import's processed-file ledger, written into the SAME dir by `HistoryImportRunner`.
+         * Listed here only so [allTrackIds] can skip it: `MainActivity`'s "stored rides" count is
+         * `allTrackIds().size`, and that is the number a rider reads to check whether a rebuild
+         * brought their rides back — it must not be one too high for the life of the install.
+         */
+        private const val LEDGER_FILE = "processed.json"
+
+        /** Files in [dir] that are bookkeeping, not `<id>.json` tracks. */
+        private val BOOKKEEPING_FILES = setOf(INDEX_FILE, SOURCEKEYS_FILE, LEDGER_FILE)
 
         /** Subdirectory holding archived (pruned) tracks; excluded from listing/index/matching. */
         const val ARCHIVE_SUBDIR = "archive"

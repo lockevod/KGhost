@@ -74,6 +74,14 @@ object HistoryImportRunner {
      */
     val rebuilding: StateFlow<Boolean> = _rebuilding.asStateFlow()
 
+    private val _shortfall = MutableStateFlow(0)
+    /**
+     * How many of the tracks a [rebuildAll] ARCHIVED did not come back from the re-import ([rebuildShortfall]).
+     * 0 for an ordinary [start], for a refused prepare, and for a healthy rebuild. Anything above 0 goes on the
+     * summary line: those rides now exist ONLY in `archive/`, and the rider has to be told to go get them.
+     */
+    val shortfall: StateFlow<Int> = _shortfall.asStateFlow()
+
     /** The two directories an import scans — one definition, so [rebuildAll]'s "are the source files
      *  still there?" guard counts exactly the files [runImport] will read. */
     private val fitFilesDir = File("/sdcard/FitFiles")
@@ -92,6 +100,7 @@ object HistoryImportRunner {
         _progress.value = null
         _canceled.value = false
         _rebuilding.value = false
+        _shortfall.value = 0
         // Deliberately NOT cleared here: if a prior import finished while the screen was away and the
         // host never refreshed its count, clearing it would lose that refresh. Every terminal path
         // below sets it back to true anyway, so leaving a stale `true` only means one extra (idempotent)
@@ -118,20 +127,27 @@ object HistoryImportRunner {
      *
      * The destructive half is [prepareRebuild], which REFUSES to run at all unless the source files that
      * would re-import the library are still there (see its doc). Whether it ran or refused, the ordinary
-     * import runs afterwards.
+     * import runs afterwards — and however many tracks it archived are then compared against what the
+     * import stored, so a strand its file count could not foresee reaches the rider as [shortfall]
+     * instead of as a cheerful "0 imported".
      */
     fun rebuildAll(appContext: Context, configManager: ConfigurationManager, lastScanEpoch: Long) {
         if (!beginRun()) return
         _rebuilding.value = true
         job = scope.launch {
-            try {
+            val archived = try {
                 _preparing.value = true
                 runCatching { prepareRebuild(TrackStorage.tracksDir(appContext), fitFilesDir, importDir) }
                     .onFailure { Timber.w(it, "rebuild: prepare failed; running an ordinary import instead") }
+                    .getOrDefault(0)
             } finally {
                 _preparing.value = false
             }
             runImport(appContext, configManager, onlyNew = false, lastScanEpoch = lastScanEpoch)
+            // After runImport, so it sees the terminal counts. A cancel rethrows out of runImport and
+            // never reaches here — that path already has its own "your rides are in archive/" line.
+            _shortfall.value = rebuildShortfall(archived, _progress.value?.imported ?: 0)
+                .also { if (it > 0) Timber.w("rebuild STRANDED %d of %d archived track(s) in archive/", it, archived) }
         }
     }
 
@@ -208,51 +224,81 @@ object HistoryImportRunner {
 /**
  * The rebuild's DESTRUCTIVE prepare, hoisted out of [HistoryImportRunner.rebuildAll] (which needs a
  * `Context`) so it is plain-JVM testable: the tracks dir plus the two source dirs [HistoryImporter]
- * scans. Returns true ONLY when it actually archived.
+ * scans. Returns HOW MANY tracks it archived — 0 when it archived nothing, whether because there was
+ * nothing to do or because it refused.
  *
  * It refuses to touch anything unless the RECOVERABLE half is demonstrably there:
  *
  *  - Nothing file-sourced to archive → nothing to do.
- *  - Fewer source files than half the tracks about to be archived — ZERO INCLUDED → REFUSE. Archiving
- *    is only reversible by a re-import, so it must be contingent on the files that would do the
- *    re-importing still existing. The rider who imported a backup folder into `/sdcard/KGhost` (the
- *    workflow the button's hint describes) and later cleared it would otherwise move every track into
- *    `archive/` — unreachable on a Karoo without all-files access — while `listFiles` returned null and
- *    the screen reported a cheerful `0 imported`. Half, not "any missing file", is deliberately loose:
- *    rides pruned as twins and a handful of hand-deleted files must not block a legitimate rebuild,
- *    while a folder that was cleared, moved or never mounted is caught long before it can strand the
- *    library. A refusal costs only the altitude upgrade, and the next press retries.
+ *  - FEWER source files than tracks about to be archived → REFUSE. Archiving is only reversible by a
+ *    re-import, so it must be contingent on the files that would do the re-importing still existing.
+ *    The rider who imported a backup folder into `/sdcard/KGhost` (the workflow the button's hint
+ *    describes) and later cleared it would otherwise move every track into `archive/` — unreachable on
+ *    a Karoo without all-files access — while `listFiles` returned null and the screen reported a
+ *    cheerful `0 imported`.
+ *
+ *    Why one-file-per-track and not the old `available * 2 < ids.size` (i.e. "at least half"): the
+ *    count is inflated relative to the tracks it is meant to vouch for, never deflated, so in a HEALTHY
+ *    library `available >= ids.size` always holds and a stricter rule cannot produce a false refusal.
+ *    Every file-sourced track was created by at least one source file, and the file→track mapping is
+ *    many-to-one and lossy in the file's favour: `/sdcard/FitFiles` also holds the Karoo's own `.fit`
+ *    for every RECORDED ride (each counted, none archivable, each re-importing to nothing), a rider's
+ *    backup copy of a FIT folder counts the same ride two or three times, and files below the minimum
+ *    distance or that fail to decode are counted but store no track. A count that has fallen BELOW the
+ *    number of tracks has therefore lost more than every one of those cushions, and at least one ride
+ *    provably has no file to come back from. The old rule tolerated stranding half the library BY
+ *    CONSTRUCTION, and its slack was consumed by the FitFiles inflation before it protected anything:
+ *    70 device FITs "covered" 120 orphaned imports, so the guard passed and every one of them stranded.
+ *    A refusal costs only the altitude upgrade, and the next press retries.
  *  - The dedup reset not taking → REFUSE. It runs BEFORE the archive precisely so this refusal is still
  *    free: [atomicWriteText] preserves the old keys file on an IO error and reports nothing, so a reset
  *    that silently failed AFTER archiving would leave every old key in place, dedup every re-decoded
- *    track away, and end at "0 imported · N duplicates" with the whole library in `archive/`.
+ *    track away, and end at "0 imported · N duplicates" with the whole library in `archive/`. This also
+ *    covers a CORRUPT `sourcekeys.json`: [TrackStore.dropSourceKeys] fails closed on one rather than
+ *    writing `[]` over every live-recorded ride's key while reporting success.
+ *
+ * Counting files can never PROVE recoverability, only disprove it — so the surviving residue is caught
+ * after the fact by [rebuildShortfall], which compares what was archived against what came back.
  *
  * The library is walked via [TrackStore.allTracksMeta] (one track parsed at a time). Loading every track
  * instead is ~230 MB at 1500 rides: the OOM would be swallowed by the caller's `runCatching` and the
  * button would appear to run while doing nothing at all.
  */
-fun prepareRebuild(tracksDir: File, fitFilesDir: File, importDir: File): Boolean {
+fun prepareRebuild(tracksDir: File, fitFilesDir: File, importDir: File): Int {
     val store = TrackStore(tracksDir)
     val meta = store.allTracksMeta()
     val ids = fileSourcedIds(meta)
-    if (ids.isEmpty()) return false
+    if (ids.isEmpty()) return 0
     val available = HistoryImporter.sourceFileCount(fitFilesDir, importDir)
-    if (available * 2 < ids.size) {
+    if (available < ids.size) {
         Timber.w(
             "rebuild REFUSED: only %d source file(s) available to re-import %d file-sourced track(s); " +
                 "archiving them would be unrecoverable. Running an ordinary import instead.",
             available, ids.size,
         )
-        return false
+        return 0
     }
     if (!resetImportDedup(tracksDir, store, archivedSourceKeys(meta))) {
-        Timber.w("rebuild REFUSED: the sourceKey rewrite did not take (IO error); nothing archived")
-        return false
+        Timber.w("rebuild REFUSED: the sourceKey rewrite did not take (IO error or a corrupt keys file); nothing archived")
+        return 0
     }
     val moved = store.archive(ids)
     Timber.i("rebuild: archived %d of %d file-sourced track(s); %d source file(s) to re-read", moved, ids.size, available)
-    return true
+    return moved
 }
+
+/**
+ * How many rides an archive of [archived] tracks did NOT get back, given a re-import that stored
+ * [imported]. The pre-flight guard counts FILES, which can disprove recoverability but never prove it
+ * (a file may fail to decode, or no longer hold the ride it once did); this compares AFTER the fact,
+ * and anything above zero is put on the summary line pointing at `archive/`. Silence is what turns a
+ * recoverable strand into a lost library.
+ *
+ * ponytail: a source file that is genuinely NEW (never imported before) counts towards [imported] and
+ * so can mask a shortfall of one. Tightening that needs per-track identity through the import, which is
+ * not worth it for a line whose job is to say "go look in archive/".
+ */
+fun rebuildShortfall(archived: Int, imported: Int): Int = (archived - imported).coerceAtLeast(0)
 
 /**
  * Resets both import dedup gates so the next full import re-decodes every source file, and reports
