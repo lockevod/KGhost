@@ -126,5 +126,6 @@
     <string name="import_parsing">Parsing %1$d / %2$d…</string>
     <string name="import_summary">%1$d imported · %2$d duplicates · %3$d not valid</string>
     <string name="import_canceled">Import canceled.</string>
+    <string name="import_canceled_rebuild">Rebuild canceled. Your old rides are archived — tap \"All\" to bring them back.</string>
     <string name="import_error">Import failed. Check storage access and try again.</string>
 </resources>

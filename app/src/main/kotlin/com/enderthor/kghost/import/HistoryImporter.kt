@@ -95,15 +95,15 @@ class HistoryImporter(
 
         val workList = ArrayList<WorkItem>()
 
-        fitFilesDir.listFiles { f -> f.isFile && f.name.endsWith(".fit", ignoreCase = true) }
+        fitFilesDir.listFiles { f -> isFit(f) }
             ?.filter(::passesFilter)
             ?.forEach { workList.add(WorkItem(it, Kind.FITFILES_FIT)) }
 
-        importDir.listFiles { f -> f.isFile && f.name.endsWith(".fit", ignoreCase = true) }
+        importDir.listFiles { f -> isFit(f) }
             ?.filter(::passesFilter)
             ?.forEach { workList.add(WorkItem(it, Kind.IMPORT_FIT)) }
 
-        importDir.listFiles { f -> f.isFile && f.name.endsWith(".gpx", ignoreCase = true) }
+        importDir.listFiles { f -> isGpx(f) }
             ?.filter(::passesFilter)
             ?.forEach { workList.add(WorkItem(it, Kind.IMPORT_GPX)) }
 
@@ -344,6 +344,21 @@ class HistoryImporter(
     }
 
     companion object {
+        private fun isFit(f: File) = f.isFile && f.name.endsWith(".fit", ignoreCase = true)
+        private fun isGpx(f: File) = f.isFile && f.name.endsWith(".gpx", ignoreCase = true)
+
+        /**
+         * How many files an import over these two dirs would find — the SAME predicates [import] scans
+         * with (deliberately shared, so the rebuild's safety count and the scan can't drift apart).
+         * A missing/unreadable dir contributes 0, which is exactly the case the rebuild must catch: a
+         * `listFiles` returning null is what turns "the folder is gone" into a silent `total = 0` run.
+         * Ignores the `onlyNew` cutoff and the ledger — the rebuild clears both, so every one of these
+         * files really is re-readable.
+         */
+        fun sourceFileCount(fitFilesDir: File, importDir: File): Int =
+            (fitFilesDir.listFiles { f -> isFit(f) }?.size ?: 0) +
+                (importDir.listFiles { f -> isFit(f) || isGpx(f) }?.size ?: 0)
+
         /** Emit a PARSING progress every this many processed files (plus always on the last). */
         private const val PROGRESS_EVERY = 10
 

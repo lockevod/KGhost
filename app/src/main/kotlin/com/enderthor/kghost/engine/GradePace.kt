@@ -125,8 +125,10 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
         private class Fold(val epoch: Long, val sumDt: Map<Int, Double>, val sumDd: Map<Int, Double>)
 
         private val folds = ArrayList<Fold>()
+        private var built = false
 
         fun add(track: RecordedTrack) {
+            check(!built) { "GradePace.Builder is single-use; add() after build() would be ignored" }
             val pts = track.points
             if (pts.size < 2) return
             // Per-bin totals for THIS track: seconds and metres, so [build]'s fold emits one
@@ -183,7 +185,14 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
             if (sumDd.isNotEmpty()) folds.add(Fold(track.startedAtEpoch, sumDt, sumDd))
         }
 
+        /**
+         * SINGLE-USE: the folds are not consumed by the fold below, so a second call on the same builder
+         * would count every track twice (doubling `count`, halving nothing else) and silently produce a
+         * model that claims twice the rides it has. Build a fresh [Builder] instead.
+         */
         fun build(): GradePace {
+            check(!built) { "GradePace.Builder is single-use; create a new Builder for another model" }
+            built = true
             val map = HashMap<Int, Reducer>()
             // `sortedBy` is stable, so tracks sharing an epoch keep their add order — same as the old
             // list-based build, which sorted the caller's list the same way.
