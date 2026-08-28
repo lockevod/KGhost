@@ -19,12 +19,35 @@ class GhostIntegratorTest {
         assertTrue(g.gapDistM > 0.0)
     }
 
-    @Test fun `novel road accrues at the VP pace`() {
+    @Test fun `novel road is neutral - it neither grows nor shrinks the lead`() {
         val g = newInt(vp = 0.4); val src = pace(0.2, 50.0)
         g.onTick(0.0, 0.0, 0.0, 90.0, 0.0, src)       // baseline
-        g.onTick(50.0, 0.0, 50.0, 90.0, 10.0, src)    // +50 m hist 0.2 → +10
-        g.onTick(100.0, 0.0, 100.0, 90.0, 25.0, src)  // +50 m VP 0.4 → +20
-        assertEquals(30.0, g.ghostTime, 1e-6)
+        g.onTick(50.0, 0.0, 50.0, 90.0, 5.0, src)     // +50 m hist 0.2 → ghost +10 vs elapsed 5 → lead +5
+        assertEquals(5.0, g.gapTimeS, 1e-6)
+        g.onTick(100.0, 0.0, 100.0, 90.0, 20.0, src)  // +50 m novel in 15 s → ghost +15 → lead UNCHANGED
+        assertEquals(25.0, g.ghostTime, 1e-6)
+        assertEquals(5.0, g.gapTimeS, 1e-6)
+    }
+
+    // The reported field bug: a whole route on ground with NO history used to accrue at the 12 km/h VP
+    // target, so a rider averaging > 2× that target ended up "ahead" by MORE than their own elapsed time
+    // (and by kilometres). Novel ground must return no verdict at all, not a fabricated one.
+    @Test fun `a fully novel route never fabricates a gap`() {
+        val g = newInt(vp = 0.3); val src = pace(0.2, -1.0) // history nowhere
+        for (i in 0..300) g.onTick(i * 100.0, 0.0, i * 100.0, 90.0, i * 10.0, src) // 30 km at 10 m/s
+        assertEquals(0.0, g.gapTimeS, 1e-6)
+        assertEquals(0.0, g.gapDistM, 1.0)
+    }
+
+    // A repeated ELAPSED_TIME value against a fresh distance (the caller's combine+sample can emit one)
+    // must accrue NOTHING on novel ground. Charging the VP pace there minted unearned lead on every such
+    // tick, one-signed and never given back — a 4 h ride with one repeat a minute came out +10 min AHEAD.
+    @Test fun `a repeated race-clock tick accrues nothing on novel ground`() {
+        val g = newInt(vp = 0.4); val src = pace(0.2, -1.0)
+        g.onTick(0.0, 0.0, 0.0, 90.0, 10.0, src)      // baseline
+        g.onTick(50.0, 0.0, 50.0, 90.0, 10.0, src)    // +50 m, Δelapsed = 0 → neutral contribution = 0
+        assertEquals(10.0, g.ghostTime, 1e-9)
+        assertEquals(0.0, g.gapTimeS, 1e-9)
     }
 
     @Test fun `a stop accrues nothing`() {
