@@ -29,12 +29,14 @@ import com.enderthor.kghost.engine.AGG_MIN_LAPS
 import com.enderthor.kghost.engine.CorridorSeeder
 import com.enderthor.kghost.engine.GhostCheckpoint
 import com.enderthor.kghost.engine.GhostIntegrator
+import com.enderthor.kghost.engine.GradePace
 import com.enderthor.kghost.engine.PacePatch
 import com.enderthor.kghost.engine.SegmentInfo
 import com.enderthor.kghost.engine.shouldReseed
 import com.enderthor.kghost.geo.AggregateStore
 import com.enderthor.kghost.geo.atomicWriteText
 import com.enderthor.kghost.geo.BBox
+import com.enderthor.kghost.geo.GradePaceStore
 import com.enderthor.kghost.geo.LatLng
 import com.enderthor.kghost.geo.Polyline
 import com.enderthor.kghost.geo.PolylinePath
@@ -422,6 +424,18 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     @Volatile
     private var lastFix: GpsFix? = null
 
+    // Live gradient (%) + the MONOTONIC ms it arrived, the key into the historical pace-vs-gradient
+    // model on ground with no local history. Its own collector rather than a fourth arm of the tick's
+    // combine(): the tick must not stall waiting for a gradient sample, and a missing gradient is a
+    // legitimate state (null -> the model is simply not asked). Written off Main, read on the tick.
+    @Volatile private var lastGradePct: Double? = null
+    @Volatile private var lastGradeMs: Long = 0L
+    private var gradeJob: Job? = null
+    // One-shot unit probe: ELEVATION_GRADE is documented as "Grade %" but a ratio (0.06) and a percent
+    // (6.0) are indistinguishable in code and differ by 100x. Log the first raw sample so the unit can be
+    // confirmed from a field log; normalisation, if any, belongs in the collector below and nowhere else.
+    @Volatile private var gradeUnitLogged = false
+
     // The Karoo's own remaining-distance-to-destination (m) on the navigated route, and whether the
     // rider is on that route. Source of the authoritative route position (routeDist = routeLen −
     // remaining) used by the ② route tick, replacing the local GPS projection. Written by [destJob]
@@ -620,6 +634,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          * the whole route. Not persisted; rebuilt on every route load.
          */
         val pacePatch: PacePatch?,
+        /**
+         * Global, route-independent "my pace at gradient X" model (tier 2 of the pace lookup), LOADED
+         * (never rebuilt) at route load and carried here so the tick reads a consistent (patch, model)
+         * pair. Null when no import has run since the feature landed -> the fill stays neutral, exactly
+         * as before.
+         */
+        val gradePace: GradePace?,
     )
 
     /**
@@ -858,6 +879,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         tickJob = null
         locationJob?.cancel()
         locationJob = null
+        // Same dead-binding reasoning for the gradient collector: a forgotten collector freezes on the old
+        // binding for the rest of the ride. Null the value too, so a stale gradient can't survive the
+        // reconnect and describe a hill the rider left minutes ago.
+        gradeJob?.cancel()
+        gradeJob = null
+        lastGradePct = null
+        lastGradeMs = 0L
         // destJob (route-progress) is wired to the dead binding for the SAME reason as tick/location, so
         // cancel it too — otherwise it silently stops emitting and route mode freezes on `---` for the
         // rest of the ride. Reset its @Volatile outputs so the rebuilt tick can't read a STALE
@@ -1435,6 +1463,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // once here, off Main, rather than twice.
                     val tracks = trackStore().loadTopCandidates(bbox, CorridorSeeder.MAX_CANDIDATES)
                     val pacePatch = PacePatch.build(tracks)
+                    // Global gradient model: route-independent, so it is LOADED (not rebuilt) here.
+                    val gradePace = GradePaceStore(TrackStorage.tracksDir(applicationContext)).load()
+                    Timber.i("KVP route load: gradePace=%s", gradePace?.let { "coveredM=%.0f".format(it.coveredM) } ?: "absent")
                     if (needsSeed) {
                         val seedStartMs = SystemClock.elapsedRealtime()
                         // Store the no-parse id SET so the next load can diff against it.
@@ -1476,7 +1507,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // built under the OLD settings over the replacement's.
                     currentCoroutineContext().ensureActive()
                     if (lastMatchedPolyline == mine) {
-                        routeMode = RouteMode(path, mine, state.name, matched, routeGhost, state.routeDistance, pacePatch)
+                        routeMode = RouteMode(path, mine, state.name, matched, routeGhost, state.routeDistance, pacePatch, gradePace)
                         // Diagnostic for the scale question: the Karoo's routeDistance (the scale that
                         // DISTANCE_TO_DESTINATION is measured against) vs the decoded-polyline length (the
                         // scale segments + the ghost curve live on). A large delta means routeDist needs
@@ -1687,6 +1718,23 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         "KVP loc: lat=${"%.5f".format(lat)} lng=${"%.5f".format(lng)} " +
                             "acc=${acc?.let { "%.0f".format(it) } ?: "null"}m trusted=$trusted",
                     )
+                }
+            }.launchIn(scope)
+        }
+        // Live gradient consumer — the key into the global pace-vs-gradient model (tier 2), used only on
+        // ground with no local history. Its own collector, not a tick combine() arm: the tick must never
+        // stall waiting for a gradient sample, and an absent gradient is a legitimate state (the model is
+        // simply not asked). Cancelled with the other stream jobs on reconnect/stop.
+        if (gradeJob?.isActive != true) {
+            gradeJob = karooSystem.streamDataFlow(DataType.Type.ELEVATION_GRADE).onEach { state ->
+                val v = (state as? StreamState.Streaming)?.dataPoint?.values?.get(DataType.Field.ELEVATION_GRADE)
+                // UNIT: assumed already a percentage. If a field log shows ratios (0.06 on a 6% ramp),
+                // multiply by 100 HERE — the one place that knows the unit — never at the lookup site.
+                lastGradePct = v?.takeIf { it.isFinite() }
+                lastGradeMs = SystemClock.elapsedRealtime()
+                if (!gradeUnitLogged) {
+                    gradeUnitLogged = true
+                    Timber.i("KVP grade sample: raw=%s", v?.toString() ?: "null")
                 }
             }.launchIn(scope)
         }
@@ -2105,7 +2153,18 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // the same GPS_FIX_FRESH_MS gate; the number must too — stale ⇒ null ⇒ neutral fill, so
                         // dead-reckoned metres get no verdict rather than a fabricated one.
                         val fixFresh = fix != null && SystemClock.elapsedRealtime() - fix.ms <= GPS_FIX_FRESH_MS
-                        val paceNow = if (fixFresh) patch?.pace(gLat, gLng, gHdg, eff.ghostPick) else null
+                        // Tier 1: this exact road, ridden before (PacePatch). Tier 2: my historical pace at THIS
+                        // gradient on a road I have never ridden (GradePace). Tier 3 lives in the integrator: a
+                        // neutral fill that contributes 0. Tier 2 is gated on a FRESH gradient for the same reason
+                        // as tier 1 — a stale gradient describes a hill the rider left minutes ago.
+                        val paceHere = if (fixFresh) patch?.pace(gLat, gLng, gHdg, eff.ghostPick) else null
+                        val gradeFresh = SystemClock.elapsedRealtime() - lastGradeMs <= GPS_FIX_FRESH_MS
+                        val paceGrade = if (paceHere == null && gradeFresh) {
+                            lastGradePct?.let { rm.gradePace?.pace(it, eff.ghostPick) }
+                        } else {
+                            null
+                        }
+                        val paceNow = paceHere ?: paceGrade
                         integ.onTick(riderDist, gLat, gLng, gHdg, elapsedS - moveStart) { _, _, _ -> paceNow }
                         integLastRiderDist = riderDist
                         // Persist the scalar race state ~every CHECKPOINT_INTERVAL_MS so a mid-ride power-off /
@@ -2299,7 +2358,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     "KVP tick route(B2): riderDist=${"%.0f".format(riderDist)} " +
                                         "gapT=${"%.0f".format(gap.gapTimeS)}s gapD=${"%.0f".format(gap.gapDistanceM)}m " +
                                         "${if (gap.ahead) "AHEAD" else "BEHIND"} ghostTime=${"%.0f".format(integ.ghostTime)} " +
-                                        "seg=${if (onHistory) "SEG" else "GP"} " +
+                                        "seg=${if (paceHere != null) "SEG" else if (paceGrade != null) "GRADE" else "GP"} " +
+                                        "grade=${lastGradePct?.let { "%.1f".format(it) } ?: "--"} " +
                                         "cov=${"%.0f".format(100.0 * integ.matchedM / (integ.matchedM + integ.filledM).coerceAtLeast(1.0))}% " +
                                         "riderR=${lastGoodRouteDistM?.let { "%.0f".format(it) } ?: "--"} " +
                                         "elapsed=${"%.0f".format(elapsedS)} fresh=$fresh " +
@@ -2360,6 +2420,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         tickJob = null
         locationJob?.cancel()
         locationJob = null
+        gradeJob?.cancel()
+        gradeJob = null
+        lastGradePct = null
+        lastGradeMs = 0L
         destJob?.cancel()
         destJob = null
         // Forget the last GPS fix / route position so the NEXT ride starts genuinely cold: D0 is
@@ -2406,6 +2470,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         tickJob = null
         locationJob?.cancel()
         locationJob = null
+        gradeJob?.cancel()
+        gradeJob = null
+        lastGradePct = null
+        lastGradeMs = 0L
         // Stop the map loop and clear its snapshot, then the Idle handler's publishGhostMarker(null)
         // hides. cancelAndJoin (not a bare cancel) so no in-flight loop iteration can re-Show the ghost
         // AFTER the hide — its publishGhostMarker has no suspension point, so a plain cancel wouldn't
