@@ -127,6 +127,7 @@
     <string name="import_summary">%1$d imported · %2$d duplicates · %3$d not valid</string>
     <string name="import_rebuild_refused">Rebuild skipped — the ride files needed to restore your history aren\'t all there. Nothing was archived.</string>
     <string name="import_rebuild_missing">Rebuild skipped — %1$d ride files for %2$d rides. Restore %3$d to /sdcard/KGhost. Nothing was archived.</string>
+    <string name="import_rebuild_damaged">Rebuild skipped — a stored ride file is damaged, so rebuilding could lose a ride. Nothing was archived. Your ride files were re-read to repair it: tap Rebuild again.</string>
     <string name="import_rebuild_shortfall">%1$d rides didn\'t come back — they\'re in the archive/ folder.</string>
     <string name="import_canceled">Import canceled.</string>
     <string name="import_canceled_rebuild">Rebuild canceled. Your old rides are archived — tap \"All\" to bring them back.</string>
