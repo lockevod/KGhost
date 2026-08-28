@@ -335,6 +335,7 @@ internal fun ImportSection(
     val running by HistoryImportRunner.running.collectAsStateWithLifecycle()
     val canceled by HistoryImportRunner.canceled.collectAsStateWithLifecycle()
     val pendingCompletion by HistoryImportRunner.pendingCompletion.collectAsStateWithLifecycle()
+    val preparing by HistoryImportRunner.preparing.collectAsStateWithLifecycle()
 
     // Refresh the recorded-track count once per completion — even one that finished while we were on
     // another screen. We key on the runner's consumable [pendingCompletion] flag (NOT progress.phase,
@@ -393,18 +394,30 @@ internal fun ImportSection(
         }
     }
 
+    // Rebuild ARCHIVES the whole imported library before re-importing it, so it is confirm-then-run: the
+    // first tap only arms the button (the hint below already says what it does and how long it takes),
+    // the second starts it. A modal dialog would be the usual gesture but does not fit a 2.2" screen.
+    var rebuildArmed by remember { mutableStateOf(false) }
     OutlinedButton(
         onClick = {
-            HistoryImportRunner.rebuildAll(
-                appContext = context.applicationContext,
-                configManager = configManager,
-                lastScanEpoch = config.lastScanEpoch,
-            )
+            if (!rebuildArmed) {
+                rebuildArmed = true
+            } else {
+                rebuildArmed = false
+                HistoryImportRunner.rebuildAll(
+                    appContext = context.applicationContext,
+                    configManager = configManager,
+                    lastScanEpoch = config.lastScanEpoch,
+                )
+            }
         },
         enabled = !running,
         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
     ) {
-        Text(stringResource(R.string.import_rebuild), maxLines = 1)
+        Text(
+            stringResource(if (rebuildArmed) R.string.import_rebuild_confirm else R.string.import_rebuild),
+            maxLines = 1,
+        )
     }
     Text(
         text = stringResource(R.string.import_rebuild_hint),
@@ -412,7 +425,9 @@ internal fun ImportSection(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 
-    if (running) {
+    // No Cancel during the archive+reset window: archive() is non-suspending so it always completes, and
+    // a cancel landing just after it would leave the library archived with nothing re-importing it.
+    if (running && !preparing) {
         OutlinedButton(
             onClick = { HistoryImportRunner.cancel() },
             modifier = Modifier.heightIn(min = 48.dp),
@@ -424,6 +439,10 @@ internal fun ImportSection(
     // ── Progress / summary line ───────────────────────────────────────────────
     val p = progress
     when {
+        preparing -> Text(
+            text = stringResource(R.string.import_rebuild_preparing),
+            style = MaterialTheme.typography.bodyMedium,
+        )
         canceled -> Text(
             text = stringResource(R.string.import_canceled),
             style = MaterialTheme.typography.bodyMedium,

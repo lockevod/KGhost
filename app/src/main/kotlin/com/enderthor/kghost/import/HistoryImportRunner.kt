@@ -5,6 +5,7 @@ import com.enderthor.kghost.engine.GradePace
 import com.enderthor.kghost.geo.GradePaceStore
 import com.enderthor.kghost.geo.Source
 import com.enderthor.kghost.geo.TrackStorage
+import com.enderthor.kghost.geo.TrackIdentity
 import com.enderthor.kghost.geo.TrackStore
 import com.enderthor.kghost.managers.ConfigurationManager
 import kotlinx.coroutines.CancellationException
@@ -54,6 +55,16 @@ object HistoryImportRunner {
      */
     val pendingCompletion: StateFlow<Boolean> = _pendingCompletion.asStateFlow()
 
+    private val _preparing = MutableStateFlow(false)
+    /**
+     * True only during [rebuildAll]'s DESTRUCTIVE window — the archive + dedup reset, before the import
+     * proper starts. The screen must NOT offer Cancel here: [TrackStore.archive] is non-suspending so it
+     * always completes, and a cancel landing right after it would leave the whole imported library in
+     * `archive/` with nothing re-importing it (and, without all-files access, `archive/` unreachable
+     * from the device).
+     */
+    val preparing: StateFlow<Boolean> = _preparing.asStateFlow()
+
     @Volatile
     private var job: Job? = null
 
@@ -86,22 +97,32 @@ object HistoryImportRunner {
 
     /**
      * Full rebuild: archives every track that came from a FILE (so a re-decode does not create a
-     * duplicate), clears both dedup gates ([clearImportDedup]), then runs a complete import — same
+     * duplicate), resets the dedup gates ([resetImportDedup]), then runs a complete import — same
      * process-scoped job as [start], so leaving the screen doesn't cancel it either. `Source.RECORDED`
      * tracks are KEPT: they were recorded live and no source file can re-create them. If the
-     * archive/clear step itself fails, the import still runs (against whatever dedup state remains)
+     * archive/reset step itself fails, the import still runs (against whatever dedup state remains)
      * rather than silently doing nothing.
+     *
+     * The library is walked via [TrackStore.allTracksMeta] (one track parsed at a time). Loading every
+     * track instead is ~230 MB at 1500 rides: the OOM would be swallowed by the `runCatching` below and
+     * the button would appear to run while doing nothing at all.
      */
     fun rebuildAll(appContext: Context, configManager: ConfigurationManager, lastScanEpoch: Long) {
         if (!beginRun()) return
         job = scope.launch {
-            runCatching {
-                val dir = TrackStorage.tracksDir(appContext)
-                val store = TrackStore(dir)
-                val fileSourced = store.allTracks().filter { it.source != Source.RECORDED }.map { it.id }
-                if (fileSourced.isNotEmpty()) store.archive(fileSourced)
-                clearImportDedup(dir)
-            }.onFailure { Timber.w(it, "rebuild: could not archive stale tracks / clear dedup gates") }
+            try {
+                _preparing.value = true
+                runCatching {
+                    val dir = TrackStorage.tracksDir(appContext)
+                    val store = TrackStore(dir)
+                    val meta = store.allTracksMeta()
+                    val fileSourced = fileSourcedIds(meta)
+                    if (fileSourced.isNotEmpty()) store.archive(fileSourced)
+                    resetImportDedup(dir, store, survivingSourceKeys(meta))
+                }.onFailure { Timber.w(it, "rebuild: could not archive stale tracks / reset dedup gates") }
+            } finally {
+                _preparing.value = false
+            }
             runImport(appContext, configManager, onlyNew = false, lastScanEpoch = lastScanEpoch)
         }
     }
@@ -133,7 +154,11 @@ object HistoryImportRunner {
             // just leaves the ghost falling back to its neutral fill until the next successful one.
             runCatching {
                 val dir = TrackStorage.tracksDir(appContext)
-                val model = GradePace.build(TrackStore(dir).allTracks())
+                // STREAMED, one track parsed at a time: the whole library in heap at once OOMs a Karoo,
+                // and the failure would land here as a swallowed "rebuild failed" with no model.
+                val builder = GradePace.Builder()
+                TrackStore(dir).forEachTrack(builder::add)
+                val model = builder.build()
                 GradePaceStore(dir).save(model)
                 Timber.i("grade-pace model rebuilt: coveredM=%.0f", model.coveredM)
             }.onFailure { Timber.w(it, "grade-pace rebuild failed; the ghost falls back to the neutral fill") }
@@ -171,13 +196,42 @@ object HistoryImportRunner {
 }
 
 /**
- * Deletes BOTH import dedup gates in [tracksDir] so the next full import re-decodes every source file:
- *  - `processed.json` — the ledger, which skips a file whose size+mtime are unchanged.
- *  - `sourcekeys.json` — the post-decode dedup, which would otherwise drop each re-decoded track.
- * Clearing only one is a no-op: the ledger alone leaves the tracks dropped at store time, and the keys
- * alone leave the files never decoded. Missing files are not an error.
+ * Resets both import dedup gates so the next full import re-decodes every source file:
+ *  - `processed.json` — the ledger (skips a file whose size+mtime are unchanged) — is DELETED.
+ *  - `sourcekeys.json` — the post-decode dedup, which would otherwise drop each re-decoded track — is
+ *    REWRITTEN with [keepKeys], NOT deleted.
+ *
+ * Resetting only one is a no-op: the ledger alone leaves the tracks dropped at store time, and the keys
+ * alone leave the files never decoded.
+ *
+ * Why rewrite instead of delete: `defaultDecimate` recomputes a scanned ride's `sourceKey` off its
+ * decimated tail precisely so an imported FIT collapses onto the key the live [TrackRecorder] produced
+ * for the SAME ride. That key is the only thing stopping a live-recorded ride's FIT from being stored a
+ * second time as its twin — and the pair never self-heals, because `selectArchivable` leaves twin groups
+ * of <= 3 alone forever, so every aggregate that counts RIDES double-counts it. Passing the SURVIVING
+ * (i.e. `RECORDED`) tracks' keys keeps that collapse working while the archived file-sourced tracks'
+ * keys are dropped so their files re-decode. Missing files are not an error.
  */
-fun clearImportDedup(tracksDir: File) {
+fun resetImportDedup(tracksDir: File, store: TrackStore, keepKeys: Set<String>) {
     File(tracksDir, "processed.json").delete()
-    File(tracksDir, "sourcekeys.json").delete()
+    store.replaceSourceKeys(keepKeys)
 }
+
+/**
+ * PURE data-safety rule of the rebuild: the ids safe to archive are exactly the tracks that came from a
+ * FILE. A `Source.RECORDED` track was recorded live and NO source file can re-create it, so it must
+ * never be returned here — this one predicate is what stands between the rebuild and destroying history.
+ */
+fun fileSourcedIds(tracks: List<TrackIdentity>): List<String> =
+    tracks.filter { it.source != Source.RECORDED }.map { it.id }
+
+/**
+ * PURE companion rule: the source keys that must SURVIVE the rebuild — those of the tracks that are not
+ * archived (the `RECORDED` ones), so their ride's FIT still collapses onto them instead of landing a
+ * permanent duplicate. Empty keys are dropped: they are never deduped against anyway (see
+ * [TrackStore.add]) and would only bloat the file.
+ */
+fun survivingSourceKeys(tracks: List<TrackIdentity>): Set<String> =
+    tracks.filter { it.source == Source.RECORDED }
+        .mapNotNull { it.sourceKey.takeIf(String::isNotEmpty) }
+        .toSet()
