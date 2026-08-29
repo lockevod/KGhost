@@ -1771,6 +1771,16 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // reports LONG_LOSS for a prolonged loss (the gap is then shown as an estimate, and the
         // tick gives up + blanks only after GPS_GIVEUP_S). Replaces the old DistanceProgress path.
         val coast = CoastingEstimator()
+        // Per-EPISODE GPS-loss diagnostic state (diagnostics only — nothing here feeds the rider).
+        // One line is emitted when an episode ENDS (quality back to LIVE after COASTING/LONG_LOSS), so
+        // a whole ride yields a handful of lines. Detection below is an enum compare per tick; the
+        // string is built only on an episode end AND only when the rider's diagnostic log is on.
+        var lossPrevQuality = CoastQuality.LIVE
+        var lossStartElapsedS = 0.0
+        var lossWorst = CoastQuality.LIVE
+        var lossNullSpeedTicks = 0
+        var lossAlerted = false
+        var lossClockS = 0.0
         // Cache the ghost curve and rebuild it only when the target speed changes.
         // GhostPaceSource.curve() allocates a fresh curve on every call, so building it
         // inside the 1 Hz tick would churn a curve per second; instead we remember the target
@@ -1848,6 +1858,53 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // is inert — otherwise re-activating after a disabled stretch would see a distance
                     // jump and misread it as a GPS freeze.
                     coast.update(distM, speedMs, elapsedS)
+
+                    // ── GPS-loss EPISODE diagnostic (diagnostics only, no behaviour) ──────────────
+                    // Answers three questions no ride log can answer today: (a) on recovery, does the
+                    // host's own DISTANCE jump forward to cover the blind metres (rawStep ≈ coasted) or
+                    // resume where it froze (rawStep ≈ 0)? — which decides whether discarding the
+                    // dead-reckoned surplus is right; (b) does the SPEED stream ever actually go null on
+                    // this device (speedNullTicks); (c) how often/how long losses happen while a route is
+                    // loaded (mode=route), where nothing alerts today. One line per episode.
+                    val cq = coast.quality
+                    if (cq == CoastQuality.LIVE) {
+                        if (lossPrevQuality != CoastQuality.LIVE) {
+                            // Episode over. Same gate as the seed diag: build nothing unless the rider
+                            // has the file log on (it is the only sink for a Timber.i in a release build).
+                            if (FileLogTree.enabled) {
+                                Timber.i(
+                                    "KVP gps-loss episode: mode=%s durS=%.0f lossS=%.0f rawAtFreeze=%.0fm " +
+                                        "rawAtRecovery=%.0fm rawStep=%.0fm coasted=%.0fm speedNullTicks=%d " +
+                                        "worst=%s alertFired=%b",
+                                    if (routeMode != null) "route" else "no-route",
+                                    elapsedS - lossStartElapsedS,
+                                    lossClockS,
+                                    coast.rawAtFreezeM,
+                                    distM,
+                                    distM - coast.rawAtFreezeM,
+                                    coast.coastedSurplusM,
+                                    lossNullSpeedTicks,
+                                    lossWorst,
+                                    lossAlerted || gpsAlertFired,
+                                )
+                            }
+                        }
+                    } else {
+                        if (lossPrevQuality == CoastQuality.LIVE) {
+                            // Episode begins (one tick's worth of freeze already banked in lossClockS).
+                            lossStartElapsedS = elapsedS
+                            lossNullSpeedTicks = 0
+                            lossAlerted = false
+                            lossWorst = cq
+                        }
+                        if (cq > lossWorst) lossWorst = cq
+                        if (speedMs == null) lossNullSpeedTicks++
+                        // handleGpsLoss() runs LATER in this tick, so a fire is observed on the next one
+                        // — and on the recovery tick directly, before it re-arms.
+                        if (gpsAlertFired) lossAlerted = true
+                        lossClockS = coast.coastingSeconds // survives the reset on the recovery tick
+                    }
+                    lossPrevQuality = cq
 
                     // Per-profile + master gate: when inactive the extension is fully inert — clear the
                     // gap/segment fields (→ `---`), hide the ghost, skip recording, and emit nothing.
