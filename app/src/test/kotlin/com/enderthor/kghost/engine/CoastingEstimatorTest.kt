@@ -120,6 +120,27 @@ class CoastingEstimatorTest {
         // metres in one tick.
     }
 
+    @Test fun `an implausible speed sample is never remembered as the dead-reckoning rate`() {
+        // The remembered moving speed is the rate every NULL-speed metre is invented at, so one corrupt
+        // sample would be spent on the NEXT dropout, long after it arrived. A 100 m/s reading (360 km/h)
+        // is not a bicycle: it must be rejected, leaving the last plausible speed in place.
+        val c = newEstimator(coastWindowMs = 30_000L)
+        c.update(rawDistanceM = 0.0, speedMs = 8.0, elapsedS = 0.0)     // moving at 8 m/s
+        c.update(rawDistanceM = 8.0, speedMs = 8.0, elapsedS = 1.0)     // still 8 m/s, distance advancing
+        c.update(rawDistanceM = 16.0, speedMs = 100.0, elapsedS = 2.0)  // one corrupt sample, distance still LIVE
+        assertEquals(16.0, c.effectiveDistanceM, 1e-6)                  // LIVE ticks always equal raw
+
+        // Now the fix dies AND the speed stream goes quiet: dead reckoning falls back to the remembered
+        // speed for at most one coast window (30 s).
+        var t = 2.0
+        repeat(30) { t += 1.0; c.update(rawDistanceM = 16.0, speedMs = null, elapsedS = t) }
+
+        // 30 s of budget at the last PLAUSIBLE speed: 16 + 8 × 30 = 256 m.
+        // Had the 100 m/s sample been remembered: 16 + 100 × 30 = 3016 m — 3 km of phantom distance,
+        // which the ghost would then be paid historical pace for.
+        assertEquals(256.0, c.effectiveDistanceM, 1e-6)
+    }
+
     @Test fun `a pause (elapsed frozen) injects no phantom coast distance on resume`() {
         // Simulates a long café stop: DISTANCE stays frozen and ELAPSED_TIME is frozen by the ride
         // app during pause, so the resume tick sees a frozen distance at the SAME elapsedS as the last
