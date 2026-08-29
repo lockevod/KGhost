@@ -24,6 +24,13 @@ Inside `tracks/`: one `<id>.json` per track, plus the bookkeeping — `index.jso
 index for candidate lookup), `sourcekeys.json` (dedup keys), `.pathcells` (a migration marker),
 `processed.json` (the import ledger, §4), and an `archive/` subdir for auto-cleaned rides.
 
+`sourcekeys.json` is a **derived cache**: every key in it is the `sourceKey` of a stored track, so absent
+and corrupt mean the same thing — recompute it from the library (live **and** `archive/`, since archiving
+deliberately keeps a track's key). Completeness gates only PERSISTENCE: if a directory that exists will
+not list, or a file cannot be read, the recomputed set is still deduped against but is not written back,
+so it can never erase what it could not see. A file that reads but does not decode is not a track — it
+holds no key, and its ride comes back by re-importing its source file.
+
 **Why a reinstall shows 0 rides — and why the count now self-heals.** On reinstall `MANAGE_EXTERNAL_STORAGE`
 is revoked, so `tracksDir` resolves to the (wiped) internal fallback → the count reads 0 even though the
 processed tracks are still sitting in `/sdcard/KGhost/tracks`. The recorded-track count in
@@ -163,9 +170,10 @@ stores every one of them with altitude:
   that stops a ride from being stored twice, once live and once re-imported) keeps working for every
   track NOT part of the rebuild.
 
-Both resets are guarded — see `prepareRebuild`'s doc comment for the "fewer source files than half the
-tracks about to be archived → refuse" and "dedup reset didn't take → refuse" safety checks — so a rebuild
-can't strand the library in `archive/` with nothing able to re-import it. It takes as long as a first
+Both resets are guarded — see `prepareRebuild`'s doc comment for the "fewer source files than tracks
+about to be archived → refuse" and "dedup reset didn't take (an IO failure — the only refusal left) →
+refuse" safety checks — so a rebuild can't strand the library in `archive/` with nothing able to
+re-import it. It takes as long as a first
 import (every file is fully re-decoded), which the button's UI hint says up front.
 
 ## 5. Auto-clean (library tidy)
