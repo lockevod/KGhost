@@ -188,4 +188,68 @@ class CoastingEstimatorTest {
         assertEquals(0.0, c.coastingSeconds, 1e-6)
         assertNotEquals(CoastQuality.LONG_LOSS, c.quality) // not a prolonged loss
     }
+
+    // ── Episode diagnostics (rawAtFreezeM / coastedSurplusM) — read on the RECOVERY tick ──────────
+    // Pure, read-only state behind the one-line-per-GPS-loss-episode diagnostic. They must name the
+    // value the raw stream FROZE at and the surplus the recovery branch discards.
+
+    @Test fun `dropout then recovery reports the freeze point and the discarded surplus`() {
+        val c = newEstimator(coastWindowMs = 30_000L)
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 0.0)
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 1.0) // frozen, coasting
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 2.0)
+        assertEquals(120.0, c.effectiveDistanceM, 1e-6)               // 20 m dead-reckoned
+        c.update(rawDistanceM = 105.0, speedMs = 10.0, elapsedS = 3.0) // fix back: raw resumed, not jumped
+        assertEquals(CoastQuality.LIVE, c.quality)
+        assertEquals(100.0, c.rawAtFreezeM, 1e-6)                     // frozen AT 100 m
+        assertEquals(20.0, c.coastedSurplusM, 1e-6)                   // 20 m discarded by effective = raw
+        assertEquals(105.0, c.effectiveDistanceM, 1e-6)
+    }
+
+    @Test fun `a legitimate stop invents nothing so the surplus stays zero`() {
+        val c = newEstimator()
+        c.update(rawDistanceM = 100.0, speedMs = 5.0, elapsedS = 0.0)
+        c.update(rawDistanceM = 100.0, speedMs = 0.0, elapsedS = 10.0) // parked at a light
+        c.update(rawDistanceM = 100.0, speedMs = 0.0, elapsedS = 20.0)
+        c.update(rawDistanceM = 102.0, speedMs = 3.0, elapsedS = 21.0) // rolls again
+        assertEquals(100.0, c.rawAtFreezeM, 1e-6)
+        assertEquals(0.0, c.coastedSurplusM, 1e-6)
+    }
+
+    @Test fun `a stop INSIDE a dropout keeps the metres already dead-reckoned in the surplus`() {
+        val c = newEstimator(coastWindowMs = 30_000L)
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 0.0)
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 2.0) // 20 m coasted while blind
+        c.update(rawDistanceM = 100.0, speedMs = 0.0, elapsedS = 12.0) // stop mid-dropout: hold, add nothing
+        c.update(rawDistanceM = 100.0, speedMs = 0.0, elapsedS = 22.0)
+        c.update(rawDistanceM = 101.0, speedMs = 4.0, elapsedS = 23.0) // fix back
+        assertEquals(100.0, c.rawAtFreezeM, 1e-6)
+        assertEquals(20.0, c.coastedSurplusM, 1e-6) // the stop neither added nor removed metres
+    }
+
+    @Test fun `each episode reports its own numbers and a live stretch resets them`() {
+        val c = newEstimator(coastWindowMs = 30_000L)
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 0.0)
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 1.0) // episode 1: 10 m
+        c.update(rawDistanceM = 108.0, speedMs = 10.0, elapsedS = 2.0)
+        assertEquals(100.0, c.rawAtFreezeM, 1e-6)
+        assertEquals(10.0, c.coastedSurplusM, 1e-6)
+        // A clean live tick in between: nothing was frozen, so the surplus is zero again.
+        c.update(rawDistanceM = 118.0, speedMs = 10.0, elapsedS = 3.0)
+        assertEquals(108.0, c.rawAtFreezeM, 1e-6)
+        assertEquals(0.0, c.coastedSurplusM, 1e-6)
+        // Episode 2, back to back: 2 s at 10 m/s = 20 m from a different freeze point.
+        c.update(rawDistanceM = 118.0, speedMs = 10.0, elapsedS = 4.0)
+        c.update(rawDistanceM = 118.0, speedMs = 10.0, elapsedS = 5.0)
+        c.update(rawDistanceM = 130.0, speedMs = 10.0, elapsedS = 6.0)
+        assertEquals(118.0, c.rawAtFreezeM, 1e-6)
+        assertEquals(20.0, c.coastedSurplusM, 1e-6)
+    }
+
+    @Test fun `the first call has no freeze to report`() {
+        val c = newEstimator()
+        c.update(rawDistanceM = 500.0, speedMs = 10.0, elapsedS = 0.0)
+        assertEquals(500.0, c.rawAtFreezeM, 1e-6)
+        assertEquals(0.0, c.coastedSurplusM, 1e-6)
+    }
 }

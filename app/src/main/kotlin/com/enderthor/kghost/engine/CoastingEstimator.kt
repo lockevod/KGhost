@@ -84,6 +84,27 @@ class CoastingEstimator(
     var coastingSeconds: Double = 0.0
         private set
 
+    /**
+     * DIAGNOSTIC (read-only, no behaviour): the raw distance (m) the LAST resolved freeze was frozen
+     * AT — i.e. the value the raw stream stopped changing at, kept across the tick that breaks the
+     * freeze so a caller can compare it against the raw value that broke it. Set on every raw change,
+     * so during normal riding it is simply the previous tick's raw (a zero-length "freeze") and on a
+     * recovery tick it is the frozen value. `rawDistanceM` on the first call.
+     */
+    var rawAtFreezeM: Double = Double.NaN
+        private set
+
+    /**
+     * DIAGNOSTIC (read-only, no behaviour): the metres this class had dead-reckoned ON TOP of the
+     * frozen raw distance at the moment the LAST freeze resolved — exactly what the recovery branch
+     * discards when it snaps `effectiveDistanceM` back to raw. 0.0 during normal riding and after a
+     * legitimate stop (nothing was invented). Read it on the recovery tick, together with
+     * [rawAtFreezeM]: whether discarding it is right depends on whether the raw stream jumps forward
+     * to cover the blind metres or resumes where it froze, which only a field log can answer.
+     */
+    var coastedSurplusM: Double = 0.0
+        private set
+
     // --- internals -------------------------------------------------------------
     /** The last raw value seen (to detect change). NaN until the first call. */
     private var lastRawM: Double = Double.NaN
@@ -164,6 +185,11 @@ class CoastingEstimator(
             // An INCREASE is also proof the rider moved, with no help from the speed stream; a decrease
             // is a source reset (new activity), which un-proves it.
             if (!firstCall) everMoved = rawDistanceM > prevRawM
+            // Diagnostics only (two subtractions, no behaviour): this is the ONLY tick on which the
+            // pair below still describes the freeze that just ended — prevRawM is the value it was
+            // frozen at, and effectiveDistanceM still carries the surplus the next line discards.
+            rawAtFreezeM = if (firstCall) rawDistanceM else prevRawM
+            coastedSurplusM = if (firstCall) 0.0 else effectiveDistanceM - prevRawM
             if (speedMs != null && speedMs in minMovingMs..AGG_MAX_SPEED_MS) lastMovingSpeedMs = speedMs
             effectiveDistanceM = rawDistanceM
             quality = CoastQuality.LIVE
