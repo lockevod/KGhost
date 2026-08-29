@@ -71,7 +71,7 @@ class MainActivity : ComponentActivity() {
 
 /**
  * Three-tab layout. The config is collected once here and passed down so all tabs share the
- * same source of truth; saves go straight back through [ConfigurationManager.saveConfig].
+ * same source of truth; saves go straight back through [ConfigurationManager.updateConfig].
  *
  * A [TrackStore] is instantiated here — read-only from the UI side — solely to expose the
  * recorded-track count on the Race tab. All actual write IO runs on Dispatchers.IO inside

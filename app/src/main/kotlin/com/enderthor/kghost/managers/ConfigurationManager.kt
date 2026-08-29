@@ -64,6 +64,35 @@ val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
 internal const val CONFIG_MIRROR_FILE = "kghostconfig-mirror.json"
 
 /**
+ * Filename (under `filesDir`) of the install-id mirror — the 6-hex "Anon tag" that groups a device's
+ * diagnostic logs. The id lives in the same preferences file the corruption erases, so without this
+ * the tag changes across exactly the incident a maintainer wants to trace. Plain text, not JSON:
+ * six hex characters need no schema.
+ */
+internal const val INSTALL_ID_MIRROR_FILE = "kghost-installid.txt"
+
+private val INSTALL_ID_RE = Regex("[0-9a-f]{6}")
+
+/** The install id held by [INSTALL_ID_MIRROR_FILE], or null if absent/unreadable/not a valid tag. */
+internal fun installIdFromMirror(text: String?): String? = text?.trim()?.takeIf { INSTALL_ID_RE.matches(it) }
+
+/**
+ * Process-wide write monitors keyed by canonical mirror path — the same idiom [AggregateStore] uses
+ * for the identical hazard: [atomicWriteText] names its temp `<name>.tmp`, so two concurrent writers
+ * of one target share it, the second truncating the temp the first is about to rename, and the failed
+ * rename then degrades to a plain non-atomic `writeText` onto the live file. Serialising per target
+ * closes that window; a kill inside it would otherwise leave a permanently zero-byte mirror, which
+ * still reads as "present" and so fires the restore signal while restoring nothing.
+ */
+private val mirrorLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+/** Writes [text] to [file] atomically AND serialised against any other writer of the same file. */
+internal fun writeMirrorFile(file: File, text: String) {
+    val key = runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
+    synchronized(mirrorLocks.computeIfAbsent(key) { Any() }) { atomicWriteText(file, text) }
+}
+
+/**
  * Decodes the config mirror written by [ConfigurationManager], or null when there is nothing usable
  * to restore (no mirror at all = genuine first run; an unparseable one = best-effort backup that
  * failed, degrade to defaults rather than throw).
@@ -121,8 +150,12 @@ class ConfigurationManager(private val context: Context) {
      */
     suspend fun getOrCreateInstallId(): String {
         context.dataStore.data.first()[installIdKey]?.let { return it }
-        val id = "%06x".format(Random.nextInt(0x1000000))
+        // Absent: a genuine first run, OR the corruption reset that wiped the whole preferences file.
+        // Prefer the mirrored tag so a device's logs stay groupable across the incident worth tracing.
+        val id = installIdFromMirror(readMirror(installIdMirrorFile))
+            ?: "%06x".format(Random.nextInt(0x1000000))
         runCatching { context.dataStore.edit { it[installIdKey] = id } }
+        writeMirror(installIdMirrorFile, id)
         return id
     }
 
@@ -139,41 +172,22 @@ class ConfigurationManager(private val context: Context) {
                 if (raw == null) {
                     // Empty store: either a genuine first run, or DataStore just replaced a corrupt
                     // file with empty prefs. The mirror tells the two apart (see [CONFIG_MIRROR_FILE]).
-                    restoredFromMirror(readMirror()) ?: KGhostConfig()
+                    restoredFromMirror(readMirror(mirrorFile)) ?: KGhostConfig()
                 } else {
                     decodeConfig(raw)
                 }
             }
             .catch { e ->
-                // Upstream DataStore I/O failure — emit defaults so consumers don't hang.
-                Timber.e(e, "KGhostConfig DataStore read failed — emitting defaults")
-                emit(KGhostConfig())
+                // Upstream DataStore I/O failure — the corruption handler keeps CorruptionException
+                // away from here, but any other IOException still lands here having never reached the
+                // mirror-consulting map above. Consult it here too, so an unreadable store degrades to
+                // the rider's settings rather than to raw defaults; defaults remain the last resort so
+                // consumers never hang waiting for a value.
+                Timber.e(e, "KGhostConfig DataStore read failed — falling back to the config mirror")
+                emit(restoredFromMirror(readMirror(mirrorFile)) ?: KGhostConfig())
             }
             .map { it.migrateToLatest() }
             .distinctUntilChanged()
-
-    /**
-     * Writes [config] to DataStore, replacing any previously stored value.
-     * Encodes with [jsonForStorage] (compact, no encodeDefaults).
-     *
-     * @return true if the write succeeded, false if it threw (already logged). Callers must not
-     *         report success on false — the screens surface an error status instead of clearing.
-     */
-    suspend fun saveConfig(config: KGhostConfig): Boolean {
-        return try {
-            val json = jsonForStorage.encodeToString(config)
-            context.dataStore.edit { prefs ->
-                prefs[configKey] = json
-            }
-            writeMirror(json)
-            true
-        } catch (e: Throwable) {
-            // Surface a serialization/encode failure (e.g. a release R8 strip of generated
-            // serializers) instead of silently swallowing it.
-            Timber.e(e, "Failed to save KGhostConfig")
-            false
-        }
-    }
 
     /**
      * Atomically updates the persisted config: reads the current value, applies [transform], and writes
@@ -188,7 +202,6 @@ class ConfigurationManager(private val context: Context) {
      */
     suspend fun updateConfig(transform: (KGhostConfig) -> KGhostConfig): Boolean {
         return try {
-            var written: String? = null
             context.dataStore.edit { prefs ->
                 // [configForUpdate] decodes WITHOUT the silent default-fallback that [decodeConfig]
                 // uses on the read path. On the WRITE path a present-but-undecodable blob must NOT be
@@ -197,13 +210,22 @@ class ConfigurationManager(private val context: Context) {
                 // edit aborts, the bad blob is preserved, and the caller surfaces a save-failed status.
                 // Note this only fires on a structurally broken blob: a stale/removed ENUM value still
                 // decodes fine because [jsonWithUnknownKeys] has coerceInputValues=true.
-                val current = configForUpdate(prefs[configKey]) { readMirror() }
+                val current = configForUpdate(prefs[configKey]) { readMirror(mirrorFile) }
                 val next = jsonForStorage.encodeToString(transform(current))
                 prefs[configKey] = next
-                written = next
+                // INSIDE the edit on purpose. DataStore serialises edit blocks, so mirroring here makes
+                // the mirror's write order the same as the store's. Mirrored AFTER the edit it was not:
+                // two concurrent updates could land their mirror writes in the opposite order and leave
+                // the mirror holding an OLDER config than the store — the rider's most recent change
+                // silently missing from the copy a corruption restore reads back.
+                writeMirror(mirrorFile, next)
             }
-            written?.let { writeMirror(it) }
             true
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // A cancelled scope (a settings screen leaving composition, the extension scope at ride end)
+            // is NOT a failed write: the authoritative store edit may well have committed. Swallowing it
+            // would report a bogus save-failure and defeat callers that rethrow cancellation.
+            throw e
         } catch (e: Throwable) {
             Timber.e(e, "Failed to update KGhostConfig")
             false
@@ -213,27 +235,29 @@ class ConfigurationManager(private val context: Context) {
     // ─── Private helpers ──────────────────────────────────────────────────────
 
     private val mirrorFile: File get() = File(context.filesDir, CONFIG_MIRROR_FILE)
+    private val installIdMirrorFile: File get() = File(context.filesDir, INSTALL_ID_MIRROR_FILE)
 
-    /** Reads the mirror blob, or null if absent/unreadable. Never throws. */
-    private suspend fun readMirror(): String? = withContext(Dispatchers.IO) {
-        runCatching { mirrorFile.takeIf { it.isFile }?.readText() }
-            .onFailure { Timber.w(it, "config mirror read failed") }
+    /** Reads [file], or null if absent/unreadable. Never throws. */
+    private suspend fun readMirror(file: File): String? = withContext(Dispatchers.IO) {
+        runCatching { file.takeIf { it.isFile }?.readText() }
+            .onFailure { Timber.w(it, "mirror read failed for %s", file.name) }
             .getOrNull()
     }
 
     /**
-     * Mirrors the just-written blob to [mirrorFile] with the shared [atomicWriteText] (temp + fsync +
-     * rename, so a kill mid-mirror can't produce a torn mirror either). Best effort: a mirror failure
-     * is logged, never surfaced — DataStore already holds the authoritative value.
+     * Mirrors [text] to [file] with [writeMirrorFile] (temp + fsync + rename under a per-target
+     * monitor, so neither a kill mid-write nor a concurrent writer can produce a torn mirror). Best
+     * effort: a mirror failure is logged, never surfaced — DataStore already holds the authoritative
+     * value.
      *
      * Explicitly dispatched to IO because the settings screens call [updateConfig] from a Compose
      * `rememberCoroutineScope()`, i.e. on Main — DataStore does its own IO internally, this write
      * would not. Config writes are rare (a settings toggle, one profile switch per ride, the one-time
      * tidy stamp, the permission-alert counter, one per import flush), so the ride path is untouched.
      */
-    private suspend fun writeMirror(json: String) = withContext(Dispatchers.IO) {
-        runCatching { atomicWriteText(mirrorFile, json) }
-            .onFailure { Timber.w(it, "config mirror write failed") }
+    private suspend fun writeMirror(file: File, text: String) = withContext(Dispatchers.IO) {
+        runCatching { writeMirrorFile(file, text) }
+            .onFailure { Timber.w(it, "mirror write failed for %s", file.name) }
         Unit
     }
 
