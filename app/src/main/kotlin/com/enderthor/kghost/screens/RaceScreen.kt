@@ -47,7 +47,7 @@ import kotlinx.coroutines.launch
  * Controls bound to [KGhostConfig]: [KGhostConfig.raceEnabled] master switch,
  * [KGhostConfig.ghostPick] selector (Best / Last), [KGhostConfig.autoRecord] switch, and
  * [KGhostConfig.segmentEntryAlert] switch. Every change writes immediately through
- * [ConfigurationManager.saveConfig]; a false return surfaces a visible error message.
+ * [ConfigurationManager.updateConfig]; a false return surfaces a visible error message.
  *
  * @param config         current config (collected once in [MainActivity] and passed down).
  * @param configManager  shared manager — never creates its own DataStore.
