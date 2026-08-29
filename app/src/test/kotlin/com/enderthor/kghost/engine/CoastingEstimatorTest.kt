@@ -120,6 +120,39 @@ class CoastingEstimatorTest {
         // metres in one tick.
     }
 
+    @Test fun `a lying sensor cannot invent distance forever, but a real tunnel still coasts`() {
+        // A wheel spinning on a rack (or a mis-configured circumference) reports plausible movement while
+        // the bike is parked and the raw distance is frozen — indistinguishable from a genuine tunnel
+        // except by duration. Dead reckoning is therefore bounded, not symmetric with the null-speed path:
+        // a 30 s cap would freeze the odometer inside a real tunnel.
+        val c = newEstimator()
+        c.update(rawDistanceM = 0.0, speedMs = 8.0, elapsedS = 0.0)
+        c.update(rawDistanceM = 8.0, speedMs = 8.0, elapsedS = 1.0)   // moving, raw advancing
+
+        // Raw freezes; the sensor keeps insisting on 8 m/s for four hours.
+        var t = 1.0
+        repeat(14_400) { t += 1.0; c.update(rawDistanceM = 8.0, speedMs = 8.0, elapsedS = t) }
+
+        // 1800 s of budget at 8 m/s = 14.4 km, then the odometer freezes. Unbounded, the same four hours
+        // fabricated 115 km in the adversarial repro. The bound is deliberately generous: its job is the
+        // runaway, not second-guessing a plausible loss (see MAX_COAST_S).
+        assertEquals(8.0 + 14_400.0, c.effectiveDistanceM, 1e-6)
+        // The loss clock keeps running, so the alert and the estimate mark stay honest.
+        assertEquals(14_400.0, c.coastingSeconds, 1e-6)
+        assertEquals(CoastQuality.LONG_LOSS, c.quality)
+    }
+
+    @Test fun `a genuine two minute tunnel is coasted end to end`() {
+        // The case the class exists for: the rider IS moving and the sensor IS right. 120 s is inside the
+        // budget, so every metre is dead-reckoned — the bound must not bite here.
+        val c = newEstimator()
+        c.update(rawDistanceM = 0.0, speedMs = 9.0, elapsedS = 0.0)
+        c.update(rawDistanceM = 9.0, speedMs = 9.0, elapsedS = 1.0)
+        var t = 1.0
+        repeat(120) { t += 1.0; c.update(rawDistanceM = 9.0, speedMs = 9.0, elapsedS = t) }
+        assertEquals(9.0 + 9.0 * 120, c.effectiveDistanceM, 1e-6) // 1080 m of tunnel, all of it
+    }
+
     @Test fun `an implausible speed sample is never remembered as the dead-reckoning rate`() {
         // The remembered moving speed is the rate every NULL-speed metre is invented at, so one corrupt
         // sample would be spent on the NEXT dropout, long after it arrived. A 100 m/s reading (360 km/h)

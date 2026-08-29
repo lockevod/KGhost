@@ -399,7 +399,7 @@ class Adv3CoastDriftTest {
      *  odometer integrates 115 km that no consumer will ever refund. The no-route field blanks after
      *  3 min and stays blank; the ROUTE consumer never calls handleGpsLoss at all, so it keeps racing
      *  on the invented odometer (its gap holds, but progressM/ghostProgressM are fiction). */
-    @Test fun `H5 - a permanent loss integrates 115 km of fiction`() {
+    @Test fun `H5 - a permanent loss is bounded at one coast budget, not 115 km`() {
         val r = VpRig()
         var d = 0.0; var t = 0.0
         repeat(60) { d += 8.0; t += 1.0; r.tick(d, t, 8.0) }
@@ -409,7 +409,11 @@ class Adv3CoastDriftTest {
             "H5: 4 h blind -> odo=${"%.0f".format(r.odoM)} m (raw ${"%.0f".format(frozen)} m), " +
                 "coastS=${"%.0f".format(r.coastS)}, blanked=${r.blankedTicks}/${4 * 3600}",
         )
-        assertTrue("unbounded integration: 115 km invented", r.odoM - frozen > 115_000.0)
+        // FIXED: one loss buys at most MAX_COAST_S (1800 s) of dead reckoning from any speed source, so
+        // four hours of a sensor insisting on 8 m/s invents 14.4 km and then the odometer freezes. Before
+        // the bound this asserted > 115 km. The cap is deliberately generous — a 180 s version was tried
+        // and rejected because it cut 420 m off a real 450 s urban loss (see Adv2CoastPipelineTest).
+        assertEquals("bounded at one coast budget", 8.0 * 1_800.0, r.odoM - frozen, 8.0)
         assertEquals("the no-route field is dark for all but the first 3 min", 4 * 3600 - 179, r.blankedTicks)
 
         // The route consumer has no give-up at all — its gap holds (neutral fill) but riderDist is fiction.

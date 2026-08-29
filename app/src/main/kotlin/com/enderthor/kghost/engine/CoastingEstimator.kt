@@ -63,6 +63,7 @@ enum class CoastQuality {
 class CoastingEstimator(
     private val coastWindowMs: Long = COAST_WINDOW_MS,
     private val minMovingMs: Double = StalenessLogic.MIN_MOVING_MS,
+    private val maxCoastS: Double = MAX_COAST_S,
 ) {
     /** The distance (m) the gap engine should use this tick — raw, frozen, or coasted. */
     var effectiveDistanceM: Double = 0.0
@@ -100,6 +101,23 @@ class CoastingEstimator(
      *  for the bound described in the class KDoc. */
     private var unprovenCoastS: Double = 0.0
 
+    /** Seconds dead-reckoned on THIS loss from ANY speed source, capped at [maxCoastS].
+     *
+     *  The null path has its own, much tighter budget: no speed at all is no evidence. A speed that keeps
+     *  ARRIVING is positive evidence and used to be trusted without any limit — which is right for the
+     *  case this class exists for (a real tunnel: the rider IS moving and the sensor IS correct), and
+     *  wrong for a sensor that reports movement while the bike is parked (a wheel spinning on a rack, a
+     *  mis-configured circumference, a stuck reading). The estimator cannot tell those apart: both show a
+     *  frozen raw distance and a plausible speed. Only DURATION separates them, so the trust is bounded
+     *  rather than symmetric — a 30 s cap would freeze the odometer inside a genuine tunnel.
+     *
+     *  Past [maxCoastS] the app has already declared the number untrustworthy (the field blanks in
+     *  no-route mode, and the route gap neutral-fills coasted metres), so continuing to invent distance
+     *  buys nothing and can run to kilometres: 4 h of frozen raw with a sensor insisting on 8 m/s
+     *  fabricated 115 km. The odometer freezes; the loss clock and the quality keep running, so the
+     *  signalling stays honest. */
+    private var coastSpentS: Double = 0.0
+
     /**
      * Feed the latest raw distance (m), speed (m/s, or null if unavailable) and the ride's elapsed
      * time (seconds) once per tick. [elapsedS] is the coast clock — see the class KDoc on why this is
@@ -125,6 +143,7 @@ class CoastingEstimator(
             quality = CoastQuality.LIVE
             coastingSeconds = 0.0
             unprovenCoastS = 0.0
+            coastSpentS = 0.0
             return
         }
 
@@ -154,15 +173,19 @@ class CoastingEstimator(
 
         // Frozen while moving — or speed unavailable. We NEVER blank; a prolonged loss is LONG_LOSS.
         coastingSeconds += dt
+        // Whatever the speed source, one loss may only buy maxCoastS of dead reckoning (see coastSpentS).
+        val room = (maxCoastS - coastSpentS).coerceIn(0.0, dt)
         if (speedMs != null) {
-            // Positive evidence of movement: dead-reckon at the speed we are actually being told, for
-            // as long as it lasts. This is the genuine-dropout-while-moving path.
-            effectiveDistanceM += speedMs * dt
+            // Positive evidence of movement: dead-reckon at the speed we are actually being told. This is
+            // the genuine-dropout-while-moving path, and it gets the generous budget.
+            effectiveDistanceM += speedMs * room
+            coastSpentS += room
         } else {
             // No speed at all: fall back to the last moving speed, but spend at most one coast window
             // of it — beyond that we would be inventing a ride out of pure silence.
-            val budgetS = (coastWindowMs / 1000.0 - unprovenCoastS).coerceIn(0.0, dt)
+            val budgetS = (coastWindowMs / 1000.0 - unprovenCoastS).coerceIn(0.0, room)
             unprovenCoastS += budgetS
+            coastSpentS += budgetS
             effectiveDistanceM += lastMovingSpeedMs * budgetS
         }
         quality = qualityOf(coastingSeconds)
@@ -181,5 +204,21 @@ class CoastingEstimator(
          * rendered marked + alert-eligible). ~30 s comfortably covers tunnels/underpasses.
          */
         const val COAST_WINDOW_MS = 30_000L
+
+        /**
+         * Total seconds of dead reckoning ONE loss may buy, from any speed source.
+         *
+         * Deliberately GENEROUS. A frozen raw distance with a plausible reported speed is the same picture
+         * whether the rider is in a tunnel (sensor right, keep reckoning) or parked with a wheel spinning
+         * on a rack (sensor wrong, stop). Only duration separates them, so the bound's job is to stop the
+         * RUNAWAY case — a sensor insisting on 8 m/s through 4 h of frozen distance fabricated 115 km —
+         * not to second-guess a plausible loss. A 180 s cap was tried and rejected: it cut 420 m off a
+         * real 450 s urban-canyon loss that a regression test pins to the metre.
+         *
+         * 30 minutes is longer than any GPS loss a rider survives while still riding, and it caps the
+         * runaway at ~14 km instead of 115. Past it the odometer freezes while the loss clock and the
+         * quality keep running, so the alert and the estimate mark stay honest.
+         */
+        const val MAX_COAST_S = 1_800.0
     }
 }
