@@ -87,7 +87,13 @@ class CoastingEstimator(
     /** Previous tick's ride-elapsed seconds, for the per-tick integration step (NaN until first call). */
     private var prevElapsedS: Double = Double.NaN
 
-    /** The last speed (m/s) observed while the rider was moving (>= [minMovingMs]). */
+    /** The last PLAUSIBLE speed (m/s) observed while the rider was moving (>= [minMovingMs]). This is the
+     *  rate every dead-reckoned metre is invented at, so one corrupt sample would otherwise be remembered
+     *  as the cruising speed and spent on the NEXT dropout — a single 100 m/s reading bought 3 km of
+     *  phantom distance and ~840 s of unearned lead. Samples above [AGG_MAX_SPEED_MS] (108 km/h, the same
+     *  "not a bicycle" ceiling the pace models use) are REJECTED rather than clamped: the previous good
+     *  value is a better estimate of the rider's speed than a capped corruption. NaN fails the range test
+     *  too. */
     private var lastMovingSpeedMs: Double = 0.0
 
     /** Seconds already dead-reckoned on a NULL speed since the last real distance change — the budget
@@ -114,7 +120,7 @@ class CoastingEstimator(
         if (changed) {
             // Real movement (or first call): trust the raw value and clear both clocks — a raw change
             // is the ONLY proof that the fix is back.
-            if (speedMs != null && speedMs >= minMovingMs) lastMovingSpeedMs = speedMs
+            if (speedMs != null && speedMs in minMovingMs..AGG_MAX_SPEED_MS) lastMovingSpeedMs = speedMs
             effectiveDistanceM = rawDistanceM
             quality = CoastQuality.LIVE
             coastingSeconds = 0.0
