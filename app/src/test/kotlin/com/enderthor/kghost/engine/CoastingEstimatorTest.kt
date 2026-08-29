@@ -142,9 +142,11 @@ class CoastingEstimatorTest {
         assertEquals(CoastQuality.LONG_LOSS, c.quality)
     }
 
-    @Test fun `a genuine two minute tunnel is coasted end to end`() {
-        // The case the class exists for: the rider IS moving and the sensor IS right. 120 s is inside the
-        // budget, so every metre is dead-reckoned — the bound must not bite here.
+    @Test fun `GUARD - a genuine two minute tunnel is coasted end to end`() {
+        // NOT a regression test: this passes identically on the pre-bound code, because 120 s was never
+        // truncated by anything. It is a GUARD against a future tightening of MAX_COAST_S (a 180 s cap
+        // was tried and rejected) — the case the class exists for is the rider who IS moving with a
+        // sensor that IS right, and every metre of it must stay dead-reckoned.
         val c = newEstimator()
         c.update(rawDistanceM = 0.0, speedMs = 9.0, elapsedS = 0.0)
         c.update(rawDistanceM = 9.0, speedMs = 9.0, elapsedS = 1.0)

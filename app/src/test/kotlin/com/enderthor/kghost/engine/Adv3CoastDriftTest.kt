@@ -342,15 +342,20 @@ class Adv3CoastDriftTest {
     /** The bound only governs the NULL path. A speed that keeps ARRIVING is dead-reckoned without any
      *  budget, so a sensor flapping between null and a stale coasting value while the bike is parked
      *  spends the 30 s budget AND every present-speed tick on top. */
-    @Test fun `H4c - a flapping sensor walks straight through the bound`() {
+    @Test fun `H4c - a flapping sensor spends the speed budget, not the null window`() {
         val r = VpRig()
         var d = 0.0; var t = 0.0
         repeat(100) { d += 8.0; t += 1.0; r.tick(d, t, 8.0) }
         val before = r.odoM
         // 10 min parked; the sensor alternately drops out (null) and re-reports its stale 8 m/s.
         repeat(600) { i -> t += 1.0; r.tick(d, t, if (i % 2 == 0) null else 8.0) }
-        println("H4c: phantom=${"%.0f".format(r.odoM - before)} m over a parked 600 s (the 'bound' is 240 m)")
-        assertTrue("the bound is bypassed by an order of magnitude", r.odoM - before > 2_000.0)
+        val phantom = r.odoM - before
+        println("H4c: phantom=${"%.0f".format(phantom)} m over a parked 600 s")
+        // The 30 s null window bounds only the NULL ticks. Every tick that DOES report a speed is
+        // positive evidence of movement and spends the generous MAX_COAST_S budget, so alternating buys
+        // 300 present-speed seconds + the 30 s window = 2640 m. That is the designed behaviour, not a
+        // bypass: what bounds this case is MAX_COAST_S x the clamped rate, and 600 s is well inside it.
+        assertEquals("300 present-speed ticks + the 30 s null window", 8.0 * (300 + 30), phantom, 1e-6)
     }
 
     /** A wheel sensor that keeps reporting the last speed for 3 s after every stop. 60 stops on a city

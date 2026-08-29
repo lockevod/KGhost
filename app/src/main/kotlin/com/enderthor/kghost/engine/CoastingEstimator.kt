@@ -40,13 +40,16 @@ enum class CoastQuality {
  *  1. **Distance changing** (new value): real movement → effective = raw, quality = LIVE, both clocks
  *     reset. Remembers the last moving speed.
  *  2. **Frozen + provably stopped** (`speed < minMovingMs`): legitimate stop → hold everything.
- *  3. **Frozen + moving (or speed unavailable)**: GPS dropout → COAST: `effective += speed * dt`, and
+ *  3. **Frozen + moving (or speed unavailable)**: GPS dropout → COAST: `effective += speed * dt` with
+ *     the speed capped at [AGG_MAX_SPEED_MS] (a corrupt sample may not buy a rate no bicycle reaches), and
  *     the loss clock advances. quality is COASTING while the loss is within `coastWindowMs`, else
  *     LONG_LOSS. Either way we keep extrapolating — we never blank, because a bike computer should
  *     keep estimating through a dropout and snap back when the fix returns. With a NULL speed we fall
  *     back to the last moving speed, BOUNDED to one coast window's worth: a silent SPEED stream (a
  *     paired wheel/ANT+ sensor stops broadcasting exactly when the wheel stops) is indistinguishable
- *     from a dropout by speed alone, so we cap the invention instead of guessing.
+ *     from a dropout by speed alone, so we cap the invention instead of guessing. With NO usable rate at
+ *     all we invent nothing — but the loss clock and the quality still run, so a dropout is never shown
+ *     as trusted (the only silent case is a rider who has never moved; see `everMoved`).
  *
  * Unlike the old design there is no "untrustworthy → blank" regime: even speed-unavailable frozen
  * data is coasted at the last remembered moving speed (0 if the rider was stopped), so the field
@@ -89,13 +92,24 @@ class CoastingEstimator(
     private var prevElapsedS: Double = Double.NaN
 
     /** The last PLAUSIBLE speed (m/s) observed while the rider was moving (>= [minMovingMs]). This is the
-     *  rate every dead-reckoned metre is invented at, so one corrupt sample would otherwise be remembered
-     *  as the cruising speed and spent on the NEXT dropout — a single 100 m/s reading bought 3 km of
-     *  phantom distance and ~840 s of unearned lead. Samples above [AGG_MAX_SPEED_MS] (108 km/h, the same
-     *  "not a bicycle" ceiling the pace models use) are REJECTED rather than clamped: the previous good
-     *  value is a better estimate of the rider's speed than a capped corruption. NaN fails the range test
-     *  too. */
+     *  rate the NULL-speed path invents at (only that path — a reported speed is spent directly, capped),
+     *  so one corrupt sample would otherwise be remembered as the cruising speed and spent on the NEXT
+     *  dropout: a single 100 m/s reading bought 3 km of phantom distance and ~840 s of unearned lead.
+     *  Samples above [AGG_MAX_SPEED_MS] (108 km/h, the same "not a bicycle" ceiling the pace models use)
+     *  are REJECTED rather than clamped here, because we are choosing what to REMEMBER and the previous
+     *  good value is a better estimate of the rider's speed than a capped corruption. The reported-speed
+     *  path clamps instead: there we need a rate for THIS tick and the corrupt sample is all we have.
+     *  Rejecting every sample of a persistently implausible stream leaves this at 0.0 — see [everMoved]
+     *  for why that no longer silences the loss signalling. */
     private var lastMovingSpeedMs: Double = 0.0
+
+    /** Whether the raw distance has ever INCREASED, i.e. proof the rider moved that is independent of any
+     *  speed sample. It separates the two states the "no rate to reckon with" branch used to conflate:
+     *  a standing start (nothing has moved, treat the frozen distance as LIVE) from a rider who is moving
+     *  but whose speed stream is silent or implausible (invent nothing, but keep the loss clock and the
+     *  quality running so the alert, the estimate mark and the give-up blank stay honest).
+     *  A DECREASE is a source reset / new activity, so it clears the flag rather than setting it. */
+    private var everMoved: Boolean = false
 
     /** Seconds already dead-reckoned on a NULL speed since the last real distance change — the budget
      *  for the bound described in the class KDoc. */
@@ -111,11 +125,14 @@ class CoastingEstimator(
      *  frozen raw distance and a plausible speed. Only DURATION separates them, so the trust is bounded
      *  rather than symmetric — a 30 s cap would freeze the odometer inside a genuine tunnel.
      *
-     *  Past [maxCoastS] the app has already declared the number untrustworthy (the field blanks in
-     *  no-route mode, and the route gap neutral-fills coasted metres), so continuing to invent distance
-     *  buys nothing and can run to kilometres: 4 h of frozen raw with a sensor insisting on 8 m/s
-     *  fabricated 115 km. The odometer freezes; the loss clock and the quality keep running, so the
-     *  signalling stays honest. */
+     *  Past [maxCoastS] the app has already declared the number untrustworthy, so continuing to invent
+     *  distance buys nothing: 4 h of frozen raw with a sensor insisting on 8 m/s fabricated 115 km of
+     *  ODOMETER — not of user-visible fiction. No consumer today ever renders those metres: the no-route
+     *  field has given up and blanked ~1620 s before the cap is reached, and route mode's moving-time
+     *  race clock freezes together with the odometer, so the gap is unharmed either way. This bound is
+     *  defence-in-depth on the number itself (and on any future consumer), not the fix for a symptom a
+     *  rider sees. The odometer freezes; the loss clock and the quality keep running, so the signalling
+     *  stays honest. */
     private var coastSpentS: Double = 0.0
 
     /**
@@ -126,18 +143,27 @@ class CoastingEstimator(
     fun update(rawDistanceM: Double, speedMs: Double?, elapsedS: Double) {
         // Guard non-finite inputs: ignore the sample and keep the previous state (no NaN propagation).
         if (!rawDistanceM.isFinite() || !elapsedS.isFinite()) return
+        // A non-finite SPEED is ABSENT, not a rate: NaN < minMovingMs is false, so it slipped past the
+        // stop test into the coast path and NaN * anything poisoned the odometer permanently — the budget
+        // freeze does not help (NaN * 0.0 is NaN). Production only survived it because the caller filters
+        // with takeIf { isFinite() }; the class now guarantees it itself.
+        @Suppress("NAME_SHADOWING") val speedMs = speedMs?.takeIf { it.isFinite() }
 
         val firstCall = prevElapsedS.isNaN()
         // Elapsed-based, so a pause (ELAPSED_TIME frozen) advances nothing. coerceAtLeast(0) guards a
         // non-monotonic elapsed glitch.
         val dt = if (firstCall) 0.0 else (elapsedS - prevElapsedS).coerceAtLeast(0.0)
         prevElapsedS = elapsedS
+        val prevRawM = lastRawM
         val changed = rawDistanceM != lastRawM || firstCall
         lastRawM = rawDistanceM
 
         if (changed) {
             // Real movement (or first call): trust the raw value and clear both clocks — a raw change
             // is the ONLY proof that the fix is back.
+            // An INCREASE is also proof the rider moved, with no help from the speed stream; a decrease
+            // is a source reset (new activity), which un-proves it.
+            if (!firstCall) everMoved = rawDistanceM > prevRawM
             if (speedMs != null && speedMs in minMovingMs..AGG_MAX_SPEED_MS) lastMovingSpeedMs = speedMs
             effectiveDistanceM = rawDistanceM
             quality = CoastQuality.LIVE
@@ -160,14 +186,25 @@ class CoastingEstimator(
             return
         }
 
-        if (lastMovingSpeedMs <= 0.0) {
-            // The rider has never moved yet (no moving speed ever recorded) — e.g. stationary at the
-            // start line before the SPEED stream first emits, so the stop check above can't fire on a
-            // null speed. There is nothing to dead-reckon, so treat the frozen distance as LIVE rather
-            // than coasting a standing start into a false "GPS lost" after the window.
-            effectiveDistanceM = rawDistanceM
-            quality = CoastQuality.LIVE
-            coastingSeconds = 0.0
+        if (speedMs == null && lastMovingSpeedMs <= 0.0) {
+            // No rate to reckon with at all. Two very different states, kept apart by [everMoved]:
+            if (!everMoved) {
+                // The rider has never moved — e.g. stationary at the start line before the SPEED stream
+                // first emits, so the stop check above can't fire on a null speed. Nothing to
+                // dead-reckon, and nothing has gone wrong: treat the frozen distance as LIVE rather than
+                // coasting a standing start into a false "GPS lost" after the window.
+                effectiveDistanceM = rawDistanceM
+                quality = CoastQuality.LIVE
+                coastingSeconds = 0.0
+                return
+            }
+            // The rider IS moving (the raw distance grew) but we have no plausible rate — a silent speed
+            // stream, or one every sample of which is implausible. Invent no distance, but the loss clock
+            // and the quality MUST still run: this is a genuine dropout and it has to announce itself
+            // (alert, estimate mark, give-up blank). Conflating it with the start line turned a
+            // ten-minute GPS loss into a fully trusted reading.
+            coastingSeconds += dt
+            quality = qualityOf(coastingSeconds)
             return
         }
 
@@ -177,8 +214,12 @@ class CoastingEstimator(
         val room = (maxCoastS - coastSpentS).coerceIn(0.0, dt)
         if (speedMs != null) {
             // Positive evidence of movement: dead-reckon at the speed we are actually being told. This is
-            // the genuine-dropout-while-moving path, and it gets the generous budget.
-            effectiveDistanceM += speedMs * room
+            // the genuine-dropout-while-moving path, and it gets the generous budget. The rate is CLAMPED
+            // to the same "not a bicycle" ceiling, not rejected as it is when choosing what to remember:
+            // we need a rate for THIS tick and the reported one is all we have, so cap the corruption
+            // rather than discard the tick. Uncapped, a stuck 100 m/s register spent MAX_COAST_S at
+            // 100 m/s = 180 km — 12.5x the bound the duration cap alone claims.
+            effectiveDistanceM += speedMs.coerceAtMost(AGG_MAX_SPEED_MS) * room
             coastSpentS += room
         } else {
             // No speed at all: fall back to the last moving speed, but spend at most one coast window
@@ -211,8 +252,8 @@ class CoastingEstimator(
          * Deliberately GENEROUS. A frozen raw distance with a plausible reported speed is the same picture
          * whether the rider is in a tunnel (sensor right, keep reckoning) or parked with a wheel spinning
          * on a rack (sensor wrong, stop). Only duration separates them, so the bound's job is to stop the
-         * RUNAWAY case — a sensor insisting on 8 m/s through 4 h of frozen distance fabricated 115 km —
-         * not to second-guess a plausible loss. A 180 s cap was tried and rejected: it cut 420 m off a
+         * RUNAWAY case — a sensor insisting on 8 m/s through 4 h of frozen distance ran the ODOMETER to
+         * 115 km (no consumer renders that far: see [coastSpentS]) — not to second-guess a plausible loss. A 180 s cap was tried and rejected: it cut 420 m off a
          * real 450 s urban-canyon loss that a regression test pins to the metre.
          *
          * 30 minutes is longer than any GPS loss a rider survives while still riding, and it caps the
