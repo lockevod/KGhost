@@ -128,7 +128,6 @@
     <string name="import_summary">%1$d importados · %2$d duplicados · %3$d no válidos</string>
     <string name="import_rebuild_refused">Reconstrucción omitida: faltan archivos de ruta para poder recuperar el historial. No se ha archivado nada.</string>
     <string name="import_rebuild_missing">Reconstrucción omitida: %1$d archivos para %2$d rutas. Restaura %3$d en /sdcard/KGhost. No se ha archivado nada.</string>
-    <string name="import_rebuild_damaged">Reconstrucción omitida: un archivo de ruta guardado está dañado y reconstruir podría perder una ruta. No se ha archivado nada. Se han vuelto a leer tus archivos para repararlo: pulsa Reconstruir otra vez.</string>
     <string name="import_rebuild_shortfall">%1$d rutas no han vuelto: están en la carpeta archive/.</string>
     <string name="import_canceled">Importación cancelada.</string>
     <string name="import_canceled_rebuild">Reconstrucción cancelada. Tus rutas antiguas están archivadas: pulsa \"Todos\" para recuperarlas.</string>

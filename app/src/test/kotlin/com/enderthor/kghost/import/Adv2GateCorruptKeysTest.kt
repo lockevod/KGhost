@@ -25,7 +25,8 @@ import java.io.File
  * destruction of the "present but unparseable" evidence the recovery keys off, so it could never fire
  * again. `commit()` runs in the importer's `finally` on EVERY run, including one that stores nothing.
  *
- * All writers now go through `TrackStore.keysForWrite()`.
+ * All writers now go through `TrackStore.sourceKeys()`, which treats the file as the derived CACHE it
+ * is: absent and corrupt both mean "recompute from the library".
  */
 class Adv2GateCorruptKeysTest {
     @get:Rule val tmp = TemporaryFolder()
@@ -142,13 +143,13 @@ class Adv2GateCorruptKeysTest {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // C3. The rebuilt set must not be the "overwrite from a sampled snapshot" that dropSourceKeys' own
-    //     doc argues against: a track whose <id>.json does not parse AT THAT MOMENT is absent from it,
-    //     so writing it back erases that ride's key for good. Bulk-import track writes are fsync=false
-    //     by design, so a torn <id>.json after a power cut is a modelled state. CHOICE: refuse to WRITE
-    //     (fail closed, corrupt file left in place as evidence) rather than write a lossy set.
+    // C3. A torn `<id>.json` while the keys file is corrupt. This used to REFUSE every write (the
+    //     recovery "could not vouch for itself"), which froze the store: an undecodable file in
+    //     archive/ can never be repaired, so nothing could ever be written again. `sourcekeys.json` is
+    //     a CACHE, so the rule is now the plain one — a file that does not decode is not a track, it
+    //     holds no recoverable key, and its ride comes back by re-importing its source file.
     // ─────────────────────────────────────────────────────────────────────────
-    @Test fun `a recovery that cannot vouch for itself REFUSES instead of writing a lossy set`() {
+    @Test fun `a torn track json no longer freezes the store - the reset takes and the rebuild runs`() {
         val dir = tmp.newFolder("C3-tracks")
         val store = TrackStore(dir)
         val ok = decimated("rec-ok", 1_700_000_000_000L, Source.RECORDED)
@@ -156,28 +157,28 @@ class Adv2GateCorruptKeysTest {
         store.add(ok)
         store.add(torn)
         // One file-sourced track (with its file, below) so the rebuild gets PAST the file count and all
-        // the way to the reset — the refusal under test.
-        store.add(decimated("gpx-1", 1_600_000_000_000L, Source.GPX_IMPORT))
+        // the way to the reset.
+        val gpx = decimated("gpx-1", 1_600_000_000_000L, Source.GPX_IMPORT)
+        store.add(gpx)
         val imp = tmp.newFolder("C3-imp").apply { File(this, "a.gpx").writeText("x") }
 
         keysFile(dir).writeText("nope")
         // Its json is unreadable at exactly this moment (torn tail, half-written rename, bad block).
         File(dir, "rec-torn.json").writeText("""{"id":"rec-torn","startedAtEpoch":17000006""")
 
-        assertFalse("the reset must REFUSE, not report success", store.dropSourceKeys(emptySet()))
+        assertTrue("the reset takes", store.dropSourceKeys(emptySet()))
+        assertTrue("the cache healed in one pass", keysAreParseable(dir))
+        val keys = TrackStore(dir).knownSourceKeys()
+        assertTrue("every READABLE track's key survived", keys.containsAll(setOf(ok.sourceKey, gpx.sourceKey)))
         assertFalse(
-            "the corrupt file is left in place — the evidence the recovery keys off, and no key erased",
-            keysAreParseable(dir),
+            "the torn file's key is not in the cache — it is not a track, and its absence is what lets " +
+                "its own source file re-import and restore the ride",
+            torn.sourceKey in keys,
         )
-        // A refusing reset is what makes the whole rebuild refuse, so nothing is archived either.
-        assertNull(prepareRebuild(dir, tmp.newFolder("C3-fits"), imp))
-        assertTrue("nothing archived", !File(dir, "archive").isDirectory)
 
-        // NOT a dead end: once the torn track is gone (re-imported, or swept), the recovery vouches
-        // for itself again and the surviving ride's key comes back.
-        File(dir, "rec-torn.json").delete()
-        assertTrue(TrackStore(dir).dropSourceKeys(emptySet()))
-        assertTrue("the parseable ride's key was recovered", ok.sourceKey in TrackStore(dir).knownSourceKeys())
+        // …and the rebuild RUNS instead of dead-ending.
+        assertEquals(1, prepareRebuild(dir, tmp.newFolder("C3-fits"), imp))
+        assertTrue("the file-sourced track was archived", File(File(dir, "archive"), "gpx-1.json").isFile)
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -17,13 +17,14 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 
 /**
- * REGRESSION LOCKS on the `keysForWrite()` recovery — the faults adversarial round 3 found in it, each
- * now asserting the FIXED behaviour:
+ * REGRESSION LOCKS on the `sourcekeys.json` recompute — the faults adversarial round 3 found in it,
+ * each now asserting the FIXED behaviour:
  *
- *  K1. the rebuilt set is read off live **and** archived tracks, so an archived ride's sourceKey
+ *  K1. the recomputed set is read off live **and** archived tracks, so an archived ride's sourceKey
  *      survives a corrupt `sourcekeys.json` (and is not resurrected by the next scan);
- *  K2. a torn `<id>.json` still refuses the rebuild, but with its OWN message and WITHOUT the ledger,
- *      so the follow-up import re-decodes, repairs the torn file and heals the keys file;
+ *  K2. a torn `<id>.json` no longer refuses anything: the rebuild runs and the cache heals in one pass;
+ *  K2b. the ONE thing that still blocks a WRITE — a gap that could be hiding a key — blocks only the
+ *      write, never dedup;
  *  K3. the shortfall report is honest again once K1 stops inflating `imported` with resurrections;
  *  K4. the healthy path still short-circuits before the library walk.
  */
@@ -130,12 +131,13 @@ class Adv3KeyRecoveryTest {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // K2. A torn <id>.json (fsync=false bulk write + power cut — the modelled state) still makes the
-    //     rebuild REFUSE (fail-closed: writing a set missing that ride's key would erase it). But the
-    //     refusal is no longer a trap: it clears the ledger on the way out, so the ordinary import that
-    //     follows re-decodes every source file, rewrites the torn track, and heals the keys file.
+    // K2. A torn <id>.json (fsync=false bulk write + power cut — the modelled state) used to make the
+    //     rebuild REFUSE, on the theory that writing a set missing that ride's key would erase it. But
+    //     the file is a CACHE and the "torn track" is not a track: nothing can read it, so it holds no
+    //     key to erase, and its ride comes back by re-importing its source file. The refusal (and the
+    //     ledger-clearing escape hatch bolted onto it) is gone; the rebuild simply runs.
     // ─────────────────────────────────────────────────────────────────────────
-    @Test fun `a torn track json refuses the rebuild with its OWN message and clears the dead end`() = runTest {
+    @Test fun `a torn track json no longer refuses the rebuild - it runs and the cache heals`() = runTest {
         val dir = tmp.newFolder("K2-tracks")
         val fits = tmp.newFolder("K2-fitfiles")
         val imp = tmp.newFolder("K2-import")
@@ -161,45 +163,47 @@ class Adv3KeyRecoveryTest {
         File(dir, "fit-1700003600000.json").writeText("""{"id":"fit-1700003600000","started""")
 
         var shortOfFiles: Pair<Int, Int>? = null
-        var damaged = false
-        assertNull(
-            "the rebuild still refuses — nothing may be archived while a key cannot be vouched for",
-            prepareRebuild(dir, fits, imp, { damaged = true }) { a, t -> shortOfFiles = a to t },
+        assertEquals(
+            "the rebuild RUNS — the one readable file-sourced track is archived",
+            1, prepareRebuild(dir, fits, imp) { a, t -> shortOfFiles = a to t },
         )
-        assertNull("it is NOT the file-count refusal — every file IS there", shortOfFiles)
-        assertTrue("it reports the DAMAGED-file refusal, which has its own message", damaged)
-        assertFalse("nothing was archived", File(dir, "archive").isDirectory)
-        assertFalse("the corrupt keys file is left in place as evidence", keysAreParseable(dir))
-        assertFalse("…and the ledger is gone, so the next import can re-decode", ledgerFile.exists())
+        assertNull("not the file-count refusal either", shortOfFiles)
+        assertTrue("the cache healed on the way through", keysAreParseable(dir))
+        assertFalse("…and the ledger is gone, so the next import re-decodes", ledgerFile.exists())
 
-        // rebuildAll runs the ordinary import after a refusal. With the ledger cleared it re-decodes
-        // both files: `ok` is deduped, the torn track is re-stored — which REPAIRS its <id>.json.
+        // The ordinary import rebuildAll runs next re-decodes both files: the archived one comes back,
+        // and re-storing the torn one REPAIRS its <id>.json.
         val p = runImport(dir, fits, imp, mapOf("a.fit" to ok, "b.fit" to torn))
         assertEquals("both files were re-decoded", 2, p.total)
-        assertEquals("only the torn one needed storing", 1, p.imported)
+        assertEquals("both were stored — neither was deduped away", 2, p.imported)
 
-        assertTrue("the keys file healed itself once every track parsed again", keysAreParseable(dir))
         val onDisk = keysOnDisk(dir)!!
-        assertTrue("both keys are back", onDisk.containsAll(setOf(ok.sourceKey, torn.sourceKey)))
+        assertTrue("both keys are on disk", onDisk.containsAll(setOf(ok.sourceKey, torn.sourceKey)))
         assertNotNull("…and the next Rebuild RUNS. Not a dead end.", prepareRebuild(dir, fits, imp))
     }
 
-    /** The residue: a torn track with NO source file (a RECORDED ride) cannot be re-decoded, so while
-     *  it sits there the keys file is deliberately left corrupt and no key is persisted. Dedup still
-     *  holds — the recovery re-derives it from the library on every pass — and the rider is told the
-     *  file is damaged rather than told to restore ride files they already have. */
-    @Test fun `while un-writable a finished ride's key is never persisted, and dedup still holds`() {
+    /** K2b. The residue: completeness gates PERSISTENCE, never FUNCTION. A file we could not READ (as
+     *  opposed to one that reads but does not decode) might be hiding a key, so the recomputed set is
+     *  used for dedup but never written back — nothing can be erased by a set we cannot vouch for. */
+    @Test fun `a gap we cannot vouch for blocks only the write - dedup still holds`() {
         val dir = tmp.newFolder("K2b-tracks")
         val store = TrackStore(dir)
-        store.add(decimated("fit-1700000000000", 1_700_000_000_000L, Source.FITFILES_SCAN))
+        val old = decimated("fit-1700000000000", 1_700_000_000_000L, Source.FITFILES_SCAN)
+        store.add(old)
         keysFile(dir).writeText("{{{")
-        File(dir, "torn.json").writeText("""{"id":"torn",""")
-
-        val today = decimated("1800000000000", 1_800_000_000_000L, Source.RECORDED)
-        assertTrue("the track itself is saved", store.add(today))
-        assertFalse("the file is left corrupt (by design — the evidence the recovery keys off)", keysAreParseable(dir))
-        assertTrue("the track file exists", File(dir, "1800000000000.json").isFile)
-        assertFalse("a second add of the same ride is deduped from the library", store.add(today))
+        val unreadable = File(dir, "fit-1700000000000.json")
+        org.junit.Assume.assumeTrue(
+            "needs a filesystem where the owner can drop +r on a file",
+            unreadable.setReadable(false, false) && !unreadable.canRead(),
+        )
+        try {
+            val today = decimated("1800000000000", 1_800_000_000_000L, Source.RECORDED)
+            assertTrue("the track itself is saved", store.add(today))
+            assertFalse("the set could not be vouched for, so it was NOT written", keysAreParseable(dir))
+            assertFalse("…but dedup still answers from the library", store.add(today))
+        } finally {
+            unreadable.setReadable(true, false)
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -244,8 +248,7 @@ class Adv3KeyRecoveryTest {
 
     // ─────────────────────────────────────────────────────────────────────────
     // K4. COST CONTROL: the library walk must stay on the corrupt path only. A HEALTHY keys file must
-    //     short-circuit before recoveredSourceKeys(), even with an unparseable <id>.json present (which
-    //     would otherwise make the writer declare itself un-writable and drop the write).
+    //     short-circuit before recomputeSourceKeys(), even with an unparseable <id>.json present.
     // ─────────────────────────────────────────────────────────────────────────
     @Test fun `a healthy keys file never walks the library - an unparseable track cannot block the write`() {
         val dir = tmp.newFolder("K4-tracks")
