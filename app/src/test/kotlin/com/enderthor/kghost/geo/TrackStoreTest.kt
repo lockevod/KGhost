@@ -187,7 +187,7 @@ class TrackStoreTest {
         assertEquals(listOf("aaa", "zzz"), ranked)
     }
 
-    @Test fun `loadTopCandidates parses only the ranked overlapping tracks`() {
+    @Test fun `the ranked candidate set parses only the overlapping tracks`() {
         val store = TrackStore(tmp.newFolder("tracks"))
         // A overlaps the query bbox (near 40.0,-3.0); C is far away (near 50.0,7.0) → not a candidate.
         val a = track("A", 40.0, -3.0)
@@ -196,7 +196,7 @@ class TrackStoreTest {
         store.save(c)
 
         val queryA = BBox.around(a.points.map { LatLng(it.lat, it.lng) })!!
-        val loaded = store.loadTopCandidates(queryA, maxTracks = 24)
+        val loaded = store.loadByIds(store.rankedCandidateIdsFor(queryA, maxTracks = 24))
         assertEquals(listOf("A"), loaded.map { it.id })
     }
 
@@ -205,7 +205,7 @@ class TrackStoreTest {
         val original = track("original", 40.0, -3.0)
         store.save(original)
         val route = BBox.around(original.points.map { LatLng(it.lat, it.lng) })!!
-        val selectedIds = store.candidateIdsFor(route, maxTracks = 24)
+        val selectedIds = store.rankedCandidateIdsFor(route, maxTracks = 24).toSet()
 
         store.save(track("later", 40.0, -3.0))
 

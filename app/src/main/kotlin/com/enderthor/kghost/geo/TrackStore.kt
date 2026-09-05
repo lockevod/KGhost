@@ -82,7 +82,7 @@ class TrackStore(private val dir: File) {
      * Streams every stored (non-archived) track through [action], parsing ONE at a time and letting each
      * be collected before the next is read — the whole-library pass that does NOT materialize the whole
      * library (see [allTracksMeta]). Unparseable files are skipped. Not the hot match path, which prunes
-     * via the spatial index ([loadCandidates]/[loadTopCandidates]).
+     * via the spatial index ([loadCandidates]/[rankedCandidateIdsFor]).
      */
     fun forEachTrack(action: (RecordedTrack) -> Unit) {
         for (id in allTrackIds()) loadTrack(id)?.let(action)
@@ -484,34 +484,22 @@ class TrackStore(private val dir: File) {
         return loadByIds(ids)
     }
 
-    /** Up to [maxTracks] stored-track ids whose path cells overlap [routeBBox], RANKED by route overlap,
-     *  WITHOUT parsing any track file — the no-parse candidate set the corridor re-seed gate diffs
-     *  against (and the exact set [loadTopCandidates] parses for the same [maxTracks]). */
-    fun candidateIdsFor(routeBBox: BBox, maxTracks: Int): Set<String> =
-        synchronized(indexLock) { rankCandidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION, maxTracks).toSet() }
-
-    /** Captures the ranked candidate snapshot once so callers can both diff and load it. */
-    fun rankedCandidateIdsFor(routeBBox: BBox, maxTracks: Int): List<String> =
-        synchronized(indexLock) { rankCandidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION, maxTracks) }
-
     /**
-     * Returns the parsed candidate tracks RANKED by ROUTE OVERLAP and capped at [maxTracks], parsing
-     * ONLY the chosen files.
+     * Up to [maxTracks] stored-track ids whose path cells overlap [routeBBox], RANKED by route
+     * overlap, WITHOUT parsing any track file. ONE snapshot serves both consumers: the corridor
+     * re-seed gate diffs the id set, and [loadByIds] parses exactly these ids — taking the ranking
+     * twice could straddle a concurrent write and diff against a set that was never loaded.
      *
      * "Race your own on THIS route" wants the tracks that cover the most of the route — not the most
      * recent ones. Using the spatial index snapshot we score each candidate by how many of the
-     * route's cells it appears in (its overlap with the route), rank by that score, take the top
-     * [maxTracks], and only THEN open + parse those files. This avoids parsing all candidates before
-     * the matcher's own cap (which used recency, the wrong cap here) and stops the relevant old ride
-     * from being silently dropped by a recency cut.
+     * route's cells it appears in (its overlap with the route), rank by that score, and take the top
+     * [maxTracks], so only THEN are those files opened. This avoids parsing all candidates before the
+     * matcher's own cap (which used recency, the wrong cap here) and stops the relevant old ride from
+     * being silently dropped by a recency cut.
      */
-    fun loadTopCandidates(routeBBox: BBox, maxTracks: Int): List<RecordedTrack> {
+    fun rankedCandidateIdsFor(routeBBox: BBox, maxTracks: Int): List<String> =
         // Snapshot the (path-cell, migrated) index under the lock so we never read it mid-modify.
-        val ids = synchronized(indexLock) {
-            rankCandidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION, maxTracks)
-        }
-        return loadByIds(ids)
-    }
+        synchronized(indexLock) { rankCandidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION, maxTracks) }
 
     /** Loads + parses the `<id>.json` files for [ids]; missing/unparseable files are skipped. */
     internal fun loadByIds(ids: Iterable<String>): List<RecordedTrack> =
@@ -543,7 +531,7 @@ class TrackStore(private val dir: File) {
      * marker created — after which subsequent reads skip straight to [readSnapshot].
      *
      * This re-parses all tracks once, off-Main: the only callers ([loadCandidates] /
-     * [loadTopCandidates]) run on `Dispatchers.Default`/`IO` (route load / matcher), never on Main.
+     * [rankedCandidateIdsFor]) run on `Dispatchers.Default`/`IO` (route load / matcher), never on Main.
      */
     private fun readPathCellSnapshot(): Map<String, Set<String>> {
         val marker = File(dir, INDEX_PATHCELLS_MARKER)

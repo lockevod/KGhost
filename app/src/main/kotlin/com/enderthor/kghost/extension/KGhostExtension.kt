@@ -512,8 +512,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // The last odometer distance handed to the integrator this ride — persisted in the checkpoint so a
     // mid-ride power-off resumes with the accrued lead (GhostIntegrator keeps lastRiderDist private).
     @Volatile private var integLastRiderDist: Double = 0.0
-    // The pick SNAPSHOTTED when the integrator was built — persisted in the checkpoint and required to
-    // match on restore (a different pick ⇒ a different race ⇒ start fresh, not resume). integVpTpm is
+    // The pick the integrator is CURRENTLY racing — re-stamped every tick, because a pick-only repick
+    // keeps the integrator (the pace lookup already reads eff.ghostPick live, so the number follows the
+    // new pick immediately) and the checkpoint must record the pick the lead was actually earned under.
+    // Consequence: cp.pick can no longer disagree with the live pick, so the paramMatch term below is
+    // vestigial in the same way vpTimePerM is — kept for the persisted GhostCheckpoint schema. integVpTpm is
     // retained ONLY to satisfy GhostIntegrator's constructor and the GhostCheckpoint schema (persisted-format
     // compatibility) — since the neutral-fill change it no longer influences the accrued gap and no longer
     // gates the resume (see the paramMatch comment below). Do not confuse this with RouteGhost's map-marker
@@ -684,6 +687,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private var matchJob: Job? = null
     @Volatile
     private var matchGeneration = 0L
+    // @Volatile like matchJob, not because rematchOnSettingsChange needs it (that is Main-only) but
+    // because clearRouteMode cancels it and clearRouteMode can run on Default (see its callers).
+    @Volatile
     private var repickJob: Job? = null
     @Volatile
     private var lastMatchedPolyline: String? = null
@@ -1453,7 +1459,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             val mine = routePolyline
             val generation = ++matchGeneration
             // Off Main: polyline decode, candidate file IO, and segment matching are all heavier
-            // than a frame. Default is fine; loadTopCandidates does file IO but never overlaps a save
+            // than a frame. Default is fine; the candidate load does file IO but never overlaps a save
             // in practice (save runs at ride-end, matching at route-load).
             matchJob = scope.launch(Dispatchers.Default) {
                 val matchStartMs = SystemClock.elapsedRealtime()
@@ -1577,6 +1583,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
      * the current target every tick), and including it would clear + fully re-match the route on
      * every keystroke while the rider edits the Ghost Pace mid-navigation — the stale fill pace until
      * the next route load is the long-standing, documented trade (see the match NOTE above).
+     * ONE exception: a pick-only repick rebuilds the ghost curve, and it does so from the CURRENT
+     * target — so a pending Ghost-Pace edit also lands the next time the rider changes pick.
      */
     private data class MatchSig(val active: Boolean, val raceEnabled: Boolean, val pick: GhostPick)
 
@@ -1652,6 +1660,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         clearJob?.takeIf { it.isActive }?.cancel()
         // Cancel any in-flight match and drop the dedup key so a later same-route emit re-matches.
         matchJob?.cancel()
+        // Same reason: a repick resolved against the mode we are about to drop must not land after it.
+        repickJob?.cancel()
         lastMatchedPolyline = null
         routeMode = null
         SegmentInfoHolder.clear()
