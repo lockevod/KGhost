@@ -452,9 +452,38 @@ class TrackStoreTest {
             ),
         )
         assertTrue(store.add(recorded))
-        assertTrue(store.add(fit))
+        // An enrichment is NOT a store: add() must stay false, or the ride-end caller runs tidyGroup
+        // (archiving real rides) against a track it never saved.
+        assertFalse(store.add(fit))
         assertEquals(listOf("live"), store.allTrackIds())
         assertEquals(listOf(100.0, 120.0, 140.0), store.loadByIds(listOf("live")).single().points.map { it.eleM })
+    }
+
+    /**
+     * The sink caches sourceKey -> RECORDED id across chunks, but `tidyGroup`/`sweep` take `tidyLock`
+     * while `archive` takes `indexLock`, so a ride ending mid-import can archive a cached twin between
+     * two chunks. Enriching from a cached OBJECT would write it back into the live dir, un-indexed, and
+     * `prewarmAndReconcile` would re-adopt the archived near-duplicate at next startup.
+     */
+    @Test fun `a twin archived mid-import is not resurrected by a later enrichment`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        val recorded = track("live", 40.0, -3.0).copy(sourceKey = "1:20", source = Source.RECORDED)
+        val fit = recorded.copy(
+            id = "fit",
+            source = Source.FITFILES_SCAN,
+            points = listOf(
+                TrackPointDto(0.0, 0.0, 0.0, 0.0, 100.0),
+                TrackPointDto(0.0, 0.0, 200.0, 40.0, 140.0),
+            ),
+        )
+        assertTrue(store.add(recorded))
+
+        val sink = store.openBulkSink()
+        sink.addAll(listOf(fit))                        // chunk 1: primes the key -> id cache on "live"
+        assertEquals(1, store.archive(listOf("live")))  // a ride ends between chunks
+        sink.addAll(listOf(fit.copy(id = "fit2")))      // chunk 2: same key, cache still points at "live"
+
+        assertEquals(emptyList<String>(), store.allTrackIds())
     }
 
     @Test fun `an imported duplicate with no usable altitude stays a duplicate`() {

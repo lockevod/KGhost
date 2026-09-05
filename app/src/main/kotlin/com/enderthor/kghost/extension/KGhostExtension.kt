@@ -1612,7 +1612,17 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 repickJob = scope.launch(Dispatchers.Default) {
                     val switched = current.withPick(sig.pick, eff.targetSpeedMs)
                     withContext(Dispatchers.Main) {
-                        if (lastMatchSig == sig && routeMode === current) routeMode = switched
+                        // The MATCH publishes routeMode on Default (see the publish below), so this
+                        // check-then-act is cross-thread: a new route can claim lastMatchedPolyline and
+                        // publish between the guard and the assignment, and this would then overwrite it
+                        // with the OLD route's mode — which the polyline dedup makes permanent. Pinning
+                        // the polyline too means a superseded repick simply drops.
+                        if (lastMatchSig == sig && routeMode === current &&
+                            lastMatchedPolyline == current.polyline
+                        ) {
+                            routeMode = switched
+                            Timber.i("KVP grid: repick → ${sig.pick} on ${switched.segments.size} stretch(es)")
+                        }
                     }
                 }
                 return
