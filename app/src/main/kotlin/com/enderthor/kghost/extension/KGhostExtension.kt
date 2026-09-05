@@ -1534,7 +1534,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // the ensureActive() is what stops this (cancelled) match from publishing a result
                     // built under the OLD settings over the replacement's.
                     currentCoroutineContext().ensureActive()
-                    if (lastMatchedPolyline == mine && matchGeneration == generation) {
+                    if (matchStillOwns(mine, lastMatchedPolyline, generation, matchGeneration)) {
                         routeMode = RouteMode(path, mine, state.name, matched, routeGhost, state.routeDistance, pacePatch, gradePace, agg)
                         // Diagnostic for the scale question: the Karoo's routeDistance (the scale that
                         // DISTANCE_TO_DESTINATION is measured against) vs the decoded-polyline length (the
@@ -1586,7 +1586,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
      * ONE exception: a pick-only repick rebuilds the ghost curve, and it does so from the CURRENT
      * target — so a pending Ghost-Pace edit also lands the next time the rider changes pick.
      */
-    private data class MatchSig(val active: Boolean, val raceEnabled: Boolean, val pick: GhostPick)
+    internal data class MatchSig(val active: Boolean, val raceEnabled: Boolean, val pick: GhostPick)
 
     private fun matchSignature(eff: EffectiveProfile): MatchSig =
         MatchSig(eff.active, eff.raceEnabled, eff.ghostPick)
@@ -1606,28 +1606,22 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         if (sig == lastMatchSig) return
         val previous = lastMatchSig
         lastMatchSig = sig
-        // Nothing claimed/stashed ⇒ nothing the change could have staled; the next nav event resolves fresh.
-        if (routeMode == null && lastMatchedPolyline == null && pendingNavState == null) return
-        // A pick-only change can reuse the already loaded history, aggregate and pace models. Preserve
-        // the path-following integrator and publish one coherent replacement for the map curve.
-        if (previous != null && previous.active == sig.active && previous.raceEnabled == sig.raceEnabled &&
-            previous.pick != sig.pick && routeMode?.polyline == lastMatchedPolyline
-        ) {
-            val current = routeMode
-            if (current != null) {
+        val current = routeMode
+        when (rematchActionFor(previous, sig, current?.polyline, lastMatchedPolyline, pendingNavState != null)) {
+            // Nothing claimed/stashed ⇒ nothing the change could have staled; the next nav event
+            // resolves fresh.
+            RematchAction.NONE -> return
+            // A pick-only change can reuse the already loaded history, aggregate and pace models.
+            // Preserve the path-following integrator and publish one coherent replacement for the
+            // map curve.
+            RematchAction.REPICK -> {
+                current ?: return
                 repickJob?.cancel()
                 val eff = resolveProfile(activeConfig.value, activeProfileId)
                 repickJob = scope.launch(Dispatchers.Default) {
                     val switched = current.withPick(sig.pick, eff.targetSpeedMs)
                     withContext(Dispatchers.Main) {
-                        // The MATCH publishes routeMode on Default (see the publish below), so this
-                        // check-then-act is cross-thread: a new route can claim lastMatchedPolyline and
-                        // publish between the guard and the assignment, and this would then overwrite it
-                        // with the OLD route's mode — which the polyline dedup makes permanent. Pinning
-                        // the polyline too means a superseded repick simply drops.
-                        if (lastMatchSig == sig && routeMode === current &&
-                            lastMatchedPolyline == current.polyline
-                        ) {
+                        if (repickStillValid(lastMatchSig, sig, routeMode, current, lastMatchedPolyline)) {
                             routeMode = switched
                             Timber.i("KVP grid: repick → ${sig.pick} on ${switched.segments.size} stretch(es)")
                         }
@@ -1635,19 +1629,21 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 }
                 return
             }
+            // The initial match is still running: restart it so the latest pick is captured. No route
+            // state or race anchor has been published yet, so clearing the claim is safe.
+            RematchAction.RESTART_MATCH -> {
+                matchJob?.cancel()
+                matchGeneration++
+                lastMatchedPolyline = null
+                lastNavEvent?.let { onNavigationState(it) }
+                return
+            }
+            RematchAction.FULL_REMATCH -> {
+                Timber.i("KVP settings changed mid-route → re-matching ($sig)")
+                clearRouteMode()
+                lastNavEvent?.let { onNavigationState(it) }
+            }
         }
-        // If the initial match is still running, restart it so the latest pick is captured. No route
-        // state or race anchor has been published yet, so clearing the claim is safe.
-        if (routeMode == null && pendingNavState == null && lastMatchedPolyline != null) {
-            matchJob?.cancel()
-            matchGeneration++
-            lastMatchedPolyline = null
-            lastNavEvent?.let { onNavigationState(it) }
-            return
-        }
-        Timber.i("KVP settings changed mid-route → re-matching ($sig)")
-        clearRouteMode()
-        lastNavEvent?.let { onNavigationState(it) }
     }
 
     /** Clears ② route mode so the tick falls back to ① Ghost Pace behavior. */
@@ -2529,9 +2525,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // handleGpsLoss() gives up and we blank rather than show a wild extrapolation.
                         publishSegment(null, fireExit = false)
                         mapGhostState = null // VP mode: no map ghost (the loop hides it)
-                        // Distinguish "no route navigated" from "route loaded but no recorded stretches
-                        // overlap it" (rm != null, segments empty) — both race VP, but the cause differs.
-                        val vpReason = if (rm != null) "route loaded, no recorded stretches" else "no route"
+                        // ① is reached ONLY with no route: this is the `else` of `if (rm != null)`, so the
+                        // compiler proved the old `if (rm != null)` here always false. Under the path-
+                        // following model a route with NO matching stretches still takes the route branch
+                        // (the integrator races on neutral fill and the map curve is all VP-fill), so the
+                        // "route loaded, no recorded stretches" VP case this once distinguished is gone.
+                        val vpReason = "no route"
                         // Ride-once VP clock (never re-nulled on a route change) — see vpFirstMoveElapsedS.
                         val moveStart = vpFirstMoveElapsedS
                         if (moveStart == null) {
@@ -2740,3 +2739,61 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
  * one-line change if device testing ever shows the SDK delivers a different unit.
  */
 internal fun elapsedMsToSeconds(rawMs: Double): Double = rawMs / 1000.0
+
+/** What a mid-ride settings change has to do to the current route match. */
+internal enum class RematchAction { NONE, REPICK, RESTART_MATCH, FULL_REMATCH }
+
+/**
+ * Which of the four paths a settings change takes. Pure, and top-level for the same reason as
+ * [elapsedMsToSeconds]: the orchestration around it (cancelling jobs, bumping the match generation,
+ * replaying the nav event) touches a live KarooSystemService and cannot be unit-tested, but the
+ * DECISION can — and the decision is where a wrong branch silently strands the rider on stale
+ * settings. Callers must have already established that [next] differs from [previous].
+ *
+ * [routeModePolyline] is `routeMode?.polyline`, so null means no published mode.
+ */
+internal fun rematchActionFor(
+    previous: KGhostExtension.MatchSig?,
+    next: KGhostExtension.MatchSig,
+    routeModePolyline: String?,
+    lastMatchedPolyline: String?,
+    hasPendingNav: Boolean,
+): RematchAction = when {
+    routeModePolyline == null && lastMatchedPolyline == null && !hasPendingNav -> RematchAction.NONE
+    // Pick-only, on the route that is actually claimed. Anything else that moved in the signature
+    // changes what the match itself would produce, so it cannot reuse the loaded models.
+    previous != null && previous.active == next.active && previous.raceEnabled == next.raceEnabled &&
+        previous.pick != next.pick && routeModePolyline != null &&
+        routeModePolyline == lastMatchedPolyline -> RematchAction.REPICK
+    routeModePolyline == null && !hasPendingNav && lastMatchedPolyline != null -> RematchAction.RESTART_MATCH
+    else -> RematchAction.FULL_REMATCH
+}
+
+/**
+ * Whether a resolved repick may still be published. The MATCH publishes `routeMode` on
+ * `Dispatchers.Default` while the repick publishes on Main, so this is a cross-thread check-then-act:
+ * a new route can claim [lastMatchedPolyline] and publish between the guard and the assignment. The
+ * identity term alone does NOT catch that — the polyline term is what stops a superseded repick
+ * overwriting the new route's mode with the old one, which the nav dedup would then make permanent.
+ */
+internal fun repickStillValid(
+    liveSig: KGhostExtension.MatchSig?,
+    resolvedFor: KGhostExtension.MatchSig,
+    liveMode: KGhostExtension.RouteMode?,
+    resolvedFrom: KGhostExtension.RouteMode,
+    lastMatchedPolyline: String?,
+): Boolean = liveSig == resolvedFor && liveMode === resolvedFrom &&
+    lastMatchedPolyline == resolvedFrom.polyline
+
+/**
+ * Whether a finished match still owns the route it claimed. The claim is the polyline STRING, so a
+ * settings-driven re-match of the SAME route re-claims an equal string and the string test alone
+ * would let a cancelled-but-surviving match publish over its replacement; [generation] is what
+ * distinguishes two claims on identical polylines.
+ */
+internal fun matchStillOwns(
+    claimed: String,
+    lastMatchedPolyline: String?,
+    generation: Long,
+    liveGeneration: Long,
+): Boolean = lastMatchedPolyline == claimed && liveGeneration == generation
