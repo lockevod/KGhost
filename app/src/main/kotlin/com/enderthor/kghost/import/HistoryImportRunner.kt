@@ -211,7 +211,7 @@ object HistoryImportRunner {
             // just leaves the ghost falling back to its neutral fill until the next successful one.
             // Gated on something having ACTUALLY been imported: a "New only" run that found nothing new
             // would otherwise re-parse the whole library to rebuild the identical model.
-            if ((_progress.value?.imported ?: 0) > 0) runCatching {
+            if (((_progress.value?.imported ?: 0) + (_progress.value?.enriched ?: 0)) > 0) runCatching {
                 val dir = TrackStorage.tracksDir(appContext)
                 // STREAMED, one track parsed at a time: the whole library in heap at once OOMs a Karoo,
                 // and the failure would land here as a swallowed "rebuild failed" with no model.

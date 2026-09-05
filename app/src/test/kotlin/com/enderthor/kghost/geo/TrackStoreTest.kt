@@ -200,6 +200,18 @@ class TrackStoreTest {
         assertEquals(listOf("A"), loaded.map { it.id })
     }
 
+    @Test fun `loadByIds keeps the captured ranking when the index changes`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        val original = track("original", 40.0, -3.0)
+        store.save(original)
+        val route = BBox.around(original.points.map { LatLng(it.lat, it.lng) })!!
+        val selectedIds = store.candidateIdsFor(route, maxTracks = 24)
+
+        store.save(track("later", 40.0, -3.0))
+
+        assertEquals(listOf("original"), store.loadByIds(selectedIds).map { it.id })
+    }
+
     @Test fun `path-cell ranking ranks a SHORT overlapping track above a LONG bystander`() {
         // EVICTION-FIX PROOF.
         //
@@ -426,5 +438,30 @@ class TrackStoreTest {
         assertTrue(store.dropSourceKeys(setOf("drop", "never-there")))
 
         assertEquals(setOf("keep"), store.knownSourceKeys())
+    }
+
+    @Test fun `an imported fit fills missing altitude without replacing recorded identity`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        val recorded = track("live", 40.0, -3.0).copy(sourceKey = "1:20", source = Source.RECORDED)
+        val fit = recorded.copy(
+            id = "fit",
+            source = Source.FITFILES_SCAN,
+            points = listOf(
+                TrackPointDto(0.0, 0.0, 0.0, 0.0, 100.0),
+                TrackPointDto(0.0, 0.0, 200.0, 40.0, 140.0),
+            ),
+        )
+        assertTrue(store.add(recorded))
+        assertTrue(store.add(fit))
+        assertEquals(listOf("live"), store.allTrackIds())
+        assertEquals(listOf(100.0, 120.0, 140.0), store.loadByIds(listOf("live")).single().points.map { it.eleM })
+    }
+
+    @Test fun `an imported duplicate with no usable altitude stays a duplicate`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        val recorded = track("live", 40.0, -3.0).copy(sourceKey = "1:20", source = Source.RECORDED)
+        assertTrue(store.add(recorded))
+        assertFalse(store.add(recorded.copy(id = "fit", source = Source.FITFILES_SCAN)))
+        assertEquals(listOf("live"), store.allTrackIds())
     }
 }
