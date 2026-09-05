@@ -19,7 +19,7 @@ import java.io.File
  * Shared by [TrackStore] (tracks / index / sourcekeys) and [AggregateStore] (per-route averages) so
  * the crash-safety semantics live in exactly one place.
  */
-internal fun atomicWriteText(target: File, text: String, fsync: Boolean = true) {
+internal fun atomicWriteText(target: File, text: String, fsync: Boolean = true): Boolean {
     val tmp = File(target.parentFile, target.name + ".tmp")
     val written = runCatching {
         java.io.FileOutputStream(tmp).use { fos ->
@@ -44,12 +44,14 @@ internal fun atomicWriteText(target: File, text: String, fsync: Boolean = true) 
     if (!written) {
         Timber.w("temp write failed for %s; preserving the previous file", target.name)
         tmp.delete()
-        return
+        return false
     }
     if (!tmp.renameTo(target)) {
         Timber.w("atomic rename failed for %s; falling back to direct write", target.name)
-        runCatching { target.writeText(text) }
+        val fallback = runCatching { target.writeText(text) }
             .onFailure { Timber.w(it, "fallback direct write failed for %s", target.name) }
         tmp.delete()
+        return fallback.isSuccess
     }
+    return true
 }

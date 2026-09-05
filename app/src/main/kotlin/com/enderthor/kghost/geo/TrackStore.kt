@@ -2,6 +2,7 @@ package com.enderthor.kghost.geo
 
 import com.enderthor.kghost.extension.jsonForStorage
 import com.enderthor.kghost.extension.jsonWithUnknownKeys
+import com.enderthor.kghost.engine.TrackSamples
 import kotlinx.serialization.encodeToString
 import timber.log.Timber
 import java.io.File
@@ -171,7 +172,9 @@ class TrackStore(private val dir: File) {
         synchronized(indexLock) {
             val key = track.sourceKey
             val known = sourceKeys()
-            if (key.isNotEmpty() && key in known.keys) return false
+            if (key.isNotEmpty() && key in known.keys) {
+                return tryUpgradeRecorded(track)
+            }
 
             save(track)
 
@@ -183,6 +186,38 @@ class TrackStore(private val dir: File) {
             }
             return true
         }
+    }
+
+    /** Fill missing altitude on the live recording when a matching FIT arrives. */
+    private fun tryUpgradeRecorded(incoming: RecordedTrack, lookup: Map<String, RecordedTrack>? = null): Boolean {
+        if (incoming.source == Source.RECORDED || incoming.sourceKey.isEmpty()) return false
+        val recorded = lookup?.get(incoming.sourceKey) ?: allTrackIds().asSequence().mapNotNull { id ->
+            val f = File(dir, id + JSON_SUFFIX)
+            runCatching { jsonWithUnknownKeys.decodeFromString<RecordedTrack>(f.readText()) }.getOrNull()
+        }.firstOrNull { it.source == Source.RECORDED && it.sourceKey == incoming.sourceKey } ?: return false
+        val samples = incoming.points.filter { it.eleM?.isFinite() == true }
+        if (samples.size < 2) return false
+        val points = recorded.points.toMutableList()
+        var sampleIndex = 0
+        for (i in points.indices) {
+            val point = points[i]
+            if (point.eleM != null) continue
+            while (sampleIndex < samples.lastIndex && samples[sampleIndex + 1].distanceM < point.distanceM) sampleIndex++
+            val before = samples[sampleIndex]
+            val after = samples.getOrNull(sampleIndex + 1) ?: continue
+            val span = after.distanceM - before.distanceM
+            if (span <= 0.0 || span > TrackSamples.DROPOUT_GAP_M) continue
+            if (point.distanceM !in before.distanceM..after.distanceM) continue
+            points[i] = point.copy(eleM = before.eleM!! + (after.eleM!! - before.eleM) *
+                ((point.distanceM - before.distanceM) / span))
+        }
+        if (points == recorded.points) return false
+        if (!atomicWriteText(File(dir, recorded.id + JSON_SUFFIX), jsonForStorage.encodeToString(recorded.copy(points = points)))) {
+            Timber.w("KVP recording: altitude enrichment failed for ${recorded.id}")
+            return false
+        }
+        Timber.i("KVP recording: enriched altitude from imported FIT for ${recorded.id}")
+        return true
     }
 
     /**
@@ -203,7 +238,10 @@ class TrackStore(private val dir: File) {
             val index = SpatialIndex(INDEX_PRECISION, readPathCellSnapshot())
             var added = 0
             for (t in tracks) {
-                if (t.sourceKey.isNotEmpty() && t.sourceKey in known) continue
+                if (t.sourceKey.isNotEmpty() && t.sourceKey in known) {
+                    tryUpgradeRecorded(t)
+                    continue
+                }
                 // Bulk import: skip the per-track fsync (a fsync storm over N files). Each track json is
                 // re-importable from its FitFiles/GPX source, so a torn one after power loss is recovered
                 // on the next scan; the durability-critical bookkeeping (index + sourcekeys, written once
@@ -250,6 +288,16 @@ class TrackStore(private val dir: File) {
         // library: reading it as the empty set makes this sink store a live-recorded ride's own `.fit`
         // as a PERMANENT twin during the import itself — before commit() gets anywhere near the file.
         private val known = synchronized(indexLock) { sourceKeys().keys.toMutableSet() }
+        var lastEnrichedCount: Int = 0
+            private set
+        private var recordedByKey: Map<String, RecordedTrack>? = null
+
+        private fun recordedLookup(): Map<String, RecordedTrack> = recordedByKey ?: allTrackIds()
+            .asSequence()
+            .mapNotNull { loadTrack(it) }
+            .filter { it.source == Source.RECORDED && it.sourceKey.isNotEmpty() }
+            .associateBy { it.sourceKey }
+            .also { recordedByKey = it }
         private val additions = synchronized(indexLock) {
             readPathCellSnapshot() // one-time legacy-migration side effect only; result unused.
             SpatialIndex(INDEX_PRECISION, emptyMap())
@@ -261,13 +309,22 @@ class TrackStore(private val dir: File) {
         fun addAll(tracks: List<RecordedTrack>): Int {
             if (tracks.isEmpty()) return 0
             var added = 0
+            lastEnrichedCount = 0
             synchronized(indexLock) {
+                // Pick up keys written by a concurrent live recorder between chunks.
+                known += sourceKeys().keys
                 for (t in tracks) {
-                    if (t.sourceKey.isNotEmpty() && t.sourceKey in known) continue
+                    if (t.sourceKey.isNotEmpty() && t.sourceKey in known) {
+                        if (tryUpgradeRecorded(t, recordedLookup())) lastEnrichedCount++
+                        continue
+                    }
                     atomicWriteText(File(dir, t.id + JSON_SUFFIX), jsonForStorage.encodeToString(t), fsync = false)
                     val cells = additions.cellsForPath(t.points.map { LatLng(it.lat, it.lng) })
                     if (cells.isNotEmpty()) additions.add(t.id, cells)
                     if (t.sourceKey.isNotEmpty()) known.add(t.sourceKey)
+                    if (t.source == Source.RECORDED && t.sourceKey.isNotEmpty()) {
+                        recordedByKey = (recordedByKey ?: emptyMap()) + (t.sourceKey to t)
+                    }
                     added++
                 }
             }
@@ -412,6 +469,10 @@ class TrackStore(private val dir: File) {
     fun candidateIdsFor(routeBBox: BBox, maxTracks: Int): Set<String> =
         synchronized(indexLock) { rankCandidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION, maxTracks).toSet() }
 
+    /** Captures the ranked candidate snapshot once so callers can both diff and load it. */
+    fun rankedCandidateIdsFor(routeBBox: BBox, maxTracks: Int): List<String> =
+        synchronized(indexLock) { rankCandidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION, maxTracks) }
+
     /**
      * Returns the parsed candidate tracks RANKED by ROUTE OVERLAP and capped at [maxTracks], parsing
      * ONLY the chosen files.
@@ -432,7 +493,7 @@ class TrackStore(private val dir: File) {
     }
 
     /** Loads + parses the `<id>.json` files for [ids]; missing/unparseable files are skipped. */
-    private fun loadByIds(ids: Iterable<String>): List<RecordedTrack> =
+    internal fun loadByIds(ids: Iterable<String>): List<RecordedTrack> =
         ids.mapNotNull { id ->
             val f = File(dir, id + JSON_SUFFIX)
             if (!f.isFile) return@mapNotNull null

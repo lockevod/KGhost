@@ -132,6 +132,7 @@ class HistoryImporter(
         // running totals — accumulated across flushes, finalized identically to the old single addAll.
         var failed = 0
         var imported = 0
+        var enriched = 0
         var skippedDuplicates = 0
         // Bulk sink: keeps the index + known keys IN MEMORY across every chunk of this run and
         // persists the aggregate index.json/sourcekeys.json ONCE at commit() (below, in the
@@ -168,6 +169,7 @@ class HistoryImporter(
             if (chunk.isEmpty()) return
             val added = sink.addAll(chunk)
             imported += added
+            enriched += sink.lastEnrichedCount
             skippedDuplicates += (chunk.size - added)
             val chunkMax = chunkLastModified.max()
             if (chunkMax > maxFlushedLastModified) maxFlushedLastModified = chunkMax
@@ -306,6 +308,7 @@ class HistoryImporter(
                                 imported = imported,
                                 skippedDuplicates = skippedDuplicates,
                                 failed = failed,
+                                enriched = enriched,
                             ),
                         )
                     }
@@ -343,6 +346,7 @@ class HistoryImporter(
                 imported = imported,
                 skippedDuplicates = skippedDuplicates,
                 failed = failed,
+                enriched = enriched,
             ),
         )
     }

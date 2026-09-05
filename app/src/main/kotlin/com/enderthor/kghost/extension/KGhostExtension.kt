@@ -31,6 +31,7 @@ import com.enderthor.kghost.engine.GhostCheckpoint
 import com.enderthor.kghost.engine.GhostIntegrator
 import com.enderthor.kghost.engine.GradePace
 import com.enderthor.kghost.engine.PacePatch
+import com.enderthor.kghost.engine.PerRouteAggregate
 import com.enderthor.kghost.engine.SegmentInfo
 import com.enderthor.kghost.engine.shouldReseed
 import com.enderthor.kghost.geo.AggregateStore
@@ -607,7 +608,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
      * the tick could otherwise pair a NEW [path] with the OLD segments (two separate sequential
      * writes were observable as a torn read).
      */
-    private data class RouteMode(
+    internal data class RouteMode(
         val path: PolylinePath,
         /**
          * The encoded polyline this mode was matched from — the route's IDENTITY. The tick compares
@@ -645,7 +646,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          * as before.
          */
         val gradePace: GradePace?,
-    )
+        val aggregate: PerRouteAggregate?,
+    ) {
+        fun withPick(pick: GhostPick, fillSpeedMs: Double): RouteMode {
+            val aggregate = aggregate ?: return this
+            val segments = aggregate.toLiveSegments(pick)
+            return copy(segments = segments, routeGhost = RouteGhost.build(path.totalM, segments, fillSpeedMs))
+        }
+    }
 
     /**
      * Immutable snapshot the 1 Hz tick hands to the ~5 Hz map loop. [ghostDistM] is the EXACT ghost
@@ -674,6 +682,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // single match. Both written from the navigation-state collector (off Main) and clear/stop paths.
     @Volatile
     private var matchJob: Job? = null
+    @Volatile
+    private var matchGeneration = 0L
+    private var repickJob: Job? = null
     @Volatile
     private var lastMatchedPolyline: String? = null
     // The latest navigation event, kept so a mid-ride settings change can REPLAY it: the gate + match
@@ -1440,6 +1451,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // publish/clear: a superseded match (a newer route claimed lastMatchedPolyline) becomes a
             // no-op and can never overwrite/wipe the NEWER route's state.
             val mine = routePolyline
+            val generation = ++matchGeneration
             // Off Main: polyline decode, candidate file IO, and segment matching are all heavier
             // than a frame. Default is fine; loadTopCandidates does file IO but never overlaps a save
             // in practice (save runs at ride-end, matching at route-load).
@@ -1455,7 +1467,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     val eff = resolveProfile(activeConfig.value, activeProfileId)
                     val pick = eff.ghostPick
                     val key = routeKeyOf(state.name, path.totalM)
-                    val nowIds = trackStore().candidateIdsFor(bbox, CorridorSeeder.MAX_CANDIDATES)
+                    val store = trackStore()
+                    val candidateIds = withContext(Dispatchers.IO) {
+                        store.rankedCandidateIdsFor(bbox, CorridorSeeder.MAX_CANDIDATES)
+                    }
+                    val nowIds = candidateIds.toSet()
                     var agg = withContext(Dispatchers.IO) { aggregateStore().load(key) }
                     // Re-seed when the candidate SET changed enough (symmetric difference), not when its
                     // COUNT changed — auto-tidy churns the set at constant size, which a count gate misses.
@@ -1465,7 +1481,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // PacePatch (in-memory only, never persisted → must be rebuilt each load). The SAME
                     // track list also feeds the 1D CorridorSeeder when a (re)seed is needed, so we parse
                     // once here, off Main, rather than twice.
-                    val tracks = trackStore().loadTopCandidates(bbox, CorridorSeeder.MAX_CANDIDATES)
+                    val tracks = withContext(Dispatchers.IO) { store.loadByIds(candidateIds) }
                     val pacePatch = PacePatch.build(tracks)
                     // Global gradient model: route-independent, so it is LOADED (not rebuilt) here.
                     val gradePace = GradePaceStore(TrackStorage.tracksDir(applicationContext)).load()
@@ -1512,8 +1528,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // the ensureActive() is what stops this (cancelled) match from publishing a result
                     // built under the OLD settings over the replacement's.
                     currentCoroutineContext().ensureActive()
-                    if (lastMatchedPolyline == mine) {
-                        routeMode = RouteMode(path, mine, state.name, matched, routeGhost, state.routeDistance, pacePatch, gradePace)
+                    if (lastMatchedPolyline == mine && matchGeneration == generation) {
+                        routeMode = RouteMode(path, mine, state.name, matched, routeGhost, state.routeDistance, pacePatch, gradePace, agg)
                         // Diagnostic for the scale question: the Karoo's routeDistance (the scale that
                         // DISTANCE_TO_DESTINATION is measured against) vs the decoded-polyline length (the
                         // scale segments + the ghost curve live on). A large delta means routeDist needs
@@ -1580,9 +1596,37 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun rematchOnSettingsChange() {
         val sig = matchSignature(resolveProfile(activeConfig.value, activeProfileId))
         if (sig == lastMatchSig) return
+        val previous = lastMatchSig
         lastMatchSig = sig
         // Nothing claimed/stashed ⇒ nothing the change could have staled; the next nav event resolves fresh.
         if (routeMode == null && lastMatchedPolyline == null && pendingNavState == null) return
+        // A pick-only change can reuse the already loaded history, aggregate and pace models. Preserve
+        // the path-following integrator and publish one coherent replacement for the map curve.
+        if (previous != null && previous.active == sig.active && previous.raceEnabled == sig.raceEnabled &&
+            previous.pick != sig.pick && routeMode?.polyline == lastMatchedPolyline
+        ) {
+            val current = routeMode
+            if (current != null) {
+                repickJob?.cancel()
+                val eff = resolveProfile(activeConfig.value, activeProfileId)
+                repickJob = scope.launch(Dispatchers.Default) {
+                    val switched = current.withPick(sig.pick, eff.targetSpeedMs)
+                    withContext(Dispatchers.Main) {
+                        if (lastMatchSig == sig && routeMode === current) routeMode = switched
+                    }
+                }
+                return
+            }
+        }
+        // If the initial match is still running, restart it so the latest pick is captured. No route
+        // state or race anchor has been published yet, so clearing the claim is safe.
+        if (routeMode == null && pendingNavState == null && lastMatchedPolyline != null) {
+            matchJob?.cancel()
+            matchGeneration++
+            lastMatchedPolyline = null
+            lastNavEvent?.let { onNavigationState(it) }
+            return
+        }
         Timber.i("KVP settings changed mid-route → re-matching ($sig)")
         clearRouteMode()
         lastNavEvent?.let { onNavigationState(it) }
@@ -2256,6 +2300,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // cross-thread; the actual write is off-Main + serialized.
                         run {
                             val nowCp = SystemClock.elapsedRealtime()
+                            // A pick-only repick preserves the integrator; keep checkpoint metadata
+                            // aligned with the live settings so restart can restore the preserved lead.
+                            integPick = eff.ghostPick
                             if (nowCp - lastCheckpointMs >= CHECKPOINT_INTERVAL_MS && integPick != null) {
                                 lastCheckpointMs = nowCp
                                 pendingCheckpoint = GhostCheckpoint(

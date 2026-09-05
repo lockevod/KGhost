@@ -8,10 +8,10 @@ live on a data field and as a marker on the map.
 
 - **Ghost Pace** — pick a target pace/speed and race a constant-pace ghost. The live gap (time
   and distance, ahead/behind) is rendered in graphical and numeric data fields.
-- **Race your own** — KGhost auto-records each ride as a GPS track. When you load a route, it builds
-  **one continuous ghost of the whole route** — your past self on the stretches you've ridden before,
-  stitched with the Ghost Pace pace everywhere else — and races you against it, automatically, with no
-  setup. The two halves are not separate features: they are the same ghost.
+- **Race your own** — KGhost auto-records each ride as a GPS track. With a route loaded, it compares
+  your pace over the ground you actually ride against your history. On unfamiliar roads it can use
+  your historical pace at the current gradient; when neither comparison is available, the time lead
+  holds. A separate route curve places the ghost on the map.
 - **Best, last, or average** — for the stretches you've ridden before, choose whether the ghost is your
   **fastest** lap, your **most recent**, or a smoothed **average** of your recent laps. The average is
   ready from your **first ride** on a route — KGhost seeds it from your recorded history instead of
@@ -56,8 +56,9 @@ live on a data field and as a marker on the map.
    history). Without this you can still race the fixed-pace Ghost Pace. KGhost needs this access to
    load your recorded ghosts, so if it's missing the app flags it **on its main screen** and with an
    occasional **in-ride reminder** until you grant it.
-4. **Set your Ghost Pace** — pick a target speed/pace in the app; this is what you race when you have
-   no recorded history for a stretch.
+4. **Set your Ghost Pace** — pick a target speed/pace for the fixed-pace mode. In a route race,
+   this target fills gaps in the map curve; unknown ground holds the time lead when neither
+   historical pace tier can answer.
 5. **Ride.** Load a route to race your past self on it, or just start riding to race the Ghost Pace.
 
 ## Data fields
