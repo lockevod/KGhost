@@ -167,13 +167,18 @@ class TrackStore(private val dir: File) {
      * [save]d; if its sourceKey is non-empty it is recorded in `sourcekeys.json` so future calls
      * with the same key are deduped. An empty sourceKey is never deduped but is still saved
      * (defensive for legacy tracks). `true` is returned when the track was stored.
+     *
+     * A duplicate may still ENRICH the stored twin's altitude ([tryUpgradeRecorded]); that is not a
+     * store, so it still returns `false`. The ride-end caller reads `true` as "this track is now in
+     * the library" and follows it with `tidyGroup`, which must never run for a track that was skipped.
      */
     fun add(track: RecordedTrack): Boolean {
         synchronized(indexLock) {
             val key = track.sourceKey
             val known = sourceKeys()
             if (key.isNotEmpty() && key in known.keys) {
-                return tryUpgradeRecorded(track)
+                tryUpgradeRecorded(track)
+                return false
             }
 
             save(track)
@@ -188,13 +193,26 @@ class TrackStore(private val dir: File) {
         }
     }
 
+    /**
+     * sourceKey -> id of every stored RECORDED track. IDS ONLY: a whole-library
+     * `Map<String, RecordedTrack>` is the ~230 MB allocation [allTracksMeta] exists to avoid.
+     */
+    private fun recordedIdsByKey(): Map<String, String> = allTracksMeta().asSequence()
+        .filter { it.source == Source.RECORDED && it.sourceKey.isNotEmpty() }
+        .associate { it.sourceKey to it.id }
+
     /** Fill missing altitude on the live recording when a matching FIT arrives. */
-    private fun tryUpgradeRecorded(incoming: RecordedTrack, lookup: Map<String, RecordedTrack>? = null): Boolean {
+    private fun tryUpgradeRecorded(incoming: RecordedTrack, lookup: Map<String, String>? = null): Boolean {
         if (incoming.source == Source.RECORDED || incoming.sourceKey.isEmpty()) return false
-        val recorded = lookup?.get(incoming.sourceKey) ?: allTrackIds().asSequence().mapNotNull { id ->
-            val f = File(dir, id + JSON_SUFFIX)
-            runCatching { jsonWithUnknownKeys.decodeFromString<RecordedTrack>(f.readText()) }.getOrNull()
-        }.firstOrNull { it.source == Source.RECORDED && it.sourceKey == incoming.sourceKey } ?: return false
+        // A MISS on a complete key->id map is a definitive "no twin to enrich". Falling back to a
+        // library scan here (an elvis on `lookup?.get(...)`) makes the COMMON case — a duplicate whose
+        // twin is itself imported, or whose recorded twin was archived — cost a full decode per track,
+        // i.e. the O(n^2) under indexLock that the bulk sink exists to remove.
+        val recordedId = (lookup ?: recordedIdsByKey())[incoming.sourceKey] ?: return false
+        // Read the target NOW rather than from a cached object: tidyGroup/archive take tidyLock, not
+        // indexLock, so a ride finishing mid-import can archive this id between two chunks. Writing a
+        // cached copy back would resurrect it into the live dir, un-indexed.
+        val recorded = loadTrack(recordedId) ?: return false
         val samples = incoming.points.filter { it.eleM?.isFinite() == true }
         if (samples.size < 2) return false
         val points = recorded.points.toMutableList()
@@ -212,7 +230,14 @@ class TrackStore(private val dir: File) {
                 ((point.distanceM - before.distanceM) / span))
         }
         if (points == recorded.points) return false
-        if (!atomicWriteText(File(dir, recorded.id + JSON_SUFFIX), jsonForStorage.encodeToString(recorded.copy(points = points)))) {
+        // fsync=false for the same reason as the bulk write below: the enrichment is recomputable from
+        // the same FIT on the next import, and this runs once per duplicate over a whole library.
+        if (!atomicWriteText(
+                File(dir, recorded.id + JSON_SUFFIX),
+                jsonForStorage.encodeToString(recorded.copy(points = points)),
+                fsync = false,
+            )
+        ) {
             Timber.w("KVP recording: altitude enrichment failed for ${recorded.id}")
             return false
         }
@@ -290,14 +315,10 @@ class TrackStore(private val dir: File) {
         private val known = synchronized(indexLock) { sourceKeys().keys.toMutableSet() }
         var lastEnrichedCount: Int = 0
             private set
-        private var recordedByKey: Map<String, RecordedTrack>? = null
+        private var recordedByKey: Map<String, String>? = null
 
-        private fun recordedLookup(): Map<String, RecordedTrack> = recordedByKey ?: allTrackIds()
-            .asSequence()
-            .mapNotNull { loadTrack(it) }
-            .filter { it.source == Source.RECORDED && it.sourceKey.isNotEmpty() }
-            .associateBy { it.sourceKey }
-            .also { recordedByKey = it }
+        private fun recordedLookup(): Map<String, String> =
+            recordedByKey ?: recordedIdsByKey().also { recordedByKey = it }
         private val additions = synchronized(indexLock) {
             readPathCellSnapshot() // one-time legacy-migration side effect only; result unused.
             SpatialIndex(INDEX_PRECISION, emptyMap())
@@ -307,9 +328,9 @@ class TrackStore(private val dir: File) {
          *  known keys. No aggregate bookkeeping IO here. Returns the count newly stored (dedup within
          *  batch + against known). */
         fun addAll(tracks: List<RecordedTrack>): Int {
+            lastEnrichedCount = 0
             if (tracks.isEmpty()) return 0
             var added = 0
-            lastEnrichedCount = 0
             synchronized(indexLock) {
                 // Pick up keys written by a concurrent live recorder between chunks.
                 known += sourceKeys().keys
@@ -323,7 +344,7 @@ class TrackStore(private val dir: File) {
                     if (cells.isNotEmpty()) additions.add(t.id, cells)
                     if (t.sourceKey.isNotEmpty()) known.add(t.sourceKey)
                     if (t.source == Source.RECORDED && t.sourceKey.isNotEmpty()) {
-                        recordedByKey = (recordedByKey ?: emptyMap()) + (t.sourceKey to t)
+                        recordedByKey = (recordedByKey ?: emptyMap()) + (t.sourceKey to t.id)
                     }
                     added++
                 }
