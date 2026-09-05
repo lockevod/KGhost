@@ -72,7 +72,7 @@ object SegmentMatcher {
          * are kept and the rest are skipped (logged, never silently dropped). Deterministic given the
          * same inputs (stable sort by epoch descending), so tests stay reproducible.
          *
-         * This is NOT the primary cap: the primary, relevance-ranked cap is [TrackStore.loadTopCandidates],
+         * This is NOT the primary cap: the primary, relevance-ranked cap is [TrackStore.rankedCandidateIdsFor],
          * which pre-ranks by route overlap before parsing. This in-matcher cap is only a HIGH safety
          * backstop and is intentionally set well above realistic histories (e.g. 79 tracks) so it never
          * triggers in practice and so a short perfect-match ride is never evicted in favour of long
@@ -143,7 +143,7 @@ object SegmentMatcher {
         // Safety budget (B), HIGH BACKSTOP ONLY: cap the candidate set to the maxTracks most-recent
         // tracks so a pathologically large history can never make match() grind. With the default
         // maxTracks=120 this will NOT trigger at realistic histories (≤120 tracks); the PRIMARY,
-        // relevance-ranked cap is TrackStore.loadTopCandidates (pre-ranks by route overlap before
+        // relevance-ranked cap is TrackStore.rankedCandidateIdsFor (pre-ranks by route overlap before
         // parsing). The cap here is deterministic — a stable sort by startedAtEpoch descending — so
         // tests stay reproducible. (The cap test in SegmentMatcherTest passes an explicit small
         // maxTracks to exercise this path.)
