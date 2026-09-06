@@ -452,6 +452,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // fix keeps `fixFresh` true forever and the age guard can never fire during a real dropout.
     // This counter is what distinguishes "fast stream" from "repeating stream".
     private var locRepeatCount = 0L
+    // Repeats seen while the rider was MOVING. The unconditional count above cannot answer the question
+    // the probe exists for: a stationary rider produces identical coordinates by definition, so a single
+    // cafe stop (31 min at ~2 Hz is ~3700 emissions) swamps the signal and a high total proves nothing.
+    // Only a repeat while MOVING can distinguish "karoo-ext re-emitted a cached fix" from "the bike is
+    // parked". Both are printed so the stop contribution stays visible.
+    private var locRepeatMovingCount = 0L
+    // Set by the tick from the SPEED stream, read by the location collector on its own coroutine.
+    @Volatile private var probeRiderMoving = false
     private var lastLocLat = Double.NaN
     private var lastLocLng = Double.NaN
     private var tickCount = 0L
@@ -1788,7 +1796,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // Per-ride cadence probes: one ride, one distribution.
             locProbe.reset(); distProbe.reset(); fixAgeProbe.reset()
             locTrustedCount = 0L; tickCount = 0L; distRepeatTicks = 0L
-            locRepeatCount = 0L; lastLocLat = Double.NaN; lastLocLng = Double.NaN
+            locRepeatCount = 0L; locRepeatMovingCount = 0L; probeRiderMoving = false
+            lastLocLat = Double.NaN; lastLocLng = Double.NaN
             lastCadenceLogMs = 0L; lastTickDistM = Double.NaN
         }
         // GPS location consumer — subscribed only while Recording. Feeds the ride RECORDER (the route
@@ -1820,7 +1829,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 // must never be used to infer this stream's rate again.
                 locProbe.mark(nowMs)
                 if (trusted) locTrustedCount++
-                if (lat == lastLocLat && lng == lastLocLng) locRepeatCount++
+                if (lat == lastLocLat && lng == lastLocLng) {
+                    locRepeatCount++
+                    if (probeRiderMoving) locRepeatMovingCount++
+                }
                 lastLocLat = lat; lastLocLng = lng
                 if (trusted != lastLocTrusted || nowMs - lastLocLogMs >= 5_000L) {
                     lastLocTrusted = trusted
@@ -1973,6 +1985,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Emitted periodically as well as at ride end so a mid-ride power-off still
                     // leaves a usable sample behind.
                     tickCount++
+                    probeRiderMoving = (speedMs ?: 0.0) >= StalenessLogic.MIN_MOVING_MS
                     lastFix?.let { fixAgeProbe.add(SystemClock.elapsedRealtime() - it.ms) }
                     if (distM == lastTickDistM) distRepeatTicks++
                     lastTickDistM = distM
@@ -2644,13 +2657,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun logCadence(phase: String) {
         if (!FileLogTree.enabled || tickCount == 0L) return
         Timber.i(
-            "KVP cadence (%s): %s emits=%d trusted=%d sameLatLng=%d | %s emits=%d | %s | " +
+            "KVP cadence (%s): %s emits=%d trusted=%d sameLatLng=%d (moving=%d) | %s emits=%d | %s | " +
                 "ticks=%d distRepeat=%d (%.1f%%) freshGate=%dms",
             phase,
             locProbe.render(),
             locProbe.emissions,
             locTrustedCount,
             locRepeatCount,
+            locRepeatMovingCount,
             distProbe.render(),
             distProbe.emissions,
             fixAgeProbe.render(),
