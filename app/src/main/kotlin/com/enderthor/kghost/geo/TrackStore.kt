@@ -2,9 +2,14 @@ package com.enderthor.kghost.geo
 
 import com.enderthor.kghost.extension.jsonForStorage
 import com.enderthor.kghost.extension.jsonWithUnknownKeys
+import com.enderthor.kghost.engine.TrackSamples
 import kotlinx.serialization.encodeToString
 import timber.log.Timber
 import java.io.File
+
+/** A stored track's identity WITHOUT its points — what whole-library passes need to decide what to
+ *  archive and which source keys to keep. See [TrackStore.allTracksMeta]. */
+data class TrackIdentity(val id: String, val source: Source, val sourceKey: String)
 
 /**
  * On-disk store for recorded tracks plus a coarse spatial index for candidate pruning.
@@ -51,25 +56,73 @@ class TrackStore(private val dir: File) {
     private val sweepMaxDefault = 2000
 
     /**
-     * Reads all stored track ids by listing the `<id>.json` files (excludes `index.json` and
-     * `sourcekeys.json`, which are bookkeeping files, not tracks).
+     * Reads all stored track ids by listing the `<id>.json` files (excludes `index.json`,
+     * `sourcekeys.json` and `processed.json`, which are bookkeeping files, not tracks).
      */
     fun allTrackIds(): List<String> {
         val files = dir.listFiles() ?: return emptyList()
         return files
             .filter {
-                it.isFile && it.name.endsWith(JSON_SUFFIX) &&
-                    it.name != INDEX_FILE && it.name != SOURCEKEYS_FILE
+                it.isFile && it.name.endsWith(JSON_SUFFIX) && it.name !in BOOKKEEPING_FILES
             }
             .map { it.name.removeSuffix(JSON_SUFFIX) }
     }
 
     /**
-     * Returns the set of source keys already ingested via [add]. An absent `sourcekeys.json` is a
-     * normal cold-start state → empty, no log; a present-but-unparseable file is treated as empty
-     * and logged (mirrors [readSnapshot]'s corruption handling).
+     * The identity fields — id, [Source], sourceKey — of every stored (non-archived) track, parsed ONE
+     * track at a time (same streaming idiom as [sweep]): peak memory is one [RecordedTrack], not the
+     * library. A whole-library `List<RecordedTrack>` is ~230 MB at 1500 rides and OOMs a Karoo.
+     * Unparseable files are skipped.
      */
-    fun knownSourceKeys(): Set<String> = synchronized(indexLock) { readSourceKeys() }
+    fun allTracksMeta(): List<TrackIdentity> = allTrackIds().mapNotNull { id ->
+        loadTrack(id)?.let { TrackIdentity(id, it.source, it.sourceKey) }
+    }
+
+    /**
+     * Streams every stored (non-archived) track through [action], parsing ONE at a time and letting each
+     * be collected before the next is read — the whole-library pass that does NOT materialize the whole
+     * library (see [allTracksMeta]). Unparseable files are skipped. Not the hot match path, which prunes
+     * via the spatial index ([loadCandidates]/[rankedCandidateIdsFor]).
+     */
+    fun forEachTrack(action: (RecordedTrack) -> Unit) {
+        for (id in allTrackIds()) loadTrack(id)?.let(action)
+    }
+
+    /**
+     * SUBTRACTIVE rewrite of `sourcekeys.json`: removes [drop] from the keys in force RIGHT NOW, under
+     * ONE [indexLock] hold, and returns whether the new set actually reads back. Used by the rebuild,
+     * which must drop the keys of the tracks it archives (so their files re-decode) while keeping every
+     * other key — deleting the file outright would let every live-recorded ride's FIT land a duplicate.
+     *
+     * Subtractive rather than "overwrite with the survivors the caller sampled earlier": a ride finishing
+     * between that snapshot and this call is absent from the snapshot, so an overwrite would erase its
+     * key, and its FIT would then land a PERMANENT twin ([selectArchivable] leaves twin groups of <= 3
+     * alone forever). Reading and subtracting under the same lock hold closes that window.
+     *
+     * The Boolean matters because [atomicWriteText] deliberately PRESERVES the old file on an IO error and
+     * reports nothing: a caller about to archive its whole library must be able to tell the reset did not
+     * take, instead of archiving against a keys file that still dedups every re-decoded track away.
+     *
+     * That IO case is the only refusal. An absent or corrupt keys file is not one: it is a cache miss and
+     * [sourceKeys] recomputes it from the library.
+     */
+    fun dropSourceKeys(drop: Set<String>): Boolean = synchronized(indexLock) {
+        val current = sourceKeys()
+        // An enumeration that could not vouch for itself must not be written back (it would erase what it
+        // could not see), and a reset that did not write did not take. Both gaps are IO and transient, so
+        // the next press retries — see recomputeSourceKeys.
+        if (!current.complete) return@synchronized false
+        val remaining = current.keys - drop
+        writeSourceKeys(remaining)
+        readSourceKeysFile() == remaining
+    }
+
+    /**
+     * The source keys currently deduped against — the file when it parses, the library (live + archived)
+     * when it does not. TEST SEAM: no production caller, hence `internal`; it is how the suites observe
+     * the set that actually gates dedup rather than re-deriving it themselves.
+     */
+    internal fun knownSourceKeys(): Set<String> = synchronized(indexLock) { sourceKeys().keys }
 
     /**
      * Pays the index's LAZY one-time costs up front and repairs index/file drift. Call from service
@@ -114,20 +167,82 @@ class TrackStore(private val dir: File) {
      * [save]d; if its sourceKey is non-empty it is recorded in `sourcekeys.json` so future calls
      * with the same key are deduped. An empty sourceKey is never deduped but is still saved
      * (defensive for legacy tracks). `true` is returned when the track was stored.
+     *
+     * A duplicate may still ENRICH the stored twin's altitude ([tryUpgradeRecorded]); that is not a
+     * store, so it still returns `false`. The ride-end caller reads `true` as "this track is now in
+     * the library" and follows it with `tidyGroup`, which must never run for a track that was skipped.
      */
     fun add(track: RecordedTrack): Boolean {
         synchronized(indexLock) {
             val key = track.sourceKey
-            val known = readSourceKeys()
-            if (key.isNotEmpty() && key in known) return false
+            val known = sourceKeys()
+            if (key.isNotEmpty() && key in known.keys) {
+                tryUpgradeRecorded(track)
+                return false
+            }
 
             save(track)
 
-            if (key.isNotEmpty()) {
-                writeSourceKeys(known + key)
+            // Incomplete = the recompute could not enumerate the library (see recomputeSourceKeys).
+            // Skip the write rather than persist a set that could be missing keys; this track's own
+            // `<id>.json` was just written, so its key is recomputable on the next pass anyway.
+            if (key.isNotEmpty() && known.complete) {
+                writeSourceKeys(known.keys + key)
             }
             return true
         }
+    }
+
+    /**
+     * sourceKey -> id of every stored RECORDED track. IDS ONLY: a whole-library
+     * `Map<String, RecordedTrack>` is the ~230 MB allocation [allTracksMeta] exists to avoid.
+     */
+    private fun recordedIdsByKey(): Map<String, String> = allTracksMeta().asSequence()
+        .filter { it.source == Source.RECORDED && it.sourceKey.isNotEmpty() }
+        .associate { it.sourceKey to it.id }
+
+    /** Fill missing altitude on the live recording when a matching FIT arrives. */
+    private fun tryUpgradeRecorded(incoming: RecordedTrack, lookup: Map<String, String>? = null): Boolean {
+        if (incoming.source == Source.RECORDED || incoming.sourceKey.isEmpty()) return false
+        // A MISS on a complete key->id map is a definitive "no twin to enrich". Falling back to a
+        // library scan here (an elvis on `lookup?.get(...)`) makes the COMMON case — a duplicate whose
+        // twin is itself imported, or whose recorded twin was archived — cost a full decode per track,
+        // i.e. the O(n^2) under indexLock that the bulk sink exists to remove.
+        val recordedId = (lookup ?: recordedIdsByKey())[incoming.sourceKey] ?: return false
+        // Read the target NOW rather than from a cached object: tidyGroup/archive take tidyLock, not
+        // indexLock, so a ride finishing mid-import can archive this id between two chunks. Writing a
+        // cached copy back would resurrect it into the live dir, un-indexed.
+        val recorded = loadTrack(recordedId) ?: return false
+        val samples = incoming.points.filter { it.eleM?.isFinite() == true }
+        if (samples.size < 2) return false
+        val points = recorded.points.toMutableList()
+        var sampleIndex = 0
+        for (i in points.indices) {
+            val point = points[i]
+            if (point.eleM != null) continue
+            while (sampleIndex < samples.lastIndex && samples[sampleIndex + 1].distanceM < point.distanceM) sampleIndex++
+            val before = samples[sampleIndex]
+            val after = samples.getOrNull(sampleIndex + 1) ?: continue
+            val span = after.distanceM - before.distanceM
+            if (span <= 0.0 || span > TrackSamples.DROPOUT_GAP_M) continue
+            if (point.distanceM !in before.distanceM..after.distanceM) continue
+            points[i] = point.copy(eleM = before.eleM!! + (after.eleM!! - before.eleM) *
+                ((point.distanceM - before.distanceM) / span))
+        }
+        if (points == recorded.points) return false
+        // fsync=false for the same reason as the bulk write below: the enrichment is recomputable from
+        // the same FIT on the next import, and this runs once per duplicate over a whole library.
+        if (!atomicWriteText(
+                File(dir, recorded.id + JSON_SUFFIX),
+                jsonForStorage.encodeToString(recorded.copy(points = points)),
+                fsync = false,
+            )
+        ) {
+            Timber.w("KVP recording: altitude enrichment failed for ${recorded.id}")
+            return false
+        }
+        Timber.i("KVP recording: enriched altitude from imported FIT for ${recorded.id}")
+        return true
     }
 
     /**
@@ -140,14 +255,18 @@ class TrackStore(private val dir: File) {
         if (tracks.isEmpty()) return 0
         ensureDir()
         return synchronized(indexLock) {
-            val known = readSourceKeys().toMutableSet()
+            val seed = sourceKeys()
+            val known = seed.keys.toMutableSet()
             // Build on the MIGRATED snapshot (see save()): readPathCellSnapshot() does the one-time
             // legacy bbox→path-cell rebuild + marker if needed, so a batch import before the first
             // candidate read migrates the legacy index first instead of folding onto (and pinning) it.
             val index = SpatialIndex(INDEX_PRECISION, readPathCellSnapshot())
             var added = 0
             for (t in tracks) {
-                if (t.sourceKey.isNotEmpty() && t.sourceKey in known) continue
+                if (t.sourceKey.isNotEmpty() && t.sourceKey in known) {
+                    tryUpgradeRecorded(t)
+                    continue
+                }
                 // Bulk import: skip the per-track fsync (a fsync storm over N files). Each track json is
                 // re-importable from its FitFiles/GPX source, so a torn one after power loss is recovered
                 // on the next scan; the durability-critical bookkeeping (index + sourcekeys, written once
@@ -159,7 +278,7 @@ class TrackStore(private val dir: File) {
                 added++
             }
             writeSnapshot(index.snapshot())
-            writeSourceKeys(known)
+            if (seed.complete) writeSourceKeys(known) // see add(): never persist a set we can't vouch for
             added
         }
     }
@@ -189,7 +308,17 @@ class TrackStore(private val dir: File) {
         // legacy bbox->path-cell migration SIDE EFFECT (writes the `.pathcells` marker + a migrated
         // index.json on a legacy store) — its return value is intentionally discarded, NOT used to
         // seed the merge base.
-        private val known = synchronized(indexLock) { readSourceKeys().toMutableSet() }
+        //
+        // The seed goes through sourceKeys(), so a corrupt/absent keys file is recomputed from the
+        // library: reading it as the empty set makes this sink store a live-recorded ride's own `.fit`
+        // as a PERMANENT twin during the import itself — before commit() gets anywhere near the file.
+        private val known = synchronized(indexLock) { sourceKeys().keys.toMutableSet() }
+        var lastEnrichedCount: Int = 0
+            private set
+        private var recordedByKey: Map<String, String>? = null
+
+        private fun recordedLookup(): Map<String, String> =
+            recordedByKey ?: recordedIdsByKey().also { recordedByKey = it }
         private val additions = synchronized(indexLock) {
             readPathCellSnapshot() // one-time legacy-migration side effect only; result unused.
             SpatialIndex(INDEX_PRECISION, emptyMap())
@@ -199,15 +328,24 @@ class TrackStore(private val dir: File) {
          *  known keys. No aggregate bookkeeping IO here. Returns the count newly stored (dedup within
          *  batch + against known). */
         fun addAll(tracks: List<RecordedTrack>): Int {
+            lastEnrichedCount = 0
             if (tracks.isEmpty()) return 0
             var added = 0
             synchronized(indexLock) {
+                // Pick up keys written by a concurrent live recorder between chunks.
+                known += sourceKeys().keys
                 for (t in tracks) {
-                    if (t.sourceKey.isNotEmpty() && t.sourceKey in known) continue
+                    if (t.sourceKey.isNotEmpty() && t.sourceKey in known) {
+                        if (tryUpgradeRecorded(t, recordedLookup())) lastEnrichedCount++
+                        continue
+                    }
                     atomicWriteText(File(dir, t.id + JSON_SUFFIX), jsonForStorage.encodeToString(t), fsync = false)
                     val cells = additions.cellsForPath(t.points.map { LatLng(it.lat, it.lng) })
                     if (cells.isNotEmpty()) additions.add(t.id, cells)
                     if (t.sourceKey.isNotEmpty()) known.add(t.sourceKey)
+                    if (t.source == Source.RECORDED && t.sourceKey.isNotEmpty()) {
+                        recordedByKey = (recordedByKey ?: emptyMap()) + (t.sourceKey to t.id)
+                    }
                     added++
                 }
             }
@@ -228,7 +366,11 @@ class TrackStore(private val dir: File) {
         fun commit() = synchronized(indexLock) {
             val merged = SpatialIndex(INDEX_PRECISION, readSnapshot()).apply { addAll(additions.snapshot()) }
             writeSnapshot(merged.snapshot())
-            writeSourceKeys(readSourceKeys() + known)
+            // sourceKeys(), NOT a lenient read: commit() runs in the importer's `finally` on EVERY run,
+            // including one that stored nothing, so a lenient "corrupt → empty" read here is what turns a
+            // corrupt keys file into a valid one with every RECORDED key erased. See add()/sourceKeys().
+            val current = sourceKeys()
+            if (current.complete) writeSourceKeys(current.keys + known)
         }
     }
 
@@ -342,33 +484,25 @@ class TrackStore(private val dir: File) {
         return loadByIds(ids)
     }
 
-    /** Up to [maxTracks] stored-track ids whose path cells overlap [routeBBox], RANKED by route overlap,
-     *  WITHOUT parsing any track file — the no-parse candidate set the corridor re-seed gate diffs
-     *  against (and the exact set [loadTopCandidates] parses for the same [maxTracks]). */
-    fun candidateIdsFor(routeBBox: BBox, maxTracks: Int): Set<String> =
-        synchronized(indexLock) { rankCandidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION, maxTracks).toSet() }
-
     /**
-     * Returns the parsed candidate tracks RANKED by ROUTE OVERLAP and capped at [maxTracks], parsing
-     * ONLY the chosen files.
+     * Up to [maxTracks] stored-track ids whose path cells overlap [routeBBox], RANKED by route
+     * overlap, WITHOUT parsing any track file. ONE snapshot serves both consumers: the corridor
+     * re-seed gate diffs the id set, and [loadByIds] parses exactly these ids — taking the ranking
+     * twice could straddle a concurrent write and diff against a set that was never loaded.
      *
      * "Race your own on THIS route" wants the tracks that cover the most of the route — not the most
      * recent ones. Using the spatial index snapshot we score each candidate by how many of the
-     * route's cells it appears in (its overlap with the route), rank by that score, take the top
-     * [maxTracks], and only THEN open + parse those files. This avoids parsing all candidates before
-     * the matcher's own cap (which used recency, the wrong cap here) and stops the relevant old ride
-     * from being silently dropped by a recency cut.
+     * route's cells it appears in (its overlap with the route), rank by that score, and take the top
+     * [maxTracks], so only THEN are those files opened. This avoids parsing all candidates before the
+     * matcher's own cap (which used recency, the wrong cap here) and stops the relevant old ride from
+     * being silently dropped by a recency cut.
      */
-    fun loadTopCandidates(routeBBox: BBox, maxTracks: Int): List<RecordedTrack> {
+    fun rankedCandidateIdsFor(routeBBox: BBox, maxTracks: Int): List<String> =
         // Snapshot the (path-cell, migrated) index under the lock so we never read it mid-modify.
-        val ids = synchronized(indexLock) {
-            rankCandidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION, maxTracks)
-        }
-        return loadByIds(ids)
-    }
+        synchronized(indexLock) { rankCandidateIds(readPathCellSnapshot(), routeBBox, INDEX_PRECISION, maxTracks) }
 
     /** Loads + parses the `<id>.json` files for [ids]; missing/unparseable files are skipped. */
-    private fun loadByIds(ids: Iterable<String>): List<RecordedTrack> =
+    internal fun loadByIds(ids: Iterable<String>): List<RecordedTrack> =
         ids.mapNotNull { id ->
             val f = File(dir, id + JSON_SUFFIX)
             if (!f.isFile) return@mapNotNull null
@@ -397,7 +531,7 @@ class TrackStore(private val dir: File) {
      * marker created — after which subsequent reads skip straight to [readSnapshot].
      *
      * This re-parses all tracks once, off-Main: the only callers ([loadCandidates] /
-     * [loadTopCandidates]) run on `Dispatchers.Default`/`IO` (route load / matcher), never on Main.
+     * [rankedCandidateIdsFor]) run on `Dispatchers.Default`/`IO` (route load / matcher), never on Main.
      */
     private fun readPathCellSnapshot(): Map<String, Set<String>> {
         val marker = File(dir, INDEX_PATHCELLS_MARKER)
@@ -443,17 +577,91 @@ class TrackStore(private val dir: File) {
         atomicWriteText(File(dir, INDEX_FILE), jsonForStorage.encodeToString(snapshot))
     }
 
-    private fun readSourceKeys(): Set<String> {
+    /**
+     * The source keys in force, plus whether that set may be written back.
+     *
+     * `sourcekeys.json` is a derived CACHE — every key in it is the `sourceKey` of a stored track — so
+     * ABSENT and CORRUPT mean the same thing: recompute from the library. That single rule replaces the
+     * whole corruption/recovery/refusal machinery this file used to carry, and closes the older hole
+     * where a MISSING file over a full library read as a cold start and twinned every ride.
+     *
+     * [SourceKeys.complete] gates PERSISTENCE, never FUNCTION: the set is deduped against however it was
+     * obtained, and only written back when the enumeration could vouch for itself — so an incomplete
+     * recompute can never erase anything.
+     *
+     * Every reader/writer of the state goes through here ([add], [addAll], [BulkSink], [dropSourceKeys],
+     * [knownSourceKeys]), so there is exactly one read of it.
+     */
+    private fun sourceKeys(): SourceKeys =
+        readSourceKeysFile()?.let { SourceKeys(it, complete = true) } ?: recomputeSourceKeys()
+
+    private class SourceKeys(val keys: Set<String>, val complete: Boolean)
+
+    /** The cache as it stands on disk, or null when it is absent or unparseable — the same thing to
+     *  every caller, which is the whole point (see [sourceKeys]). */
+    private fun readSourceKeysFile(): Set<String>? {
         val f = File(dir, SOURCEKEYS_FILE)
-        // An absent file is a normal cold-start state → empty, no log.
-        if (!f.isFile) return emptySet()
+        if (!f.isFile) return null
         return runCatching {
             jsonWithUnknownKeys.decodeFromString<Set<String>>(f.readText())
         }.getOrElse { e ->
-            // A PRESENT-but-unparseable file is corruption; treat as empty (re-dedup) but surface it.
-            Timber.w(e, "sourcekeys.json present but failed to parse; treating as empty (corrupt?)")
-            emptySet()
+            Timber.w(e, "sourcekeys.json unparseable; recomputing it from the library")
+            null
         }
+    }
+
+    /**
+     * Recomputes the key set off the library itself: the `sourceKey` of every stored track, LIVE **and**
+     * ARCHIVED. [ARCHIVE_SUBDIR] is walked because [archive] deliberately LEAVES an archived track's key
+     * in the file ("a re-scan won't re-add it" — its own doc), so a recompute blind to it would write
+     * back a set with every archived ride's key erased and the next scan would RESURRECT those rides as
+     * live tracks, undoing an auto-clean that does not re-apply ([sweep] is one-shot per install).
+     *
+     * [SourceKeys.complete] is false only for a gap that could be HIDING a key: a directory that exists
+     * but will not list (`listFiles()` null — NOT the same as an absent or empty one, which hides
+     * nothing), or a file that could not be READ. A file that reads but does not DECODE is not a gap: it
+     * is not a track (invisible to [allTracksMeta], to matching and to tidy), it holds no recoverable
+     * key, and its ride comes back by re-importing its source file. Blocking on one is what used to
+     * freeze the store — an undecodable file in `archive/` can never be repaired, so nothing could ever
+     * be written again.
+     *
+     * Costs one streamed pass over live + archived tracks (one parsed at a time), and only on a cache
+     * miss: the healthy path never reaches here.
+     */
+    private fun recomputeSourceKeys(): SourceKeys {
+        val keys = HashSet<String>()
+        var complete = true
+        for (d in listOf(dir, File(dir, ARCHIVE_SUBDIR))) {
+            val files = d.listFiles()
+            if (files == null) {
+                if (d.isDirectory) { // exists but unreadable — a whole leg of the enumeration missing
+                    complete = false
+                    Timber.w("sourcekeys: %s will not list; the recomputed set will not be persisted", d.path)
+                }
+                continue
+            }
+            for (f in files) {
+                if (!f.isFile || !f.name.endsWith(JSON_SUFFIX) || f.name in BOOKKEEPING_FILES) continue
+                val text = runCatching { f.readText() }.getOrNull()
+                if (text == null) {
+                    complete = false
+                    Timber.w("sourcekeys: could not read %s; the recomputed set will not be persisted", f.name)
+                    continue
+                }
+                val key = runCatching { jsonWithUnknownKeys.decodeFromString<RecordedTrack>(text).sourceKey }
+                    .getOrElse { e ->
+                        // Malformed content = not a track, so no key and nothing to vouch for. Anything
+                        // else (an OOM on a huge file, say) leaves us unable to say what key it holds.
+                        if (e !is IllegalArgumentException) { // SerializationException extends it
+                            complete = false
+                            Timber.w(e, "sourcekeys: could not decode %s; the set will not be persisted", f.name)
+                        }
+                        null
+                    }
+                if (!key.isNullOrEmpty()) keys += key
+            }
+        }
+        return SourceKeys(keys, complete)
     }
 
     private fun writeSourceKeys(keys: Set<String>) {
@@ -487,6 +695,23 @@ class TrackStore(private val dir: File) {
 
         /** Stores the serialized `Set<String>` of source keys ingested via [add] (dedup state). */
         private const val SOURCEKEYS_FILE = "sourcekeys.json"
+
+        /**
+         * The import's processed-file ledger, written into the SAME dir by `HistoryImportRunner`.
+         * Listed here only so [allTrackIds] can skip it: `MainActivity`'s "stored rides" count is
+         * `allTrackIds().size`, and that is the number a rider reads to check whether a rebuild
+         * brought their rides back — it must not be one too high for the life of the install.
+         */
+        private const val LEDGER_FILE = "processed.json"
+
+        /**
+         * Files in [dir] that are bookkeeping, not `<id>.json` tracks. [GradePaceStore.FILE_NAME] is
+         * written into this SAME dir by `HistoryImportRunner` after any import that stored anything —
+         * so leaving it out made "stored rides" read one too high from the first successful import
+         * onward, exactly when the rider is counting to check a rebuild lost nothing.
+         */
+        private val BOOKKEEPING_FILES =
+            setOf(INDEX_FILE, SOURCEKEYS_FILE, LEDGER_FILE, GradePaceStore.FILE_NAME)
 
         /** Subdirectory holding archived (pruned) tracks; excluded from listing/index/matching. */
         const val ARCHIVE_SUBDIR = "archive"

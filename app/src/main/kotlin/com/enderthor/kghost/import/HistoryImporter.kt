@@ -37,7 +37,10 @@ class HistoryImporter(
     private val importDir: File,
     private val trackStore: TrackStore,
     private val decimate: (RecordedTrack) -> RecordedTrack = HistoryImporter::defaultDecimate,
-    private val fitDecode: (File, Source) -> RecordedTrack? = FitDecoder::decode,
+    // decodeForImport, not decode: it is the one that distinguishes the DETERMINISTIC sport/file-type
+    // rejection (an empty FitDecoder.notARide track → Invalid → ledgered once) from a TRANSIENT failure
+    // (null → retried every import). See FitDecoder.notARide.
+    private val fitDecode: (File, Source) -> RecordedTrack? = FitDecoder::decodeForImport,
     private val gpxParse: (File) -> RecordedTrack? = GpxParser::parse,
     private val lastScanProvider: () -> Long = { 0L },
     // suspend so the caller can AWAIT each persist: the lastScan write must be ordered and complete
@@ -95,15 +98,15 @@ class HistoryImporter(
 
         val workList = ArrayList<WorkItem>()
 
-        fitFilesDir.listFiles { f -> f.isFile && f.name.endsWith(".fit", ignoreCase = true) }
+        fitFilesDir.listFiles { f -> isFit(f) }
             ?.filter(::passesFilter)
             ?.forEach { workList.add(WorkItem(it, Kind.FITFILES_FIT)) }
 
-        importDir.listFiles { f -> f.isFile && f.name.endsWith(".fit", ignoreCase = true) }
+        importDir.listFiles { f -> isFit(f) }
             ?.filter(::passesFilter)
             ?.forEach { workList.add(WorkItem(it, Kind.IMPORT_FIT)) }
 
-        importDir.listFiles { f -> f.isFile && f.name.endsWith(".gpx", ignoreCase = true) }
+        importDir.listFiles { f -> isGpx(f) }
             ?.filter(::passesFilter)
             ?.forEach { workList.add(WorkItem(it, Kind.IMPORT_GPX)) }
 
@@ -129,6 +132,7 @@ class HistoryImporter(
         // running totals — accumulated across flushes, finalized identically to the old single addAll.
         var failed = 0
         var imported = 0
+        var enriched = 0
         var skippedDuplicates = 0
         // Bulk sink: keeps the index + known keys IN MEMORY across every chunk of this run and
         // persists the aggregate index.json/sourcekeys.json ONCE at commit() (below, in the
@@ -165,6 +169,7 @@ class HistoryImporter(
             if (chunk.isEmpty()) return
             val added = sink.addAll(chunk)
             imported += added
+            enriched += sink.lastEnrichedCount
             skippedDuplicates += (chunk.size - added)
             val chunkMax = chunkLastModified.max()
             if (chunkMax > maxFlushedLastModified) maxFlushedLastModified = chunkMax
@@ -209,7 +214,8 @@ class HistoryImporter(
                 if (decimated.points.size < 2) {
                     // L-F1: a <2-point track is unusable/unraceable — and, since it decoded fully, this
                     // is DETERMINISTIC (not transient), so mark it Invalid: the collector ledgers it
-                    // immediately so it isn't re-decoded on every subsequent import.
+                    // immediately so it isn't re-decoded on every subsequent import. Also the landing
+                    // spot for FitDecoder.notARide (a 0-point track): same determinism, same treatment.
                     Timber.w("import dropped %s: decimated to %d point(s)", item.file.name, decimated.points.size)
                     DecodedOrFail.Invalid(item.file, srcSize, srcMtime)
                 } else {
@@ -302,6 +308,7 @@ class HistoryImporter(
                                 imported = imported,
                                 skippedDuplicates = skippedDuplicates,
                                 failed = failed,
+                                enriched = enriched,
                             ),
                         )
                     }
@@ -339,11 +346,27 @@ class HistoryImporter(
                 imported = imported,
                 skippedDuplicates = skippedDuplicates,
                 failed = failed,
+                enriched = enriched,
             ),
         )
     }
 
     companion object {
+        private fun isFit(f: File) = f.isFile && f.name.endsWith(".fit", ignoreCase = true)
+        private fun isGpx(f: File) = f.isFile && f.name.endsWith(".gpx", ignoreCase = true)
+
+        /**
+         * How many files an import over these two dirs would find — the SAME predicates [import] scans
+         * with (deliberately shared, so the rebuild's safety count and the scan can't drift apart).
+         * A missing/unreadable dir contributes 0, which is exactly the case the rebuild must catch: a
+         * `listFiles` returning null is what turns "the folder is gone" into a silent `total = 0` run.
+         * Ignores the `onlyNew` cutoff and the ledger — the rebuild clears both, so every one of these
+         * files really is re-readable.
+         */
+        fun sourceFileCount(fitFilesDir: File, importDir: File): Int =
+            (fitFilesDir.listFiles { f -> isFit(f) }?.size ?: 0) +
+                (importDir.listFiles { f -> isFit(f) || isGpx(f) }?.size ?: 0)
+
         /** Emit a PARSING progress every this many processed files (plus always on the last). */
         private const val PROGRESS_EVERY = 10
 

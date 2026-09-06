@@ -62,7 +62,17 @@ data class ProfileSetting(
  * target. 0.0 means the target was explicitly cleared (Ghost Pace inactive).
  */
 @Serializable
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 data class KGhostConfig(
+    /**
+     * Schema version. [EncodeDefault] is load-bearing: the storage Json has `encodeDefaults = false`,
+     * so without it a config at the CURRENT version writes NO `version` field, every such blob decodes
+     * back as "already newest", and the next [CONFIG_VERSION] bump runs no migration at all — on the
+     * DataStore blob as much as on the config mirror. Blobs already on disk carry no version and so
+     * still read as the version current when this shipped; each is stamped on its next write, which
+     * any settings change or in-ride config write performs.
+     */
+    @kotlinx.serialization.EncodeDefault
     val version: Int = CONFIG_VERSION,
     /** Target speed in m/s. Defaults to 12 km/h; 0.0 = target explicitly cleared (VP inactive). */
     val targetSpeedMs: Double = DEFAULT_TARGET_SPEED_MS,

@@ -9,7 +9,7 @@ import kotlin.math.min
 /**
  * 2D historical-pace map keyed by ground cell + heading bin, built from the route area's tracks via the
  * shared [TrackSamples] generator. [pace] returns the chosen pick's per-metre time at a position+heading,
- * or null when there is no matching history (caller uses VP-fill). Pure; in-memory; rebuilt per route load.
+ * or null when there is no matching history (caller uses neutral-fill). Pure; in-memory; rebuilt per route load.
  */
 class PacePatch private constructor(
     private val refLat: Double,
@@ -25,7 +25,7 @@ class PacePatch private constructor(
     private val lngStep = TrackSamples.MATCH_RADIUS_M / kotlin.math.max(1.0, 111_320.0 * cos(Math.toRadians(refLat)))
 
     fun pace(lat: Double, lng: Double, bearingDeg: Double, pick: GhostPick): Double? {
-        if (!bearingDeg.isFinite()) return null // #7: no trustworthy direction → VP-fill, not max-count
+        if (!bearingDeg.isFinite()) return null // #7: no trustworthy direction → neutral-fill, not max-count
         val ci = floor(lat / latStep).toInt(); val cj = floor(lng / lngStep).toInt(); val bb = bearingBin(bearingDeg)
         // Prefer the rider's OWN cell+bin (no distance loss); fall to the 3×3×3 neighbourhood only when it is
         // empty, and there reject any reducer whose real bearing is > BEARING_TOL_DEG from the rider's heading
