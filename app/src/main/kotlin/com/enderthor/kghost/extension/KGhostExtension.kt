@@ -1884,6 +1884,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         var lossStartElapsedS = 0.0
         var lossWorst = CoastQuality.LIVE
         var lossNullSpeedTicks = 0
+        // Non-LIVE TICKS in this episode. Not derivable from durS: that is an ELAPSED_TIME span, which
+        // freezes on a pause and is rounded to the second, so a one-tick slip and a one-tick-plus-pause
+        // dropout print the same durS. The tick count is what separates the two populations.
+        var lossTicks = 0
         var lossAlerted = false
         var lossClockS = 0.0
         // Cache the ghost curve and rebuild it only when the target speed changes.
@@ -1990,6 +1994,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // dead-reckoned surplus is right; (b) does the SPEED stream ever actually go null on
                     // this device (speedNullTicks); (c) how often/how long losses happen while a route is
                     // loaded (mode=route), where nothing alerts today. One line per episode.
+                    // ponytail: an episode still OPEN when the ride ends is never logged (the counters are
+                    // locals of the tick job, so stopTick cannot see them). That is the one case where a
+                    // real dropout stays invisible; hoist them to fields if a ride ever ends mid-loss and
+                    // the silence matters.
                     val cq = coast.quality
                     if (cq == CoastQuality.LIVE) {
                         if (lossPrevQuality != CoastQuality.LIVE) {
@@ -1997,10 +2005,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             // has the file log on (it is the only sink for a Timber.i in a release build).
                             if (FileLogTree.enabled) {
                                 Timber.i(
-                                    "KVP gps-loss episode: mode=%s durS=%.0f lossS=%.0f rawAtFreeze=%.0fm " +
-                                        "rawAtRecovery=%.0fm rawStep=%.0fm coasted=%.0fm speedNullTicks=%d " +
-                                        "worst=%s alertFired=%b",
+                                    "KVP gps-loss episode: mode=%s ticks=%d durS=%.0f lossS=%.0f " +
+                                        "rawAtFreeze=%.0fm rawAtRecovery=%.0fm rawStep=%.0fm coasted=%.0fm " +
+                                        "speedNullTicks=%d worst=%s alertFired=%b",
                                     if (routeMode != null) "route" else "no-route",
+                                    lossTicks,
                                     elapsedS - lossStartElapsedS,
                                     lossClockS,
                                     coast.rawAtFreezeM,
@@ -2018,9 +2027,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             // Episode begins (one tick's worth of freeze already banked in lossClockS).
                             lossStartElapsedS = elapsedS
                             lossNullSpeedTicks = 0
+                            lossTicks = 0
                             lossAlerted = false
                             lossWorst = cq
                         }
+                        lossTicks++
                         if (cq > lossWorst) lossWorst = cq
                         if (speedMs == null) lossNullSpeedTicks++
                         // handleGpsLoss() runs LATER in this tick, so a fire is observed on the next one
