@@ -254,7 +254,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          *  - [ROUTE_PROJ_MAX_PERP_M]: if the nearest point is farther than this the rider is off the line
          *    (genuinely off-route) → don't trust the projection, fall back to the Karoo value.
          */
-        private const val GPS_FIX_FRESH_MS = 5_000L
+        // 8 s, NOT 5 s: the Karoo's location stream delivers a fix every 5000 ms almost exactly
+        // (measured 1682 of 1683 intervals at 5 s over a 2.5 h ride). A 5 s threshold therefore EQUALS the
+        // cadence, so ordinary jitter ages out a perfectly good fix: that ride logged 578 phantom
+        // "gps-loss episodes" (~1 every 15 s, all worst=COASTING, max coast 18 m) and dead-reckoned 1.4 km
+        // that never needed it. Since this same gate drops both pace tiers to neutral fill and freezes the
+        // route projection, a too-tight value quietly degrades the race and buries a REAL dropout among the
+        // false ones. 1.5x the observed cadence leaves room for jitter and still catches a genuine loss
+        // within two missed fixes.
+        private const val GPS_FIX_FRESH_MS = 8_000L
         private const val ROUTE_PROJ_BACK_M = 120.0
         private const val ROUTE_PROJ_FWD_M = 300.0
         private const val ROUTE_PROJ_FWD_MAX_M = 400.0
