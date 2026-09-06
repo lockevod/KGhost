@@ -8,6 +8,7 @@ import com.enderthor.kghost.data.KGhostConfig
 import com.enderthor.kghost.datatype.GapGraphicDataType
 import com.enderthor.kghost.datatype.GapNumericDataType
 import com.enderthor.kghost.datatype.GapStreamDataType
+import com.enderthor.kghost.engine.CadenceProbe
 import com.enderthor.kghost.engine.CoastQuality
 import com.enderthor.kghost.engine.CoastingEstimator
 import com.enderthor.kghost.engine.GapCalculator
@@ -140,6 +141,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
 
         /** Tick cadence. The ride app advances its record timer at ~1 Hz. */
         private const val REFRESH_MS = 1000L
+
+        /** How often the stream-cadence diagnostic prints mid-ride. Long: the point is one summary
+         *  per ride, the periodic copy only exists so a power-off does not lose everything. */
+        private const val CADENCE_LOG_MS = 600_000L
 
         /** Stable id for the ghost map symbol — re-emitting the same id MOVES the marker. */
         private const val GHOST_SYMBOL_ID = "kghost-ghost"
@@ -424,6 +429,24 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // fix N, lng from fix N−1). null until the first finite trusted fix.
     @Volatile
     private var lastFix: GpsFix? = null
+
+    // ── Stream-cadence probes (DIAGNOSTICS ONLY, no behaviour) ───────────────────────────────────
+    // Answer, from ONE ride, the two questions the logs could not: (a) how fast does LOCATION really
+    // arrive, and how old is the fix when the tick actually reads it — the quantity GPS_FIX_FRESH_MS
+    // is compared against, never yet measured; (b) how fast does the raw DISTANCE stream arrive
+    // BEFORE combine()+sample() destroys its timing, and how often does the sampled value repeat on
+    // a tick. (b) is the suspected source of the 578 one-tick "gps-loss episodes" a field ride
+    // logged: Adv2CoastPipelineTest's LOCK E already proves a DISTANCE stream slower than the tick
+    // is classified COASTING, withholding the historical verdict on metres that are perfectly real.
+    // Reset per ride in startTick(); rendered by [logCadence].
+    private val locProbe = CadenceProbe("loc")
+    private val distProbe = CadenceProbe("distRaw")
+    private val fixAgeProbe = CadenceProbe("fixAge@tick")
+    private var locTrustedCount = 0L
+    private var tickCount = 0L
+    private var distRepeatTicks = 0L
+    private var lastCadenceLogMs = 0L
+    private var lastTickDistM = Double.NaN
 
     // Live gradient (%) + the MONOTONIC ms it arrived, the key into the historical pace-vs-gradient
     // model on ground with no local history. Its own collector rather than a fourth arm of the tick's
@@ -1751,6 +1774,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             sentLogBytes = 0L
             sentLogFilePath = null
             logChunkSeq = 0
+            // Per-ride cadence probes: one ride, one distribution.
+            locProbe.reset(); distProbe.reset(); fixAgeProbe.reset()
+            locTrustedCount = 0L; tickCount = 0L; distRepeatTicks = 0L
+            lastCadenceLogMs = 0L; lastTickDistM = Double.NaN
         }
         // GPS location consumer — subscribed only while Recording. Feeds the ride RECORDER (the route
         // position itself now comes from the Karoo, see destJob below). We stream the LOCATION DataType
@@ -1777,6 +1804,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     lastFix = GpsFix(lat, lng, SystemClock.elapsedRealtime(), hdg)
                 }
                 val nowMs = SystemClock.elapsedRealtime()
+                // Cadence probe BEFORE the log throttle — the throttled line below is exactly what
+                // must never be used to infer this stream's rate again.
+                locProbe.mark(nowMs)
+                if (trusted) locTrustedCount++
                 if (trusted != lastLocTrusted || nowMs - lastLocLogMs >= 5_000L) {
                     lastLocTrusted = trusted
                     lastLocLogMs = nowMs
@@ -1865,7 +1896,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         val diagLogMs = 2500L
 
         tickJob = scope.launch(Dispatchers.Default) {
+            // Probe the RAW DISTANCE arrivals here: combine()+sample(REFRESH_MS) below discards this
+            // timing, and it is the timing that decides whether a repeated sampled value is a genuine
+            // freeze or just a stream slower than the tick.
             val distance = karooSystem.streamDataFlow(DataType.Type.DISTANCE)
+                .onEach { distProbe.mark(SystemClock.elapsedRealtime()) }
             val elapsed = karooSystem.streamDataFlow(DataType.Type.ELAPSED_TIME)
             // SPEED (m/s) is streamed to distinguish "stopped at a light" (frozen distance is
             // legitimate) from "GPS lost while moving" (frozen distance is wrong → blank to `---`).
@@ -1914,6 +1949,21 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // it is always ready as the fallback when no segment is active. coast tracks the
                     // whole-ride DISTANCE odometer (dead-reckoning during brief GPS gaps); the cached
                     // VP curve is rebuilt lazily when the target changes (below, in vpGap). Updated
+                    // Cadence probes (diagnostics only). fixAge is THE quantity GPS_FIX_FRESH_MS is
+                    // compared against; distRepeat counts ticks whose sampled DISTANCE equals the
+                    // previous tick's — the phasing signature CoastingEstimator reads as a freeze.
+                    // Emitted periodically as well as at ride end so a mid-ride power-off still
+                    // leaves a usable sample behind.
+                    tickCount++
+                    lastFix?.let { fixAgeProbe.add(SystemClock.elapsedRealtime() - it.ms) }
+                    if (distM == lastTickDistM) distRepeatTicks++
+                    lastTickDistM = distM
+                    val cadNow = SystemClock.elapsedRealtime()
+                    if (cadNow - lastCadenceLogMs >= CADENCE_LOG_MS) {
+                        lastCadenceLogMs = cadNow
+                        logCadence("mid-ride")
+                    }
+
                     // BEFORE the per-profile gate so the odometer stays in sync even while the extension
                     // is inert — otherwise re-activating after a disabled stretch would see a distance
                     // jump and misread it as a GPS freeze.
@@ -2561,7 +2611,30 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         pendingNavState?.let { onNavigationState(it) }
     }
 
+    /** One line carrying the whole shape of every stream the freshness/coasting gates depend on.
+     *  Gated on the file log like the other ride diagnostics — it is the only sink for a Timber.i in
+     *  a release build, and building the string is pointless without one. */
+    private fun logCadence(phase: String) {
+        if (!FileLogTree.enabled || tickCount == 0L) return
+        Timber.i(
+            "KVP cadence (%s): %s emits=%d trusted=%d | %s emits=%d | %s | " +
+                "ticks=%d distRepeat=%d (%.1f%%) freshGate=%dms",
+            phase,
+            locProbe.render(),
+            locProbe.emissions,
+            locTrustedCount,
+            distProbe.render(),
+            distProbe.emissions,
+            fixAgeProbe.render(),
+            tickCount,
+            distRepeatTicks,
+            100.0 * distRepeatTicks / tickCount,
+            GPS_FIX_FRESH_MS,
+        )
+    }
+
     private fun stopTick() {
+        logCadence("ride-end")
         isRecording = false
         // Drop any route stashed during a preview: it must not survive into the NEXT ride's startTick
         // replay (it would activate route mode against a route the rider is no longer navigating).
