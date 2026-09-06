@@ -443,6 +443,16 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private val distProbe = CadenceProbe("distRaw")
     private val fixAgeProbe = CadenceProbe("fixAge@tick")
     private var locTrustedCount = 0L
+    // Emissions carrying the SAME lat/lng as the previous one. The GNSS source was measured at a
+    // steady 2.00 Hz (dumpsys location, device idle), yet the throttled ride log showed 1682/1683
+    // intervals at a flat 5 s — a shape a 500 ms source should not produce. The suspect is karoo-ext
+    // re-emitting an unchanged fix, which matters far beyond cadence: line ~1805 re-stamps lastFix
+    // with a FRESH timestamp on every trusted emission without comparing coordinates, so a repeated
+    // fix keeps `fixFresh` true forever and the age guard can never fire during a real dropout.
+    // This counter is what distinguishes "fast stream" from "repeating stream".
+    private var locRepeatCount = 0L
+    private var lastLocLat = Double.NaN
+    private var lastLocLng = Double.NaN
     private var tickCount = 0L
     private var distRepeatTicks = 0L
     private var lastCadenceLogMs = 0L
@@ -1777,6 +1787,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // Per-ride cadence probes: one ride, one distribution.
             locProbe.reset(); distProbe.reset(); fixAgeProbe.reset()
             locTrustedCount = 0L; tickCount = 0L; distRepeatTicks = 0L
+            locRepeatCount = 0L; lastLocLat = Double.NaN; lastLocLng = Double.NaN
             lastCadenceLogMs = 0L; lastTickDistM = Double.NaN
         }
         // GPS location consumer — subscribed only while Recording. Feeds the ride RECORDER (the route
@@ -1808,6 +1819,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 // must never be used to infer this stream's rate again.
                 locProbe.mark(nowMs)
                 if (trusted) locTrustedCount++
+                if (lat == lastLocLat && lng == lastLocLng) locRepeatCount++
+                lastLocLat = lat; lastLocLng = lng
                 if (trusted != lastLocTrusted || nowMs - lastLocLogMs >= 5_000L) {
                     lastLocTrusted = trusted
                     lastLocLogMs = nowMs
@@ -2617,12 +2630,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun logCadence(phase: String) {
         if (!FileLogTree.enabled || tickCount == 0L) return
         Timber.i(
-            "KVP cadence (%s): %s emits=%d trusted=%d | %s emits=%d | %s | " +
+            "KVP cadence (%s): %s emits=%d trusted=%d sameLatLng=%d | %s emits=%d | %s | " +
                 "ticks=%d distRepeat=%d (%.1f%%) freshGate=%dms",
             phase,
             locProbe.render(),
             locProbe.emissions,
             locTrustedCount,
+            locRepeatCount,
             distProbe.render(),
             distProbe.emissions,
             fixAgeProbe.render(),
