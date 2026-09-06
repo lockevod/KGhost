@@ -11,6 +11,7 @@ import com.enderthor.kghost.datatype.GapStreamDataType
 import com.enderthor.kghost.engine.CadenceProbe
 import com.enderthor.kghost.engine.CoastQuality
 import com.enderthor.kghost.engine.CoastingEstimator
+import com.enderthor.kghost.engine.verdictAllowed
 import com.enderthor.kghost.engine.GapCalculator
 import com.enderthor.kghost.engine.GapState
 import com.enderthor.kghost.engine.GapStateHolder
@@ -2356,8 +2357,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // the number of dropouts — the earlier "~+38 s per dropout, linear" figure came
                         // from an experiment that never froze the DISTANCE stream, so what it measured
                         // was a legitimate gain, not phantom metres).
-                        val fixFresh = fix != null && SystemClock.elapsedRealtime() - fix.ms <= GPS_FIX_FRESH_MS &&
-                            coast.quality == CoastQuality.LIVE
+                        // Both conjuncts live in engine.verdictAllowed so the test rigs cannot drift from
+                        // this line — see its KDoc for the false green that motivated extracting it.
+                        val fixAgeOk = fix != null && SystemClock.elapsedRealtime() - fix.ms <= GPS_FIX_FRESH_MS
+                        val fixFresh = verdictAllowed(fixAgeOk, coast.quality)
                         // Tier 1: this exact road, ridden before (PacePatch). Tier 2: my historical pace at THIS
                         // gradient on a road I have never ridden (GradePace). Tier 3 lives in the integrator: a
                         // neutral fill that contributes 0. Both tier 1 and tier 2 require fixFresh (the GPS fix
