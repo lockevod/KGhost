@@ -6,6 +6,8 @@ import io.hammerhead.karooext.models.HttpResponseState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
+import java.io.ByteArrayOutputStream
+import java.util.zip.GZIPOutputStream
 
 /**
  * Sends the KGhost diagnostic log to the developer via a Telegram bot — only when the rider has the
@@ -84,9 +86,9 @@ object LogReporter {
 
         return try {
             val boundary = "KGhostBoundary_${System.currentTimeMillis()}"
-            val body = buildMultipart(boundary, fileName, redacted, caption)
+            val body = buildMultipart(boundary, "$fileName.gz", gzip(redacted), caption)
             val kb = body.size / 1024
-            Timber.d("LogReporter: sending $kb KB to Telegram…")
+            Timber.d("LogReporter: sending $kb KB gz (${redacted.length / 1024} KB raw) to Telegram…")
 
             val response: HttpResponseState.Complete? = withTimeoutOrNull(TIMEOUT_MS) {
                 karooSystem.httpRequest(
@@ -150,15 +152,32 @@ object LogReporter {
         } ?: false
     }
 
-    /** Builds a `multipart/form-data` body for the Telegram Bot API `sendDocument` endpoint. */
+    /**
+     * gzips [text] for upload. Diagnostic logs are highly repetitive and compress ~6-7.6:1 (measured
+     * on a real 5 h ride log: 2,994,327 → 393,826 bytes), so this is the single biggest lever on the
+     * energy this feature costs: the Companion BLE link is orders of magnitude more expensive per byte
+     * than the CPU spent compressing. Telegram accepts arbitrary binary documents, so the only
+     * visible change is the `.gz` suffix on the delivered file.
+     */
+    private fun gzip(text: String): ByteArray {
+        val out = ByteArrayOutputStream()
+        GZIPOutputStream(out).use { it.write(text.toByteArray(Charsets.UTF_8)) }
+        return out.toByteArray()
+    }
+
+    /**
+     * Builds a `multipart/form-data` body for the Telegram Bot API `sendDocument` endpoint.
+     * The document part is raw BYTES (gzipped), so the body is assembled as byte arrays rather than
+     * through a String — a gzip stream is not valid UTF-8 and would be mangled by a String round-trip.
+     */
     private fun buildMultipart(
         boundary: String,
         fileName: String,
-        fileContent: String,
+        fileBytes: ByteArray,
         caption: String,
     ): ByteArray {
         val crlf = "\r\n"
-        return buildString {
+        val head = buildString {
             append("--$boundary$crlf")
             append("Content-Disposition: form-data; name=\"chat_id\"$crlf$crlf")
             append(CHAT_ID); append(crlf)
@@ -169,9 +188,9 @@ object LogReporter {
             }
             append("--$boundary$crlf")
             append("Content-Disposition: form-data; name=\"document\"; filename=\"$fileName\"$crlf")
-            append("Content-Type: text/plain; charset=UTF-8$crlf$crlf")
-            append(fileContent); append(crlf)
-            append("--$boundary--$crlf")
+            append("Content-Type: application/gzip$crlf$crlf")
         }.toByteArray(Charsets.UTF_8)
+        val tail = "$crlf--$boundary--$crlf".toByteArray(Charsets.UTF_8)
+        return head + fileBytes + tail
     }
 }
