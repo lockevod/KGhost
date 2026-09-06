@@ -347,10 +347,27 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         private const val LOG_SEND_INTERVAL_MS = 5 * 60_000L
 
         /**
-         * Max BYTES per uploaded chunk. The Karoo `httpRequest` body crosses the host Binder
-         * transaction at ~80 KB (KSafe's empirical CALIBRATION_MAX_CHUNK_BYTES = 72 000), so each POST
-         * must stay well under it — 60 000 bytes + multipart overhead. A bigger body fails with
-         * TransactionTooLargeException, so the WHOLE feature silently never delivers.
+         * Max RAW bytes per uploaded chunk (the tail is cut on raw bytes; [LogReporter] gzips the chunk
+         * afterwards, so `sentLogBytes` accounting is unaffected by compression).
+         *
+         * The Karoo `httpRequest` body crosses the host Binder transaction at ~80 KB (KSafe's empirical
+         * CALIBRATION_MAX_CHUNK_BYTES = 72 000), so each POST must stay well under it — a bigger body
+         * fails with TransactionTooLargeException and the WHOLE feature silently never delivers.
+         *
+         * [LogReporter] gzips the chunk before POSTing, so the ceiling applies to the COMPRESSED body —
+         * but this value is deliberately NOT sized on a compression ratio. gzip's worst case is
+         * INCOMPRESSIBLE input, where the output is the input plus ~0.03% and an 18-byte header, so
+         * 60 000 raw is the largest slice that fits the ceiling UNCONDITIONALLY — exactly as it did when
+         * the body was plain text. Real logs measure 6.5-7.6:1 (worst of 38 slices over 9.1 MB of real
+         * ride logs: 6.55:1), so in practice the body is now ~9 KB instead of ~60 KB: the bytes-on-the-
+         * wire win from gzip is kept in full, only the fewer-POSTs win is given up.
+         *
+         * ponytail: sized for gzip's WORST case rather than its measured case, so no runtime check is
+         * needed. Raising it (fewer POSTs = fewer radio wake-ups, which cost more than the bytes) means
+         * ENFORCING the limit — measure the assembled body and shrink + recompress the raw slice until
+         * it fits — because the failure mode is not one dropped chunk: an oversized body throws
+         * TransactionTooLargeException, `sentLogBytes` never advances, and every later periodic and
+         * ride-end drain retries the same unsendable bytes forever, silently killing ALL log delivery.
          */
         private const val LOG_CHUNK_BYTES = 60_000
 
@@ -1335,15 +1352,19 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             var prevMonoMs = 0L
             var curDistM = Double.NaN
             var curMonoMs = 0L
-            var lastMapLogMs = 0L
-            val mapLogMs = 2500L
             while (isActive) {
                 // Back off to a slow poll when there is no ghost to show (VP mode / before the first
-                // route match) OR while the ride is paused — a paused ghost is frozen in place
+                // route match), while the ride is paused — a paused ghost is frozen in place
                 // (the tick republishes the same frozen distance), so the ~5 Hz rate buys nothing
-                // during a café stop. The next slow delay (≤ MAP_IDLE_REFRESH_MS) restores the fast rate.
+                // during a café stop — OR while no map layer is attached. The host only calls
+                // startMap() while the map page is rendered, so [mapEmitter] is null for every minute
+                // the rider spends on a DATA page: without it in this condition the loop woke ~5×/s
+                // for a whole route ride only to fall through the null-emitter hide below. The next
+                // slow delay (≤ MAP_IDLE_REFRESH_MS) restores the fast rate, so re-attaching the map
+                // costs ≤1 s before the first glide frame — the same latency the other idle paths
+                // already accept.
                 val s = mapGhostState
-                delay(if (s == null || ridePaused) MAP_IDLE_REFRESH_MS else mapRefreshMs)
+                delay(if (s == null || ridePaused || mapEmitter == null) MAP_IDLE_REFRESH_MS else mapRefreshMs)
                 val s2 = mapGhostState
                 if (s2 == null || mapEmitter == null || !activeConfig.value.showGhostOnMap) {
                     publishGhostMarker(null) // hide (idempotent — no-op when already hidden)
@@ -1363,53 +1384,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 val ghostDistM = MapGlide.interpDistM(prevDistM, prevMonoMs, curDistM, curMonoMs, nowMs)
                 val marker = GhostMapPresenter.marker(ghostDistM, s2.path, fresh = true)
                 publishGhostMarker(marker)
-                // Instrumentation (throttled): the MAP side the per-tick "KVP tick route" never captured.
-                //   emit/cur/prev  = the marker's route distance (this loop) vs the published anchors.
-                //   fieldGhost/GapD = what the gap field shows (same source).
-                //   visualGap      = crow-flies metres between the MARKER and the rider's real GPS fix.
-                //   markerArc      = where the marker projects back onto the route (sampleAt is monotonic).
-                // If |visualGap| ≠ |fieldGapD| (or the sign disagrees), the rider's field position
-                // (routeDist, from DISTANCE_TO_DESTINATION) is NOT where the blue dot/GPS is → the
-                // field↔map mismatch is geometric, not a marker bug. Scalars only (no lat/lng) so the
-                // redactor leaves them in. Drop once the cause is pinned.
-                if (nowMs - lastMapLogMs >= mapLogMs) {
-                    lastMapLogMs = nowMs
-                    val st = GapStateHolder.state.value
-                    val fix = lastFix
-                    val rLat = fix?.lat ?: Double.NaN
-                    val rLng = fix?.lng ?: Double.NaN
-                    val haveGps = rLat.isFinite() && rLng.isFinite()
-                    val visualGap = if (marker != null && haveGps) {
-                        Polyline.haversineM(LatLng(rLat, rLng), LatLng(marker.lat, marker.lng))
-                    } else {
-                        Double.NaN
-                    }
-                    // DECISIVE diagnostic: project the rider's real GPS onto the SAME polyline the marker
-                    // is drawn on. riderProj = the rider's TRUE arc on rm.path; fieldRider = the field's
-                    // routeDist (from DISTANCE_TO_DESTINATION). If riderProj ≈ fieldRider → the frame is
-                    // fine and the marker geometry/sampleAt is wrong; if they differ by ~the visualGap →
-                    // the field's routeDist is offset from where the rider really is on the polyline.
-                    // perp = how far the GPS sits off the polyline (high ⇒ rm.path ≠ the road ridden).
-                    // Windowed around the field's rider position (st.progressM) — NOT a global O(n) scan —
-                    // so this ~2.5 s diagnostic stays cheap over a multi-hour ride.
-                    val proj = if (haveGps) {
-                        s2.path.nearestProjectionNear(
-                            LatLng(rLat, rLng), st.progressM, ROUTE_PROJ_BACK_M, ROUTE_PROJ_FWD_M,
-                        )
-                    } else {
-                        null
-                    }
-                    Timber.d(
-                        "KVP map ghost: emit=${"%.0f".format(ghostDistM)} " +
-                            "cur=${"%.0f".format(curDistM)} prev=${prevDistM.takeIf { it.isFinite() }?.let { "%.0f".format(it) } ?: "--"} " +
-                            "fieldGhost=${"%.0f".format(st.ghostProgressM)} " +
-                            "fieldRider=${"%.0f".format(st.progressM)} " +
-                            "riderProj=${proj?.let { "%.0f".format(it.distanceAlongM) } ?: "--"} " +
-                            "perp=${proj?.let { "%.0f".format(it.perpDistM) } ?: "--"}m " +
-                            "fieldGapD=${"%.0f".format(st.gapDistanceM)}m " +
-                            "visualGap=${visualGap.takeIf { it.isFinite() }?.let { "%.0f".format(it) } ?: "--"}m active=${st.active}",
-                    )
-                }
             }
         }
     }
