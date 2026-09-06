@@ -2356,11 +2356,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // the number of dropouts — the earlier "~+38 s per dropout, linear" figure came
                         // from an experiment that never froze the DISTANCE stream, so what it measured
                         // was a legitimate gain, not phantom metres).
-                        // `|| coast.isPhaseSlip` keeps the verdict on ONE frozen tick — the host's
-                        // DISTANCE stream slipping phase against our 1 Hz tick, not a lost fix. See
-                        // CoastingEstimator.isPhaseSlip for the measurement and why one tick is safe.
                         val fixFresh = fix != null && SystemClock.elapsedRealtime() - fix.ms <= GPS_FIX_FRESH_MS &&
-                            (coast.quality == CoastQuality.LIVE || coast.isPhaseSlip)
+                            coast.quality == CoastQuality.LIVE
                         // Tier 1: this exact road, ridden before (PacePatch). Tier 2: my historical pace at THIS
                         // gradient on a road I have never ridden (GradePace). Tier 3 lives in the integrator: a
                         // neutral fill that contributes 0. Both tier 1 and tier 2 require fixFresh (the GPS fix

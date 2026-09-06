@@ -47,7 +47,7 @@ class Adv2CoastPipelineTest {
             val p = prevEl
             if (p != null && elapsedS > p && riderDist <= integLast) { ms += (elapsedS - p); moveStart = ms }
             prevEl = elapsedS
-            val paceNow = if (fixFresh && (coast.quality == CoastQuality.LIVE || coast.isPhaseSlip)) pace else null
+            val paceNow = if (fixFresh && coast.quality == CoastQuality.LIVE) pace else null
             g.onTick(riderDist, 0.0, riderDist * 1e-5, 90.0, elapsedS - ms) { _, _, _ -> paceNow }
             integLast = riderDist
         }
@@ -262,16 +262,13 @@ class Adv2CoastPipelineTest {
     }
 
     // =============================================================================================
-    // LOCK E — a DISTANCE stream merely OUT OF PHASE with the 1 Hz `sample()` is still judged.
-    // This lock used to assert the opposite, and the comment invited exactly this change. A field
-    // ride made the cost concrete: 578 one-tick "gps-loss episodes", 627 non-LIVE ticks of 8787
-    // (7.1%), 1417 m of 24911 (5.7%) left unjudged — on a device whose GNSS was measured at a steady
-    // 2.00 Hz, i.e. with no fixes missing at all. The gate now also accepts `coast.isPhaseSlip`.
-    // NOTE the shape of the fix: the odometer, the loss clock, the alert and the quality are all
-    // untouched. Holding the odometer instead was tried first and broke 40 locks, because every real
-    // dropout then lost its first second of dead reckoning. Only the VERDICT gate moved.
+    // LOCK E — unchanged by this work, and the reason the route number is safe: whenever the DISTANCE
+    // stream is merely OUT OF PHASE with the 1 Hz `sample()`, the tick is COASTING, so layer 2
+    // withholds the historical verdict on metres that are perfectly real and the ghost silently stops
+    // judging half the stretch. Bounded and one-signed AGAINST the rider — kept as a lock so a future
+    // change to the gate has to face it.
     // =============================================================================================
-    @Test fun `E - a DISTANCE stream slower than the tick is still judged`() {
+    @Test fun `E - a DISTANCE stream slower than the tick silently withholds the verdict`() {
         val r = RouteRig()
         val hist = 0.5 // history says 2 m/s here; the rider is doing 6 m/s — a huge, real lead
         var d = 0.0; var t = 0.0
@@ -288,8 +285,8 @@ class Adv2CoastPipelineTest {
                 "filled=${"%.0f".format(r.g.filledM)} m",
         )
         val coverage = r.g.matchedM / (r.g.matchedM + r.g.filledM)
-        assertEquals("every real metre now gets a verdict", 1.0, coverage, 0.01)
-        assertEquals("so the lead reads the truth, not half of it", truth, r.gap, truth * 0.01)
+        assertEquals("HALF the real metres get no verdict at all", 0.5, coverage, 0.01)
+        assertEquals("so the lead reads about half the truth", truth / 2.0, r.gap, truth * 0.01)
     }
 
     /** Control for E: the SAME ride with DISTANCE in phase reads the truth exactly, so E is purely the

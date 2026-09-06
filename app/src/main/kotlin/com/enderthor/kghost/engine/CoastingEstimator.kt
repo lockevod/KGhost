@@ -132,35 +132,6 @@ class CoastingEstimator(
      *  A DECREASE is a source reset / new activity, so it clears the flag rather than setting it. */
     private var everMoved: Boolean = false
 
-    /**
-     * Consecutive ticks the raw distance has been frozen while the rider was NOT provably stopped.
-     * READ-ONLY DIAGNOSTIC — it changes no classification here; [isPhaseSlip] is what reads it.
-     * Cleared by a real raw change, held (not advanced) across a legitimate stop, exactly like
-     * [coastingSeconds].
-     */
-    var freezeTicks: Int = 0
-        private set
-
-    /**
-     * Whether the CURRENT freeze is short enough to be the host's DISTANCE stream slipping phase
-     * against our 1 Hz tick rather than a lost fix. The two are independent clocks, so the sampled
-     * value repeats whenever they drift past each other — with nothing wrong and no fix missing.
-     *
-     * This exists ONLY to let the pace tiers keep judging those metres. It deliberately does NOT
-     * change the odometer, the loss clock, the alert or the quality: a field ride logged 578 such
-     * episodes (95% exactly one tick) on a device whose GNSS was measured at a steady 2.00 Hz, and
-     * the cost was 1417 m of 24911 (5.7%) that the ghost silently refused to judge — while an
-     * earlier attempt to fix this by holding the odometer instead broke 40 locks, because every real
-     * dropout then lost its first second of dead reckoning.
-     *
-     * Bounded on purpose: one tick. The historical verdict is applied to at most one tick of
-     * dead-reckoned metres, at a position at most one fix old, so the "60 s loss on a climb minted
-     * ~+190 s of lead" failure the freshness gate exists to stop cannot reach through it — from the
-     * second frozen tick onward the verdict is withheld exactly as before.
-     */
-    val isPhaseSlip: Boolean
-        get() = quality == CoastQuality.COASTING && freezeTicks <= PHASE_SLIP_GRACE_TICKS
-
     /** Seconds already dead-reckoned on a NULL speed since the last real distance change — the budget
      *  for the bound described in the class KDoc. */
     private var unprovenCoastS: Double = 0.0
@@ -225,7 +196,6 @@ class CoastingEstimator(
             coastingSeconds = 0.0
             unprovenCoastS = 0.0
             coastSpentS = 0.0
-            freezeTicks = 0
             return
         }
 
@@ -260,14 +230,12 @@ class CoastingEstimator(
             // (alert, estimate mark, give-up blank). Conflating it with the start line turned a
             // ten-minute GPS loss into a fully trusted reading.
             coastingSeconds += dt
-            freezeTicks++
             quality = qualityOf(coastingSeconds)
             return
         }
 
         // Frozen while moving — or speed unavailable. We NEVER blank; a prolonged loss is LONG_LOSS.
         coastingSeconds += dt
-        freezeTicks++
         // Whatever the speed source, one loss may only buy maxCoastS of dead reckoning (see coastSpentS).
         val room = (maxCoastS - coastSpentS).coerceIn(0.0, dt)
         if (speedMs != null) {
@@ -302,12 +270,6 @@ class CoastingEstimator(
          * ([CoastQuality.COASTING]) before it is treated as a prolonged loss ([CoastQuality.LONG_LOSS],
          * rendered marked + alert-eligible). ~30 s comfortably covers tunnels/underpasses.
          */
-        /** Frozen-while-moving ticks that still count as phase slip rather than a lost fix (see
-         *  [CoastingEstimator.isPhaseSlip]). ONE: 95% of the false episodes a field ride logged were
-         *  exactly one tick, while a real dropout lasts far longer, so a wider grace would start
-         *  masking the thing the gate is watching for. */
-        const val PHASE_SLIP_GRACE_TICKS = 1
-
         const val COAST_WINDOW_MS = 30_000L
 
         /**
