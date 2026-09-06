@@ -1,5 +1,24 @@
 package com.enderthor.kghost.engine
 
+/**
+ * The ONE definition of when a tick may pay the HISTORICAL verdict (tier 1 PacePatch / tier 2
+ * GradePace) instead of a neutral fill. Both conditions are load-bearing and are documented at the
+ * production call site: a stale fix would price dead-reckoned metres at the position where the fix
+ * FROZE, and a non-LIVE quality means the metres were invented rather than ridden.
+ *
+ * WHY THIS IS A FUNCTION and not an expression repeated at each call site: it used to be repeated —
+ * once in the tick and once in each of the four pipeline test rigs that declare themselves verbatim
+ * replicas of it. A change to the production copy alone therefore left the rigs asserting the OLD
+ * behaviour while still reporting green, which is exactly how a gate change shipped 585 passing tests
+ * while `AdvNumPipelineTest`'s LOCK 2 — the lock on the very failure that change could cause — was
+ * quietly testing dead code. Syncing the rigs afterwards failed five locks. One definition, called by
+ * production and by every rig, makes that class of false green impossible.
+ *
+ * Keep it a single expression. If it ever needs to grow, the rigs get the growth for free.
+ */
+fun verdictAllowed(fixAgeOk: Boolean, quality: CoastQuality): Boolean =
+    fixAgeOk && quality == CoastQuality.LIVE
+
 /** Quality of the distance [CoastingEstimator] produces this tick. */
 enum class CoastQuality {
     /** A real fix (distance changed) or a legitimate stop (speed ≈ 0): measured, fully reliable. */

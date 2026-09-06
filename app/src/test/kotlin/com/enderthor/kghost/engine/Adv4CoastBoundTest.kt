@@ -76,7 +76,7 @@ class Adv4CoastBoundTest {
             if (p != null && elapsedS > p && riderDist <= integLast) { ms += (elapsedS - p); moveStart = ms }
             prevEl = elapsedS
             raceClockS = elapsedS - ms
-            val paceNow = if (fixFresh && coast.quality == CoastQuality.LIVE) pace else null
+            val paceNow = if (verdictAllowed(fixFresh, coast.quality)) pace else null
             g.onTick(riderDist, 0.0, riderDist * 1e-5, 90.0, elapsedS - ms) { _, _, _ -> paceNow }
             integLast = riderDist
         }
