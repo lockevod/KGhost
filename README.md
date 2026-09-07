@@ -116,6 +116,10 @@ up after a sustained loss:
 | ~1 min+ | …plus a one-shot **"GPS lost"** alert (clears when the signal returns) | visible |
 | ~3 min+ | gives up → `---` | hidden |
 
+The last two rows apply in **Ghost Pace mode** (no route loaded). **On a route** the gap is never
+blanked and no "GPS lost" alert is raised: the race is measured over the ground under your wheels, so
+a dropout only shows up as the amber estimate colour and a held map marker, and the gap keeps running.
+
 When the signal returns, the gap catches up (the odometer dead-reckons through the gap, so the race
 keeps running). The map ghost holds its position and stays visible throughout a dropout — it isn't
 hidden just because *your* position is briefly unknown.
