@@ -10,6 +10,10 @@ app/build/
 app/release/
 .DS_Store
 
-# Real FIT ride used only as a local test fixture (③ FitDecoder); not committed (privacy).
+# Real FIT rides used only as local test fixtures; never committed (privacy — they are GPS traces of
+# where the maintainer actually rides). Every test that wants one reads it from the repo root (or
+# $SERGI1_FIT) and skips cleanly when it is absent, so a fresh clone builds and tests green without it.
 app/src/test/resources/sample.fit
+sergi1.fit
+app/src/test/resources/sergi1.fit
 /.claude/

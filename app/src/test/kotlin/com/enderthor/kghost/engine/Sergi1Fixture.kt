@@ -14,8 +14,10 @@ import java.io.File
  *
  * Pull it to the repo root with: adb pull /sdcard/FitFiles/<ride>.fit sergi1.fit
  */
+fun sergi1File(): File = File(System.getenv("SERGI1_FIT") ?: File(repoRoot(), "sergi1.fit").path)
+
 fun loadSergi1(): RecordedTrack {
-    val file = File(System.getenv("SERGI1_FIT") ?: File(repoRoot(), "sergi1.fit").path)
+    val file = sergi1File()
     assumeTrue("sergi1.fit present at ${file.path}", file.exists())
     val track = FitDecoder.decode(file, Source.FIT_IMPORT)
     assumeTrue("sergi1.fit decoded", track != null)
