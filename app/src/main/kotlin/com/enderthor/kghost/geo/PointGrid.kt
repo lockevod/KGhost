@@ -253,7 +253,12 @@ internal class PointGrid private constructor(
     private fun perpDistToSegment(pLat: Double, pLng: Double, seg: Int): Double {
         val a = pts[seg]; val b = pts[seg + 1]
         val segMPerDegLat = 111_320.0
-        val segMPerDegLng = 111_320.0 * cos(Math.toRadians(a.lat))
+        // Precomputed once per path rather than per query (this runs route samples x tracks during a
+        // library import — the heaviest loop in the app). `pts` IS `path.points`, and the clip box only
+        // selects which segments are binned, never renumbers them, so [seg] indexes this array exactly
+        // as it indexes `pts`. Same stored value as the old `111_320.0 * cos(toRadians(a.lat))`, so the
+        // result stays bit-for-bit what PointGridDiffTest pins it to.
+        val segMPerDegLng = path.segMPerDegLng[seg]
         val bx = (b.lng - a.lng) * segMPerDegLng; val by = (b.lat - a.lat) * segMPerDegLat
         val px = (pLng - a.lng) * segMPerDegLng; val py = (pLat - a.lat) * segMPerDegLat
         val segLen2 = bx * bx + by * by

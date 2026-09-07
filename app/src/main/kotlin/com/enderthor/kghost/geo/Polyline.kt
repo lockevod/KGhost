@@ -85,11 +85,20 @@ class PolylinePath(val points: List<LatLng>) {
     // GLOBAL scans expensive — the marker BOOTSTRAP before the first lock and the off-route RECOVERY
     // both retry on EVERY tick for as long as they fail, so a rider who starts off the line or takes a
     // long detour paid O(points) trigonometry every second for the whole stretch. Reading them from
-    // here leaves those scans as plain arithmetic (and takes the trig out of SegmentMatcher's
-    // import-time coverage scan too). The values are stored, not re-derived, so every scan returns
-    // bit-for-bit what it did before — the differential tests still hold.
+    // here leaves those scans as plain arithmetic. The values are stored, not re-derived, so every
+    // scan returns bit-for-bit what it did before — the differential tests still hold.
+    //
+    // The import-time coverage scan does NOT go through the scans below: it runs
+    // SegmentMatcher -> PointGrid.nearestPerpDistM, and PolylinePath.nearestPerpDistM is now only the
+    // brute-force REFERENCE the differential tests compare against. That is why segMPerDegLng is
+    // internal — PointGrid reads it directly, which is where the import-scale win actually lands.
     private val segBearingDeg = DoubleArray(points.size - 1) { Polyline.bearingDeg(points[it], points[it + 1]) }
-    private val segMPerDegLng = DoubleArray(points.size - 1) { 111_320.0 * cos(Math.toRadians(points[it].lat)) }
+
+    /** Internal so [PointGrid] — which holds this same path and indexes it with the SAME segment index
+     *  (its `pts` is `path.points` verbatim, unclipped; the clip box only decides which segments get
+     *  binned, never renumbers them) — can read it from its own per-query scan instead of recomputing
+     *  the cosine. That scan is the one that actually runs at import scale. */
+    internal val segMPerDegLng = DoubleArray(points.size - 1) { 111_320.0 * cos(Math.toRadians(points[it].lat)) }
 
     /**
      * Point + heading at cumulative route distance [distanceAlongM] (metres), clamped to

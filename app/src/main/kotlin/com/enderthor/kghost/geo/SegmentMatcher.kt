@@ -60,8 +60,8 @@ object SegmentMatcher {
          * start merging parallel roads.
          *
          * This is the tolerance for matching two RECORDED histories onto each other — distinct from
-         * deciding whether the rider's live position is on the route (that now comes from the Karoo's
-         * own ON_ROUTE map-matching, not a local projection).
+         * deciding whether the rider's live position is on the route — that is a local projection of
+         * the GPS fix onto the loaded polyline, and it places only the map marker.
          */
         val toleranceM: Double = 35.0,
         val minSegmentM: Double = 300.0,

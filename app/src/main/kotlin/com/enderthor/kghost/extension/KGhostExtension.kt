@@ -494,10 +494,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // confirmed from a field log; normalisation, if any, belongs in the collector below and nowhere else.
     @Volatile private var gradeUnitLogged = false
 
-    // Whether the Karoo is currently offering a REJOIN path (rider off-route, being guided back). When
-    // true the route position is not trustworthy even if ON_ROUTE hasn't flipped yet — mirrors how
-    // RouteGraph nulls its along-route position whenever rejoinDistance/rejoinPolyline is set. Written
-    // from the nav stream (before the match dedup), read on the tick.
+    // Whether the Karoo is currently offering a REJOIN path (rider off-route, being guided back).
+    // Written from the nav stream (before the match dedup) and read only by the route tick's diagnostic
+    // line — the marker's own off-route handling is the projection window, not this flag. Kept because
+    // it is the host's own "the rider has left the line" signal, which the log wants alongside ours.
     @Volatile
     private var lastRejoinActive: Boolean = false
 
@@ -1514,10 +1514,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     currentCoroutineContext().ensureActive()
                     if (matchStillOwns(mine, lastMatchedPolyline, generation, matchGeneration)) {
                         routeMode = RouteMode(path, mine, state.name, matched, routeGhost, state.routeDistance, pacePatch, gradePace, agg)
-                        // Diagnostic for the scale question: the Karoo's routeDistance (the scale that
-                        // DISTANCE_TO_DESTINATION is measured against) vs the decoded-polyline length (the
-                        // scale segments + the ghost curve live on). A large delta means routeDist needs
-                        // rescaling before it's compared to segment bounds / fed to the ghost.
+                        // Diagnostic for the scale question: the Karoo's own routeDistance vs the
+                        // decoded-polyline length (the scale segments + the ghost curve live on). A large
+                        // delta means the host and our polyline disagree about how long the route is,
+                        // which would shift every segment bound and the ghost curve against each other.
                         Timber.d(
                             "route mode ON: ${matched.size} segment(s), routeGhost=${routeGhost != null} " +
                                 "on '${state.name}' karooLen=${"%.0f".format(state.routeDistance)} " +
@@ -2016,12 +2016,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             }
                         } else if (coastingS < GPS_ALERT_S * 0.5) {
                             // Re-arm with HYSTERESIS once the loss is comfortably over — NOT on an exact
-                            // `coastingS == 0.0`. In route mode coastingS is time-since-last-dest-change
-                            // while moving, which after recovery sits at ~0–1 s but is essentially never
-                            // bit-exactly 0.0 (only a full stop forces the 0.0 `!moving` branch). With the
-                            // old `== 0.0` the alert re-armed only if the rider STOPPED, so a second GPS
-                            // loss later in a non-stop ride never alerted. Half the fire threshold gives a
-                            // clean gap (fire ≥60 s, re-arm <30 s) with no flapping at the boundary.
+                            // `coastingS == 0.0`. CoastingEstimator zeroes coastingSeconds only on a clean
+                            // LIVE tick, and a rider who recovers while still moving can sit at a small
+                            // non-zero value instead. With the old `== 0.0` the alert re-armed only on
+                            // exactly that zero, so a second GPS loss later in the same ride could never
+                            // alert. Half the fire threshold gives a clean gap (fire ≥60 s, re-arm <30 s)
+                            // with no flapping at the boundary.
+                            // (The previous wording justified this via route mode's time-since-last-dest-
+                            // change; that state, and route mode's path into this function, are both gone.)
                             gpsAlertFired = false
                         }
                         return coastingS >= GPS_GIVEUP_S
