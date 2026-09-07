@@ -114,12 +114,11 @@ import timber.log.Timber
  *      * **① Ghost Pace mode** (default, when no route is loaded or racing is disabled):
  *        feeds the DISTANCE stream through a [CoastingEstimator] (dead-reckoning during brief GPS
  *        loss) + a cached [GhostPaceSource] curve into [GapCalculator].
- *      * **② Route mode** (when a navigated route is loaded and `raceEnabled`): takes the rider's
- *        route position from the Karoo's own map-matched DISTANCE_TO_DESTINATION (routeDist =
- *        routeLen − remaining) and computes the gap against the
- *        continuous whole-route ghost (recorded stretches stitched with VP-pace fills). Publishes
- *        which recorded [LiveSegment] is currently active to [SegmentInfoHolder] — used only to show
- *        the data fields' SEG (racing your past self) vs GP (fixed-pace Ghost Pace) tag.
+ *      * **② Route mode** (when a navigated route is loaded and `raceEnabled`): the gap NUMBER comes
+ *        from [GhostIntegrator] (route-agnostic, so it cannot teleport); the rider's ROUTE position —
+ *        which only places the map MARKER — is projected from the GPS fix onto the loaded polyline.
+ *        Publishes which recorded [LiveSegment] is currently active to [SegmentInfoHolder] — used
+ *        only to show the data fields' SEG (racing your past self) vs GP (fixed-pace Ghost Pace) tag.
  *  - Subscribes to the navigation state. On `NavigatingRoute` (route mode ②), it decodes the route
  *    polyline, loads candidate recorded tracks, and runs [SegmentMatcher] to build the live
  *    segments. On `Idle`/`NavigatingToDestination`, route mode is cleared and the tick falls back
@@ -405,7 +404,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // stopTick/stopTickAndJoin) so GPS fixes aren't consumed when the recorder/projector don't need
     // them. Owned by [scope].
     private var locationJob: Job? = null
-    private var destJob: Job? = null
     // RideState + navigation-state stream collectors, owned by [scope]. karooSystem.connect{}'s
     // callback is NOT one-shot — it re-fires on every (re)bind of the host service. Tracking these
     // lets onConnected() cancel the previous collectors before relaunching, so a reconnect can't
@@ -496,33 +494,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // confirmed from a field log; normalisation, if any, belongs in the collector below and nowhere else.
     @Volatile private var gradeUnitLogged = false
 
-    // The Karoo's own remaining-distance-to-destination (m) on the navigated route, and whether the
-    // rider is on that route. Source of the authoritative route position (routeDist = routeLen −
-    // remaining) used by the ② route tick, replacing the local GPS projection. Written by [destJob]
-    // (a different dispatcher thread than the tick), so @Volatile. NaN/false until the first emission
-    // or while off route / without a fix — the tick then holds ---.
-    @Volatile
-    private var lastDistToDestM: Double = Double.NaN
-    @Volatile
-    private var lastOnRoute: Boolean = false
-    // Monotonic (SystemClock.elapsedRealtime ms) of the last time the route-remaining VALUE actually
-    // changed (not every emission). Interval-only — compare ONLY against elapsedRealtime, never an epoch.
-    // Drives route-position staleness: while moving, if remaining stops changing the route fix is lost
-    // (independent of the whole-ride odometer). 0 until the first change.
-    @Volatile
-    private var lastDestChangeMs: Long = 0L
     // Whether the Karoo is currently offering a REJOIN path (rider off-route, being guided back). When
     // true the route position is not trustworthy even if ON_ROUTE hasn't flipped yet — mirrors how
     // RouteGraph nulls its along-route position whenever rejoinDistance/rejoinPolyline is set. Written
     // from the nav stream (before the match dedup), read on the tick.
     @Volatile
     private var lastRejoinActive: Boolean = false
-    // Latest rejoin-path length (m) from the NavigatingRoute event. When the Karoo is guiding the
-    // rider back, DISTANCE_TO_DESTINATION = rejoin_path + remaining_from_rejoin_point. So the planned
-    // rejoin point on the original route = routeLen − (remaining − rejoinDist). Updated live as the
-    // Karoo re-emits NavigatingRoute with an updated rejoin calculation. NaN when not rejoining.
-    @Volatile
-    private var lastRejoinDistM: Double = Double.NaN
 
     // ── Per-ride/route ANCHOR state — instance fields, NOT tick locals ──────────────────────────────
     // These USED to be locals inside startTick(). A mid-ride host RECONNECT cancels the tick (onConnected)
@@ -966,24 +943,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         gradeJob = null
         lastGradePct = null
         lastGradeMs = 0L
-        // destJob (route-progress) is wired to the dead binding for the SAME reason as tick/location, so
-        // cancel it too — otherwise it silently stops emitting and route mode freezes on `---` for the
-        // rest of the ride. Reset its @Volatile outputs so the rebuilt tick can't read a STALE
-        // lastOnRoute/remaining from the previous binding and latch a bogus D0 on its first tick (the
-        // route-progress fields aren't covered by the combine's drop(1), which only guards DISTANCE).
-        destJob?.cancel()
-        destJob = null
-        lastDistToDestM = Double.NaN
-        lastOnRoute = false
-        lastDestChangeMs = 0L
-        // lastRejoinActive is driven by the nav stream (navJob is relaunched below). DISTRUST until that
-        // re-stamps it: routeMode is preserved across reconnect and destJob replays its last on-route
-        // state fast, so a `false` here would briefly say "on route, no rejoin" and could latch a bogus
-        // D0 from a rejoin-relative remaining if the reconnect happened mid-rejoin. `true` holds --- until
-        // the fresh NavigatingRoute confirms the real rejoin state — matching the distrust-default of the
-        // three resets above (NaN / false).
+        // lastRejoinActive is driven by the nav stream (navJob is relaunched below). DISTRUST until a
+        // fresh NavigatingRoute re-stamps it: routeMode is preserved across a reconnect, so a `false`
+        // here would briefly claim "on route, no rejoin" before the host has said anything.
         lastRejoinActive = true
-        lastRejoinDistM = Double.NaN
         rideJob = karooSystem.streamRide().onEach { state ->
             Timber.d("KVP ride state=$state tickActive=${tickJob?.isActive} route=${routeMode != null}")
             when (state) {
@@ -1436,10 +1399,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // Track REJOIN state live (the host re-emits NavigatingRoute as it computes a rejoin, so this
             // updates even though the heavy match below dedups on the polyline). A non-null rejoin means
             // the rider is off-route being guided back → the route position is not trustworthy; the tick
-            // gates on this in addition to ON_ROUTE. Store the rejoin distance so the tick can estimate
-            // the planned rejoin point: routeLen − (remaining − rejoinDist).
+            // reads it. Diagnostic-only today (it annotates the route tick's log line), but it is the
+            // host's own "rider is off the line" signal, so keep it stamped.
             lastRejoinActive = state.rejoinDistance != null || state.rejoinPolyline != null
-            lastRejoinDistM = state.rejoinDistance ?: Double.NaN
             // A route is present → cancel any pending debounced teardown from a prior transient blip.
             // Because lastMatchedPolyline is preserved across a cancelled pending-clear, a blip→same-
             // route sequence dedups below and does NOT re-match.
@@ -1576,7 +1538,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // deferred preview match so startTick() doesn't later replay a dead route.
             pendingNavState = null
             lastRejoinActive = false
-            lastRejoinDistM = Double.NaN
             // Debounce the teardown: the host can emit a transient Idle/NavigatingToDestination blip
             // between NavigatingRoute re-emits. Clearing immediately would null
             // routeMode/lastMatchedPolyline → a needless full re-match (and a one-tick VP/`---` flicker)
@@ -1774,8 +1735,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             lastLocLat = Double.NaN; lastLocLng = Double.NaN
             lastCadenceLogMs = 0L; lastTickDistM = Double.NaN
         }
-        // GPS location consumer — subscribed only while Recording. Feeds the ride RECORDER (the route
-        // position itself now comes from the Karoo, see destJob below). We stream the LOCATION DataType
+        // GPS location consumer — subscribed only while Recording. `lastFix` is the ONE position source
+        // the ride uses: the RECORDER, the historical-pace lookup, and the marker's route projection all
+        // read it (the Karoo's own DISTANCE_TO_DESTINATION stream fed the pre-B2 route position and was
+        // dropped once the projection replaced it). We stream the LOCATION DataType
         // (not streamLocation()) because only the DataType carries LOC_ACCURACY, which we use to keep a
         // cached/default pre-lock fix OUT of the recorded track. lastLat/lastLng are written ONLY for a
         // trusted (accurate) fix. @Volatile (written here, read on the tick).
@@ -1833,25 +1796,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     gradeUnitLogged = true
                     Timber.i("KVP grade sample: raw=%s", v?.toString() ?: "null")
                 }
-            }.launchIn(scope)
-        }
-        // Route-progress consumer — the Karoo's OWN map-matched distance-to-destination + ON_ROUTE
-        // flag. The ② route tick derives the rider's authoritative route position from this (routeDist
-        // = routeLen − remaining), so a loop is unambiguous and a bogus cached fix can't place us.
-        // ON_ROUTE/remaining go absent when off route or without a fix → the tick holds ---.
-        if (destJob?.isActive != true) {
-            destJob = karooSystem.streamDataFlow(DataType.Type.DISTANCE_TO_DESTINATION).onEach { state ->
-                val dp = (state as? StreamState.Streaming)?.dataPoint
-                val newRemaining = dp?.values?.get(DataType.Field.DISTANCE_TO_DESTINATION) ?: Double.NaN
-                // Stamp the change time only on a real (finite, different) value move — so a frozen feed
-                // (GPS lost) stops refreshing it while a moving rider's steadily-decreasing remaining
-                // keeps it fresh. A stationary rider's unchanged remaining is handled by the movement
-                // gate at the read site, not here.
-                if (newRemaining.isFinite() && newRemaining != lastDistToDestM) {
-                    lastDestChangeMs = SystemClock.elapsedRealtime()
-                }
-                lastDistToDestM = newRemaining
-                lastOnRoute = dp?.values?.get(DataType.Field.ON_ROUTE) == 1.0
             }.launchIn(scope)
         }
         // Start the ~5 Hz map loop that interpolates and emits the ghost marker between gap ticks.
@@ -2046,11 +1990,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     if (cfg.autoRecord) {
                         lastFix?.let { recorder.onSample(it.lat, it.lng, distM, elapsedS) }
                     }
-                    // GPS-loss handling, fed the ACTIVE mode's staleness seconds: the whole-ride odometer
-                    // coast in ① VP mode, the route-position staleness (lastDestChangeMs) in ② route mode.
-                    // Sourcing it per-mode keeps the alert in step with the field's estimate mark, since the
-                    // route fix can stall (nav wedged) while the whole-ride odometer keeps climbing, or vice
-                    // versa. Fires the one-shot "GPS lost" alert at GPS_ALERT_S, re-arms when the signal
+                    // GPS-loss handling, fed the whole-ride odometer coast. Only ① VP mode calls it (the
+                    // sole call site is the VP branch below); ② route mode signals a dropout through the
+                    // estimate mark and the marker hold instead of an alert.
+                    // Fires the one-shot "GPS lost" alert at GPS_ALERT_S, re-arms when the signal
                     // recovers (coastingS back to 0), and RETURNS true once the loss is so long
                     // (>= GPS_GIVEUP_S) that we give up and blank. coast.update already ran above so ①'s
                     // machinery stays warm as the fallback.
@@ -2574,7 +2517,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                         "cov=${"%.0f".format(100.0 * integ.matchedM / (integ.matchedM + integ.filledM).coerceAtLeast(1.0))}% " +
                                         "riderR=${lastGoodRouteDistM?.let { "%.0f".format(it) } ?: "--"} " +
                                         "elapsed=${"%.0f".format(elapsedS)} fresh=$fresh " +
-                                        "onRoute=$lastOnRoute rejoin=$lastRejoinActive " +
+                                        "rejoin=$lastRejoinActive " +
                                         "speed=${speedMs?.let { "%.1f".format(it) } ?: "null"} showMap=${cfg.showGhostOnMap}",
                                 )
                             }
@@ -2666,17 +2609,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // Reset the one-shot ELEVATION_GRADE diagnostic probe so it's reachable on every ride, not just
         // the first one after a process start.
         gradeUnitLogged = false
-        destJob?.cancel()
-        destJob = null
-        // Forget the last GPS fix / route position so the NEXT ride starts genuinely cold: D0 is
-        // computed from the first on-route fix, and carrying a previous ride's last-known values would
-        // let a new ride compute a stale D0 on its first tick.
+        // Forget the last GPS fix so the NEXT ride starts genuinely cold: the marker's route position
+        // is bootstrapped from the first on-route fix, and carrying a previous ride's last-known fix
+        // would let a new ride project from a stale position on its first tick.
         lastFix = null
-        lastDistToDestM = Double.NaN
-        lastOnRoute = false
-        lastDestChangeMs = 0L
         lastRejoinActive = false
-        lastRejoinDistM = Double.NaN
         // onDestroy teardown — also reset the per-ride/route anchor (instance fields now, not tick locals).
         resetRideAnchor()
         // Stop the map loop (the sole ghost emitter) and clear its snapshot. This is the onDestroy path
