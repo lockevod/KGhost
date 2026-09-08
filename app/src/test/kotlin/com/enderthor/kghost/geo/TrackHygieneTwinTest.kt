@@ -7,6 +7,19 @@ import org.junit.Test
 
 class TrackHygieneTwinTest {
 
+    @Test fun `trackMetaOf carries the ingest source through`() {
+        // The same-ride rule keys off TrackMeta.source, but trackMetaOf is the ONLY way production
+        // builds one (TrackStore.tidyGroup and .sweep). A defaulted parameter plus a positional call
+        // once dropped it silently, leaving every production meta RECORDED and the rule dead while all
+        // its unit tests — which construct TrackMeta directly — stayed green.
+        val pts = listOf(TrackPointDto(41.0, 2.0, 0.0, 0.0), TrackPointDto(41.0, 2.01, 800.0, 60.0))
+        Source.entries.forEach { src ->
+            val meta = trackMetaOf(RecordedTrack(id = "t", startedAtEpoch = 1L, points = pts, source = src))
+            assertEquals("trackMetaOf must not drop the source", src, meta.source)
+        }
+    }
+
+
     // A straight west→east path near (41.0, 2.0), ~5 km long (40 × 125 m steps).
     private fun ride(id: String, epoch: Long, lastTimeS: Double, dLat: Double = 0.0, dLng: Double = 0.0): RecordedTrack {
         val pts = (0..40).map { i ->

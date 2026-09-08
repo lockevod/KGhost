@@ -23,6 +23,22 @@ const val TWIN_LENGTH_TOL = 0.10
 /** Max distance between corresponding fingerprint points for "same direction" (absorbs GPS drift). */
 const val FP_TOL_M = 250.0
 
+/** How far apart two tracks of the SAME ride may claim to have started. The two ingest paths begin
+ *  counting at different moments — the live recorder at its first trusted fix, the FIT decoder at the
+ *  Karoo's first positioned record — and a late lock or an auto-pause stretches that to minutes. */
+const val SAME_RIDE_START_WINDOW_MS = 600_000L
+
+/** Relative length agreement for two tracks to be the same ride. The two paths measure slightly
+ *  different distances (wheel odometer vs FIT records); observed spreads were 10-80 m over 3-80 km. */
+const val SAME_RIDE_LENGTH_TOL = 0.01
+
+/** Absolute floor for the above, so a 3 km ride is not held to 30 m. */
+const val SAME_RIDE_LENGTH_FLOOR_M = 100.0
+
+/** Bumped whenever the archiving RULE changes in a way that should re-examine an already-swept
+ *  library. The one-time backlog sweep re-runs once when the stored version is behind this. */
+const val TIDY_RULE_VERSION = 1
+
 /** A track may be chosen "fastest" only if its implied avg speed is in this band (m/s). */
 val MIN_PLAUSIBLE_MS = 0.5 / 3.6     // 0.5 km/h
 val MAX_PLAUSIBLE_MS = 80.0 / 3.6    // 80 km/h
@@ -36,6 +52,13 @@ data class TrackMeta(
     val totalDistanceM: Double,          // max cumulative distanceM (robust to a non-monotonic glitch)
     val totalTimeS: Double?,             // last point's cumulative timeS; null when missing / ≤ 0
     val startedAtEpoch: Long,
+    /** Which ingest path produced this track. The ONLY reliable way to tell "one ride stored twice"
+     *  from "two rides of the same route": a duplicate always arrives once live and once from the
+     *  Karoo's own FIT, whereas two genuine outings — including two laps minutes apart — arrive by
+     *  the SAME path. Without it, start time and length alone would archive a real second lap.
+     *  NOT defaulted on purpose: it was, and trackMetaOf's positional call then silently dropped it,
+     *  leaving every production TrackMeta as RECORDED and the whole same-ride rule dead. */
+    val source: Source,
 )
 
 /** Build a [TrackMeta] from a stored track. Pure (geohash math only, no filesystem). */
@@ -49,7 +72,10 @@ fun trackMetaOf(track: RecordedTrack): TrackMeta {
     // distanceM drop below mid-track values, which would collapse all fingerprint fractions to one point.
     val totalDist = pts.maxOfOrNull { it.distanceM } ?: 0.0
     val totalTime = pts.lastOrNull()?.timeS?.takeIf { it.isFinite() && it > 0.0 }
-    return TrackMeta(track.id, fine, dilated, fingerprintOf(pts, totalDist), totalDist, totalTime, track.startedAtEpoch)
+    return TrackMeta(
+        track.id, fine, dilated, fingerprintOf(pts, totalDist), totalDist, totalTime,
+        track.startedAtEpoch, track.source,
+    )
 }
 
 /** The track's lat/lng at 25/50/75 % of its distance. Empty when the path is too short. */
@@ -100,18 +126,89 @@ fun selectArchivable(tracks: List<TrackMeta>): List<String> {
     if (tracks.size < 2) return emptyList()
     val result = ArrayList<String>()
     for (group in groupTwins(tracks)) {
-        if (group.size <= 3) continue // every member survives → nothing to archive
-        val fastest = group.filter { it.isPlausible() }.minByOrNull { it.totalTimeS!! }
-        val twoLatest = group.sortedByDescending { it.startedAtEpoch }.take(2)
+        // ONE RIDE STORED TWICE is not history, and the group-size rule below cannot see the difference.
+        // A ride enters the library by two independent paths — the live recording, and a later scan of
+        // the Karoo's own FIT — and the sourceKey meant to collapse them is minute-of-start plus distance
+        // bucketed to 10 m, which is finer than the jitter between the two paths. Measured on a real
+        // library: of 8 rides stored by both paths, ZERO shared a key (they drifted by 10-80 m, or by
+        // 1-3 minutes). Those pairs form a twin group of 2, which the `<= 3` rule then protects forever,
+        // so the ride is counted twice in every average for that route. Resolve them here, at any group
+        // size, BEFORE the "keep at least three" rule gets to speak.
+        val duplicates = sameRideLosers(group)
+        if (duplicates.isNotEmpty()) result.addAll(duplicates)
+        val distinctRides = group.filterNot { it.id in duplicates }
+        if (distinctRides.size <= 3) continue // every member survives → nothing to archive
+        val fastest = distinctRides.filter { it.isPlausible() }.minByOrNull { it.totalTimeS!! }
+        val twoLatest = distinctRides.sortedByDescending { it.startedAtEpoch }.take(2)
         val survivors = (listOfNotNull(fastest) + twoLatest).toSet()
         val survivorDilated = HashSet<String>()
         survivors.forEach { survivorDilated.addAll(it.dilatedCells) }
-        for (loser in group) {
+        for (loser in distinctRides) {
             if (loser in survivors) continue
             if (loser.fineCells.all { it in survivorDilated }) result.add(loser.id)
         }
     }
     return result
+}
+
+/**
+ * Within one twin group, the ids that are the SAME RIDE as another member and lose the tie.
+ *
+ * Twin-ness is geometric, so it cannot tell two rides of a route from one ride stored twice; start
+ * time and length can. Two members are the same ride when they start within [SAME_RIDE_START_WINDOW_MS]
+ * of each other AND their lengths agree to within [SAME_RIDE_LENGTH_TOL] (with a [SAME_RIDE_LENGTH_FLOOR_M]
+ * floor so a short ride is not held to a metre). The window is wide enough for the observed skew between
+ * the two ingest paths (up to ~3 min when the GPS locks late or the ride auto-pauses) and far short of
+ * the gap between two genuine outings.
+ *
+ * The survivor is the LONGEST track — the most complete record of that ride — then the earliest start,
+ * then the id, so the choice is deterministic and independent of scan order. A loser is only archived
+ * when the survivor already covers every one of its fine cells, the same coverage guard the size rule
+ * below uses: if the two disagree about where the rider actually went, both are kept.
+ */
+private fun sameRideLosers(group: List<TrackMeta>): Set<String> {
+    if (group.size < 2) return emptySet()
+    val recorded = group.filter { it.source == Source.RECORDED }.sortedBy { it.id }
+    if (recorded.isEmpty()) return emptySet()
+    val losers = HashSet<String>()
+    val claimed = HashSet<String>()
+    for (survivor in recorded) {
+        // The LIVE recording always survives. It is the half that cannot be regenerated: a file-sourced
+        // track is re-created from its FIT on the next scan, and archive/ has no restore action, so
+        // choosing by "whichever measured longer" could archive the only copy of a ride. It also dodges
+        // a trap: totalDistanceM is the field most corrupted by the coasting/dropout failure this rule
+        // cleans up, so "longest" can systematically prefer the less truthful track.
+        val candidate = group
+            .filter { it.id !in claimed && isSameRide(survivor, it) }
+            // NEAREST START, not list order. Pairing greedily by length let a RECORDED lap claim a
+            // DIFFERENT lap's FIT — hill repeats are all "the same length" under the 100 m floor — and
+            // archive a genuinely distinct ride.
+            .minByOrNull { kotlin.math.abs(it.startedAtEpoch - survivor.startedAtEpoch) } ?: continue
+        // Coverage guard: never drop a track that reaches ground the survivor does not.
+        if (candidate.fineCells.all { it in survivor.dilatedCells }) {
+            losers.add(candidate.id)
+            claimed.add(candidate.id)
+        }
+    }
+    return losers
+}
+
+private fun isSameRide(a: TrackMeta, b: TrackMeta): Boolean {
+    // The pair must be exactly one live recording and one scan of THIS device's own FitFiles. That is
+    // the load-bearing condition, not a refinement of the other two:
+    //  - same-path pairs are real history — two laps of a short circuit start minutes apart with
+    //    near-identical length, and under the 100 m floor they are always "the same length";
+    //  - FIT_IMPORT is excluded on purpose. A FIT the rider dropped in the import directory can be
+    //    ANOTHER rider's copy of the same group ride: same route, same hour, same distance, and
+    //    indistinguishable from your own by geometry alone. Archiving that destroys a distinct
+    //    activity. FITFILES_SCAN comes from the Karoo's own recordings, so it cannot be someone else's.
+    //  - GPX_IMPORT likewise carries no promise of being this device's own ride.
+    if (setOf(a.source, b.source) != setOf(Source.RECORDED, Source.FITFILES_SCAN)) return false
+    if (kotlin.math.abs(a.startedAtEpoch - b.startedAtEpoch) > SAME_RIDE_START_WINDOW_MS) return false
+    val longer = maxOf(a.totalDistanceM, b.totalDistanceM)
+    if (longer <= 0.0) return false
+    val tol = maxOf(SAME_RIDE_LENGTH_FLOOR_M, longer * SAME_RIDE_LENGTH_TOL)
+    return kotlin.math.abs(a.totalDistanceM - b.totalDistanceM) <= tol
 }
 
 private fun TrackMeta.isPlausible(): Boolean {

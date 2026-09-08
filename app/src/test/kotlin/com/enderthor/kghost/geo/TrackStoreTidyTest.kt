@@ -1,6 +1,7 @@
 package com.enderthor.kghost.geo
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -51,7 +52,16 @@ class TrackStoreTidyTest {
     @Test fun `sweep skips a library over the hard cap`() {
         val store = TrackStore(tmp.newFolder("tracks"))
         store.add(ride("a", 1, 600.0))
-        assertEquals(0, store.sweep(maxTracks = 0))   // cap 0 ⇒ skip
+        // null, NOT 0. The one-shot upgrade sweep stamps itself done on the strength of this value, so a
+        // skip that read as "completed, archived 0" would mark done exactly the oversized libraries it
+        // never looked at, consuming their only retry.
+        assertNull("a cap skip is not a completed pass", store.sweep(maxTracks = 0))
         assertEquals(1, store.allTrackIds().size)
+    }
+
+    @Test fun `a completed sweep with nothing to archive returns zero, not null`() {
+        val store = TrackStore(tmp.newFolder("tracks2"))
+        store.add(ride("a", 1, 600.0))
+        assertEquals(0, store.sweep())
     }
 }

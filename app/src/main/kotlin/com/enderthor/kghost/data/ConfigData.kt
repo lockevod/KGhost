@@ -4,7 +4,7 @@ import com.enderthor.kghost.engine.GhostPick
 import kotlinx.serialization.Serializable
 
 /** Current schema version. Bump this and add a branch in [migrateToLatest] when defaults change. */
-const val CONFIG_VERSION = 8
+const val CONFIG_VERSION = 9
 
 /** Default Ghost Pace target speed (12 km/h) used when the user hasn't set one. */
 val DEFAULT_TARGET_SPEED_MS: Double = kmhToMs(12.0)
@@ -107,6 +107,11 @@ data class KGhostConfig(
     val autoTidy: Boolean = true,
     /** Epoch millis when the one-time backlog sweep last ran. 0 = never swept. */
     val tidySweepEpoch: Long = 0L,
+    /** [com.enderthor.kghost.geo.TIDY_RULE_VERSION] the last backlog sweep ran under. A sweep stamped
+     *  under an older rule is re-run ONCE, so a library already swept still gets the benefit of a rule
+     *  that archives something the old one could not — without that, changing the rule only ever helps
+     *  future rides. 0 = swept before rule versioning existed (or never). */
+    val tidySweepRuleVersion: Int = 0,
     /** Number of times the missing-permission in-ride alert has fired (drives the decaying schedule). */
     val permAlertFiredCount: Int = 0,
     /** Wall-clock epoch millis the missing-permission alert last fired. 0 = never. */
@@ -181,5 +186,9 @@ fun KGhostConfig.migrateToLatest(): KGhostConfig {
     // v7 → v8: missing-permission in-ride alert schedule state added; both take Kotlin defaults
     // (0 / 0L = never fired), so existing installs start the decaying reminder fresh — just stamp.
     if (c.version < 8) c = c.copy(version = 8)
+    // v8 → v9: tidySweepRuleVersion added, defaulting to 0. Every existing install is therefore behind
+    // the current rule and re-runs the backlog sweep exactly once, which is the point: the same-ride
+    // duplicate rule has to be able to reach libraries that were already swept under the old one.
+    if (c.version < 9) c = c.copy(version = 9)
     return c
 }

@@ -39,6 +39,7 @@ import com.enderthor.kghost.engine.shouldReseed
 import com.enderthor.kghost.geo.AggregateStore
 import com.enderthor.kghost.geo.atomicWriteText
 import com.enderthor.kghost.geo.BBox
+import com.enderthor.kghost.geo.TIDY_RULE_VERSION
 import com.enderthor.kghost.geo.GradePaceStore
 import com.enderthor.kghost.geo.LatLng
 import com.enderthor.kghost.geo.Polyline
@@ -900,12 +901,33 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 AggregateStore(File(applicationContext.filesDir, AggregateStore.DIR_NAME)).sweep()
             }.onFailure { Timber.w(it, "KVP aggregate sweep failed") }
             val cfg = configManager.loadConfigFlow().first()
-            if (cfg.autoTidy && cfg.tidySweepEpoch == 0L) {
-                val archived = runCatching { trackStore().sweep() }.getOrElse { e ->
-                    Timber.w(e, "KVP tidy: backlog sweep failed"); 0
-                }
-                Timber.i("KVP tidy: backlog sweep archived $archived")
-                configManager.updateConfig { it.copy(tidySweepEpoch = System.currentTimeMillis()) }
+            // Sweep when it has never run OR when the last one ran under an older archiving rule: a
+            // rule that can archive something the previous one could not is useless on an already-swept
+            // library unless it gets one more pass. Re-running a sweep is otherwise a no-op — the
+            // near-duplicates it would find are already archived.
+            val ruleStale = cfg.tidySweepRuleVersion < TIDY_RULE_VERSION
+            if (cfg.autoTidy && (cfg.tidySweepEpoch == 0L || ruleStale)) {
+                // Stamp ONLY a sweep that completed. runCatching swallows Throwable, so an
+                // OutOfMemoryError on a big library would otherwise be recorded as "swept, archived 0"
+                // and never retried — marking done exactly the libraries that most need the pass.
+                runCatching { trackStore().sweep() }
+                    .onSuccess { archived ->
+                        // null = skipped over the track cap. Not a completed pass, so it must NOT be
+                        // stamped: the library that was too big to examine is exactly the one that needs
+                        // the retry.
+                        if (archived == null) {
+                            Timber.i("KVP tidy: backlog sweep skipped (over cap) — not stamped, will retry")
+                            return@onSuccess
+                        }
+                        Timber.i(
+                            "KVP tidy: backlog sweep archived $archived " +
+                                "(reason=${if (cfg.tidySweepEpoch == 0L) "never swept" else "rule v${cfg.tidySweepRuleVersion} -> v$TIDY_RULE_VERSION"})",
+                        )
+                        configManager.updateConfig {
+                            it.copy(tidySweepEpoch = System.currentTimeMillis(), tidySweepRuleVersion = TIDY_RULE_VERSION)
+                        }
+                    }
+                    .onFailure { Timber.w(it, "KVP tidy: backlog sweep failed — not stamped, will retry") }
             }
         }
         karooSystem.connect { connected -> if (connected) onConnected() }

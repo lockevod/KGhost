@@ -340,3 +340,64 @@ los cubre todos, y además elimina de raíz el problema de que dos tuberías ind
 coincidir en un origen que ninguna puede observar de la otra.
 
 Esto refuerza el revert: el arreglo correcto no era realinear ②, sino decidir si ② debe almacenar.
+
+## Deduplicación por limpieza, en vez de por huella (2026-09-08)
+
+Verificado que la huella `sourceKey` nunca casa entre las dos rutas de ingesta, el arreglo NO es
+afinar la huella: es que el mecanismo de limpieza —que ya detecta gemelos por geometría y funciona,
+179 tracks archivados— sepa distinguir **"una salida guardada dos veces" de "dos salidas de la misma
+ruta"**. La regla `if (group.size <= 3) continue` lo desactivaba justo en la pareja.
+
+**Parte 1.** `selectArchivable` resuelve los duplicados antes de esa regla y a cualquier tamaño de
+grupo. Condiciones, en orden de importancia:
+
+1. La pareja debe ser exactamente **una grabación en vivo y un escaneo de los FitFiles del propio
+   aparato**. `FIT_IMPORT` y `GPX_IMPORT` quedan fuera a propósito: un FIT que el ciclista deja en la
+   carpeta de importación puede ser de **otro ciclista de la misma salida en grupo** — misma ruta,
+   misma hora, misma distancia, indistinguible por geometría. Archivar eso destruye una actividad
+   distinta.
+2. Inicio dentro de 10 min y longitud dentro del 1 % (suelo de 100 m).
+3. La guarda de cobertura que ya existía: si el candidato pisa terreno que el superviviente no cubre,
+   se conservan los dos.
+
+**Sobrevive siempre la grabación en vivo**, no "la más larga". Es la mitad que no se puede regenerar
+—el track de fichero se recrea del FIT en el siguiente escaneo, y `archive/` no tiene acción de
+restaurar— y además `totalDistanceM` es precisamente el campo que corrompe el fallo de
+coasting/dropout que esto limpia, así que "la más larga" puede preferir sistemáticamente la menos
+veraz. El emparejamiento es por **inicio más cercano**: por longitud, una vuelta podía reclamar el FIT
+de OTRA vuelta (bajo el suelo de 100 m todas las repeticiones "miden lo mismo") y archivar una salida
+genuina.
+
+**Parte 2.** Campo `tidySweepRuleVersion` (config v8 → v9): el barrido de biblioteca vuelve a correr
+UNA vez cuando `TIDY_RULE_VERSION` avanza. Sin esto la parte 1 sólo serviría para salidas futuras —
+el barrido se ejecuta una sola vez en la vida de la instalación y nada salvo la recuperación por
+corrupción lo reactivaba. `sweep()` devuelve ahora `Int?`: **null = saltado** por exceder el tope de
+2000 tracks, y sólo se estampa un barrido **completado**. Antes, un salto por tope o un OOM se leían
+como "hecho, archivados 0" y consumían el único reintento — justo en las bibliotecas que más lo
+necesitan.
+
+### Lo que encontraron las dos revisiones, todo mío
+
+- **CRÍTICO, hallado por las dos por separado: la regla era código muerto.** `trackMetaOf` pasaba 7
+  argumentos posicionales a un constructor de 8, así que `source` tomaba su valor por defecto y
+  `isSameRide` devolvía siempre `false`. Los cinco tests pasaban porque construyen `TrackMeta`
+  directamente. Se habría desplegado un barrido de biblioteca que no archiva nada, con un log
+  `archived 0` que parece confirmación. `source` es ahora **obligatorio** —el compilador cazó
+  inmediatamente el helper de tests— y hay un test que recorre la cadena real
+  `RecordedTrack → trackMetaOf → selectArchivable`.
+- Causa: en esa edición concreta faltó la aserción sobre el reemplazo, que sí estaba en las demás.
+- El falso positivo de la salida en grupo (Codex), cerrado restringiendo a `FITFILES_SCAN`.
+- "La más larga sobrevive" y el emparejamiento voraz, corregidos como arriba.
+- Los tests no fijaban **ninguna** de las tres constantes: se podían poner la ventana a 12 h o la
+  tolerancia a 0 y seguían verdes. Ahora hay límites por dentro y por fuera de las tres.
+
+**Aceptado y no corregido:** el barrido versionado corre en `onCreate`, sin puerta de RideState. Con
+204 tracks tarda un instante; el peor caso lo acota el tope de 2000, que ahora además se salta sin
+estamparse. `tidyLock` sólo lo disputa el tidy de FIN de salida, e `indexLock` se toma únicamente al
+archivar, al final. Restructurarlo para esperar a Idle requiere la conexión con el Karoo, que en ese
+punto no existe.
+
+**Validación sobre la biblioteca real**: archiva exactamente los 7 duplicados conocidos, conservando
+siempre la grabación en vivo, con cero falsos positivos. 613 tests, 0 fallos, lint limpio. Cinco
+mutantes verificados —clave por `buffer.last()`, propagación de `source`, emparejamiento por orden,
+ventana de 12 h, tolerancia a 0, suelo eliminado— y todos fallan.

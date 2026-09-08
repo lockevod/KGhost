@@ -456,19 +456,22 @@ class TrackStore(private val dir: File) {
     /**
      * One-time backlog pass over the WHOLE active library: stream-build [TrackMeta] for every active
      * track (small peak memory — one [RecordedTrack] parsed at a time), run [selectArchivable] over all
-     * (group-correct), [archive] the result. Skips (returns 0) when the library exceeds [maxTracks]
-     * (a degenerate library; ride-end [tidyGroup] still cleans new rides). Serialized by [tidyLock].
+     * (group-correct), [archive] the result. Serialized by [tidyLock].
+     *
+     * Returns the number of tracks actually MOVED, or **null when the pass was skipped** because the
+     * library exceeds [maxTracks] (a degenerate library; ride-end [tidyGroup] still cleans new rides).
+     * The caller must be able to tell those apart: a skip that reads as "completed, archived 0" would
+     * let the one-shot upgrade sweep stamp itself done on exactly the libraries it never examined.
      */
-    fun sweep(maxTracks: Int = sweepMaxDefault): Int = synchronized(tidyLock) {
+    fun sweep(maxTracks: Int = sweepMaxDefault): Int? = synchronized(tidyLock) {
         val ids = allTrackIds()
         if (ids.size > maxTracks) {
             Timber.i("KVP tidy: sweep skipped (%d tracks > cap %d)", ids.size, maxTracks)
-            return@synchronized 0
+            return@synchronized null
         }
         val metas = ids.mapNotNull { id -> loadTrack(id)?.let { trackMetaOf(it) } }
-        val toArchive = selectArchivable(metas)
-        archive(toArchive)
-        toArchive.size
+        // archive()'s return, not toArchive.size: report what moved, not what we intended to move.
+        archive(selectArchivable(metas))
     }
 
     /**
