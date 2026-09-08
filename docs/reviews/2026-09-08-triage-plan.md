@@ -227,3 +227,75 @@ Una pasada hostil de Claude y una de Codex sobre el cambio de identidad/geometr�
 
 Los tres mutantes (clave por `buffer.last()`, decimador compartido, coordenada obsoleta alimentada)
 **fallan** con los tests nuevos. 599 tests, 0 fallos, lint limpio.
+
+## Estado tras la tercera ronda (2026-09-08)
+
+### #1 pico raw-LIVE — CERRADO por improbabilidad, con la cota medida
+
+Además de los 578 episodios (todos COASTING, 70 m totales, máx 11 m), se acotó el punto ciego:
+el log de tick sale cada ~3 s (throttle 2500 ms; media medida 3,0 s, máx 4 s) y a lo largo de dos
+salidas (~90 km, ~5.800 intervalos) el **paso positivo máximo del odómetro fue 42 m** (septiembre) y
+**41 m** (agosto) — que a 3 s son 14 m/s, o sea una bajada normal, no un pico. El retroceso máximo
+fue 27 m, ~2,8 s de ventaja aunque fuera del tipo dañino.
+
+Queda el punto ciego formal: un pico que aparezca y se resuelva dentro de una misma ventana de 3 s no
+se vería. Pero si ocurrieran con regularidad, alguno habría caído a caballo de un límite de log; en
+5.800 intervalos, ninguno. **Cerrado por improbabilidad, no por prueba de ausencia.** Si alguna vez se
+quiere certeza, el camino es un contador sin throttling de paso-positivo-máximo y retroceso bajo LIVE.
+
+### #2 decode transitorio sin cambio de mtime — ANOTADO para el futuro
+
+`FitDecoder` envuelve la lectura en `runCatching`, así que agotar descriptores o un error de
+almacenamiento pasajero devuelve null **sin tocar el mtime**; si un fichero más nuevo se importa bien,
+`lastScan` lo adelanta y ese FIT queda fuera de todo escaneo `onlyNew` posterior.
+
+Impacto: **una** salida ausente del historial. Recuperable con un rescan completo (`rebuildAll`), que
+no aplica el filtro de mtime. Probabilidad baja y con salida manual, por eso no se aborda ahora.
+
+Arreglo cuando se toque el importador: que `DecodedOrFail.Failed` lleve el fichero y una clasificación
+transitorio/determinista — ledgerear o poner en cuarentena los corruptos (null determinista) y
+reintentar los pasajeros con backoff independiente del mtime. El sitio es `HistoryImporter.decodeOne`,
+y el `syncLastScan` actual ya tiene el gancho: bastaría alimentar `minFailedLastModified` también con
+los fallos clasificados como transitorios.
+
+### #3 paridad de identidad ② / ③ — INTENTADO Y REVERTIDO. No es arreglable desde ②
+
+Eran **dos** desajustes, no uno. ③ (`FitDecoder.buildTrack`) indexa por `firstEpochMs` — el timestamp
+del primer registro POSICIONADO — y por distancia rebasada a ese registro. ② indexaba por
+`recordingStartedEpoch` y odómetro ABSOLUTO.
+
+Se implementó alinear ② al dominio de ③: capturar el odómetro y el elapsed de la primera muestra
+posicionada e indexar desde ahí. **Las dos revisiones adversariales dijeron no-ship, y tenían razón.**
+
+**La mitad TEMPORAL era una regresión estricta.** El origen de ③ es el primer registro posicionado que
+escribe el Karoo, que con GPS fijado cae prácticamente en el arranque. La primera muestra posicionada
+de ② llega 1-3 s más tarde: `locationJob` se suscribe dentro de `startTick`, y el tick hace
+`sample(1000)` y `drop(1)`. Sumar esa latencia **aleja** a ② de ③. Simulado sobre 20.000 salidas
+ordinarias: antes 100 % de dedup, después 96,8 % — 623 salidas que funcionaban se rompían y **ninguna**
+mejoraba. Y ni siquiera arreglaba su caso motivador: arrancar sin lock dispara el autopause,
+`ELAPSED_TIME` se congela, y `startedAtEpoch + elapsed` deja de ser reloj de pared — 0 % igual que antes.
+
+**La mitad de DISTANCIA también era regresión**, aunque la primera pasada la dio por buena. Si el
+ciclista ya rueda al pulsar Start, el FIT tiene su primer registro en d=0 mientras la primera muestra
+de ② cae en d=20: restar esos 20 m produce `:98` donde ③ dice `:100`. Sólo era inocua bajo el supuesto
+de que la bici está parada al arrancar.
+
+**La raíz, en la que coinciden las dos revisiones:** ② y ③ observan **eventos distintos con desfase no
+acotado**. ③ acepta el primer registro con cualquier posición; ② exige `acc <= GPS_GOOD_ACCURACY_M`
+sobre un stream suscrito dentro de `startTick` y muestreado a 1 Hz. No existe evento común ni cota
+superior. **Ningún rebase dentro de `TrackRecorder` cierra eso**, así que el enfoque estaba equivocado
+de raíz, no mal implementado.
+
+Además, aunque funcionara, **no repararía las bibliotecas ya instaladas**: `recomputeSourceKeys` lee el
+campo `sourceKey` almacenado y nunca lo re-deriva de los puntos, y `dropSourceKeys` excluye los
+RECORDED a propósito. Justo la población que el cambio pretendía arreglar seguiría sin curarse.
+
+Y un hallazgo que sobrevive al revert, **preexistente y mayor que el que se intentaba arreglar**: ②
+alimenta su decimador de identidad con muestras sin posición y ③ nunca las ve, así que los enrejados
+se re-anclan distinto tras un hueco. Simulado sobre salidas idénticas con orígenes idénticos y sin
+relación con este diff: **las claves difieren en el 57 % de las salidas con un dropout**. La premisa
+"una clave, dos rutas" ya es falsa para cualquier salida con pérdida de GPS.
+
+**Revertido.** Los dos caminos reales, si algún día se aborda, los nombran las dos revisiones:
+(a) hacer de ③ la única fuente — no almacenar el track en vivo cuando su propio FIT va a escanearse —
+o (b) hacer la clave tolerante a un bucket adyacente. Ambos son decisiones de producto, no parches.
