@@ -157,6 +157,39 @@ class HistoryImporter(
         val chunkPending = ArrayList<PendingMark>(FLUSH_EVERY)
         // L-F2: highest lastModified among files whose decoded tracks have been FLUSHED so far.
         var maxFlushedLastModified = Long.MIN_VALUE
+        // Lowest lastModified among files whose track DECODED fine but could not be WRITTEN. The mtime
+        // filter at the top of import() runs BEFORE the ledger partition, so letting lastScan pass one of
+        // these would drop it from every future onlyNew scan — permanently, and with no ledger entry to
+        // explain why. A store failure is by definition transient IO (disk full, IO error), so the retry
+        // this buys will eventually succeed.
+        //
+        // DECODE failures deliberately do NOT clamp, and this is a KNOWN, ACCEPTED GAP rather than a proof.
+        // `Failed` conflates two things: a null decode from a corrupt file, which is DETERMINISTIC and —
+        // since Failed is never ledgered — would be re-listed and re-DECODED on every import forever if it
+        // clamped; and a genuinely transient failure. Some transient cases self-heal (a file still being
+        // written gets a fresh mtime when the write completes, putting it back above any watermark), but
+        // NOT all: FitDecoder wraps its read in runCatching, so descriptor exhaustion or a passing storage
+        // error also returns null with the file's bytes and mtime untouched, and a newer successful file
+        // can then carry lastScan past it for good. Closing that needs Failed to carry the file plus a
+        // transient/deterministic classification — see docs/reviews/2026-09-08-triage-plan.md. Clamping on
+        // every decode failure is NOT the fix: it trades a rare loss for a guaranteed permanent re-decode.
+        // Invalid files stay excluded for the original reason — deterministic and already ledgered.
+        var minFailedLastModified = Long.MAX_VALUE
+
+        // Reconcile the scan watermark: forward past everything flushed, but never past the oldest
+        // file that failed transiently this run.
+        suspend fun syncLastScan() {
+            val current = lastScanProvider()
+            val advanced = maxOf(current, maxFlushedLastModified)
+            // Clamp BELOW the oldest unwritten file — and lower an already-advanced watermark if that
+            // failure surfaced after the flush that raised it (decode results arrive out of mtime order).
+            // Lowering only costs a directory listing plus ledger lookups next run: every file it re-lists
+            // other than the failed one is already ledgered, so none of them reach decode.
+            val target =
+                if (minFailedLastModified == Long.MAX_VALUE) advanced
+                else minOf(advanced, minFailedLastModified - 1)
+            if (target != current) lastScanSetter(target)
+        }
 
         // Flush the current chunk into the store, fold its counts into the running totals, mark the
         // flushed files' ledger entries, advance lastScan past them (success-only), and clear the
@@ -168,11 +201,14 @@ class HistoryImporter(
         suspend fun flushChunk() {
             if (chunk.isEmpty()) return
             val added = sink.addAll(chunk)
+            // Tracks the sink could not WRITE. They were neither stored nor deduped, so ledgering them
+            // or letting lastScan pass them would lose the ride with no way to retry it — the exact
+            // failure the discarded atomicWriteText Boolean used to hide.
+            val storeFailed = sink.lastFailedIds
             imported += added
             enriched += sink.lastEnrichedCount
-            skippedDuplicates += (chunk.size - added)
-            val chunkMax = chunkLastModified.max()
-            if (chunkMax > maxFlushedLastModified) maxFlushedLastModified = chunkMax
+            skippedDuplicates += (chunk.size - added - storeFailed.size)
+            failed += storeFailed.size
             // Mark the ledger for exactly the files whose tracks were just persisted above — NOT at
             // buffer time — so a cancel before this point leaves those files unmarked and therefore
             // re-importable on the next run (ledger.save() in the finally only persists marks already
@@ -182,10 +218,24 @@ class HistoryImporter(
             // ledger (marked here) stay consistent with each other at the cancel point — only lastScan
             // itself may lag by one chunk, which is harmless (a re-run just re-decodes+skips those
             // already-ledgered files instead of re-storing them).
-            chunkPending.forEach { ledger.mark(ledgerMap, it.file, it.size, it.lastModified) }
+            // `chunk`, `chunkLastModified` and `chunkPending` are index-parallel by construction (the
+            // Decoded branch appends all three together, flushChunk clears all three together). The
+            // outcome itself is looked up by TRACK ID, which is derived from the ride's first timestamp
+            // — so the same ride present in both FitFiles/ and import/ yields two entries with one id and
+            // a failure on either marks both. Over-conservative, never corrupting: the survivor is simply
+            // re-decoded next run and deduped then.
+            chunk.forEachIndexed { i, t ->
+                if (t.id in storeFailed) {
+                    if (chunkLastModified[i] < minFailedLastModified) minFailedLastModified = chunkLastModified[i]
+                } else {
+                    if (chunkLastModified[i] > maxFlushedLastModified) maxFlushedLastModified = chunkLastModified[i]
+                    val pm = chunkPending[i]
+                    ledger.mark(ledgerMap, pm.file, pm.size, pm.lastModified)
+                }
+            }
             // L-F2: advance per successful flush so a cancel after some flushes still leaves lastScan
             // correctly past them (re-run with onlyNew won't reprocess flushed files).
-            if (maxFlushedLastModified > lastScanProvider()) lastScanSetter(maxFlushedLastModified)
+            syncLastScan()
             chunk.clear()
             chunkLastModified.clear()
             chunkPending.clear()
@@ -316,6 +366,9 @@ class HistoryImporter(
 
                 // --- STORE (final flush of the trailing partial chunk) ---
                 flushChunk()
+                // A pure-failure run never flushes, so flushChunk's syncLastScan never ran: reconcile
+                // once here so an old failed file is not left behind a watermark set by an earlier run.
+                syncLastScan()
             }
         } finally {
             // Persist the in-memory index/sourcekeys ONCE — on normal completion AND on a Cancel, so

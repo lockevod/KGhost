@@ -181,7 +181,10 @@ class TrackStore(private val dir: File) {
                 return false
             }
 
-            save(track)
+            // A failed write is NOT a store: returning true here would run the caller's tidyGroup
+            // against a track that is not in the library, and the sourceKeys write below would dedup
+            // every future re-decode of the same ride away.
+            if (!save(track)) return false
 
             // Incomplete = the recompute could not enumerate the library (see recomputeSourceKeys).
             // Skip the write rather than persist a set that could be missing keys; this track's own
@@ -271,7 +274,13 @@ class TrackStore(private val dir: File) {
                 // re-importable from its FitFiles/GPX source, so a torn one after power loss is recovered
                 // on the next scan; the durability-critical bookkeeping (index + sourcekeys, written once
                 // below) is still fsynced.
-                atomicWriteText(File(dir, t.id + JSON_SUFFIX), jsonForStorage.encodeToString(t), fsync = false)
+                if (!atomicWriteText(File(dir, t.id + JSON_SUFFIX), jsonForStorage.encodeToString(t), fsync = false)) {
+                    // Not stored: skip the index fold, the key and the count. The comment above is about
+                    // a POWER-LOSS tear (recoverable on the next scan because no bookkeeping ran); this
+                    // branch is an IO error that DID return, so the bookkeeping would run and lie.
+                    Timber.w("KVP store: bulk write failed for %s; not counted", t.id)
+                    continue
+                }
                 val cells = index.cellsForPath(t.points.map { LatLng(it.lat, it.lng) })
                 if (cells.isNotEmpty()) index.add(t.id, cells)
                 if (t.sourceKey.isNotEmpty()) known.add(t.sourceKey)
@@ -315,6 +324,13 @@ class TrackStore(private val dir: File) {
         private val known = synchronized(indexLock) { sourceKeys().keys.toMutableSet() }
         var lastEnrichedCount: Int = 0
             private set
+
+        /** Ids from the LAST [addAll] whose `<id>.json` write failed, so the caller can refuse to
+         *  ledger those files or advance its scan watermark past them. Same per-call out-param idiom
+         *  as [lastEnrichedCount]; reset at the top of every [addAll]. */
+        private val failedIds = mutableSetOf<String>()
+        val lastFailedIds: Set<String> get() = failedIds.toSet() // copy: the backing set is cleared per call
+
         private var recordedByKey: Map<String, String>? = null
 
         private fun recordedLookup(): Map<String, String> =
@@ -329,6 +345,7 @@ class TrackStore(private val dir: File) {
          *  batch + against known). */
         fun addAll(tracks: List<RecordedTrack>): Int {
             lastEnrichedCount = 0
+            failedIds.clear()
             if (tracks.isEmpty()) return 0
             var added = 0
             synchronized(indexLock) {
@@ -339,7 +356,14 @@ class TrackStore(private val dir: File) {
                         if (tryUpgradeRecorded(t, recordedLookup())) lastEnrichedCount++
                         continue
                     }
-                    atomicWriteText(File(dir, t.id + JSON_SUFFIX), jsonForStorage.encodeToString(t), fsync = false)
+                    if (!atomicWriteText(File(dir, t.id + JSON_SUFFIX), jsonForStorage.encodeToString(t), fsync = false)) {
+                        // See the legacy addAll: an IO error that RETURNED is not the recoverable
+                        // power-loss tear. Report the id so the importer neither ledgers this file nor
+                        // advances lastScan past it — otherwise the ride is lost with no way to retry.
+                        Timber.w("KVP store: bulk write failed for %s; not counted", t.id)
+                        failedIds.add(t.id)
+                        continue
+                    }
                     val cells = additions.cellsForPath(t.points.map { LatLng(it.lat, it.lng) })
                     if (cells.isNotEmpty()) additions.add(t.id, cells)
                     if (t.sourceKey.isNotEmpty()) known.add(t.sourceKey)
@@ -456,13 +480,19 @@ class TrackStore(private val dir: File) {
      * is still written (so it round-trips) but it is not indexed — it can never be a spatial
      * candidate (same as the old null-bbox case).
      */
-    fun save(track: RecordedTrack) {
+    fun save(track: RecordedTrack): Boolean {
         ensureDir()
 
-        atomicWriteText(File(dir, track.id + JSON_SUFFIX), jsonForStorage.encodeToString(track))
+        // atomicWriteText PRESERVES the previous file on an IO error and reports it ONLY through this
+        // Boolean. Discarding it indexed a track whose `<id>.json` does not exist — see add()/addAll,
+        // where the same discard also keyed it in sourcekeys.json so the dedup skipped it forever.
+        if (!atomicWriteText(File(dir, track.id + JSON_SUFFIX), jsonForStorage.encodeToString(track))) {
+            Timber.w("KVP store: write failed for %s; not indexing it", track.id)
+            return false
+        }
 
         val cells = SpatialIndex(INDEX_PRECISION).cellsForPath(track.points.map { LatLng(it.lat, it.lng) })
-        if (cells.isEmpty()) return
+        if (cells.isEmpty()) return true
         // Read-modify-write of the shared index must be atomic against concurrent saves/loads.
         synchronized(indexLock) {
             // Build on the MIGRATED snapshot, not the raw one: readPathCellSnapshot() performs the
@@ -472,6 +502,7 @@ class TrackStore(private val dir: File) {
             val newSnapshot = updatedSnapshot(readPathCellSnapshot(), track.id, cells, INDEX_PRECISION)
             writeSnapshot(newSnapshot)
         }
+        return true
     }
 
     /**
