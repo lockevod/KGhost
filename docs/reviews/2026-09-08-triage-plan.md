@@ -299,3 +299,44 @@ relación con este diff: **las claves difieren en el 57 % de las salidas con un 
 **Revertido.** Los dos caminos reales, si algún día se aborda, los nombran las dos revisiones:
 (a) hacer de ③ la única fuente — no almacenar el track en vivo cuando su propio FIT va a escanearse —
 o (b) hacer la clave tolerante a un bucket adyacente. Ambos son decisiones de producto, no parches.
+
+## El 57 % verificado con la biblioteca real del aparato (2026-09-08)
+
+La cifra del 57 % venía de una simulación. Comprobada contra los 204 tracks vivos y 182 archivados
+del Karoo (`adb pull /sdcard/KGhost/tracks`), el fallo es **real y peor de lo simulado**.
+
+Nota metodológica: un track RECORDED **no lleva campo `source`** en el JSON — kotlinx omite el valor
+por defecto — así que un primer recuento los daba por `None` y concluía "cero grabaciones en vivo".
+Falso. Y los gemelos archivados viven en `tracks/archive`, que hay que mirar aparte.
+
+| | |
+|---|---|
+| Tracks RECORDED vivos (>500 m) | 30 |
+| Con gemelo FIT **también vivo** → doble conteo activo | **7** |
+| Con el gemelo ya archivado por tidy | 1 |
+| Parejas identificadas en total | 8 |
+| **De esas 8, con la misma `sourceKey`** | **0** |
+
+**La clave de deduplicación no ha coincidido ni una sola vez** en este aparato para una salida
+almacenada por ambas rutas. Emparejamiento: mismo inicio ±30 min y longitud dentro del 8 %; los casos
+fuertes son inequívocos (2026-08-19: Δ0 s, 80,7 km en ambas; 2026-05-25: Δ10 s, 40,4 km).
+
+Desglose de por qué fallan — y las dos mitades fallan por igual:
+
+| Salida | | Causa |
+|---|---:|---|
+| 2026-08-19 | 80,7 km | distancia +1 bucket (+10 m) |
+| 2026-05-25 | 40,4 km | distancia **−8 buckets (−80 m)** |
+| 2026-07-12 | 26,1 km | minuto −3 |
+| 2026-07-03 | 25,5 km | minuto −1 |
+| 2026-06-23 | 11,8 km | minuto −2 |
+| 2026-06-24 | 3,4 km | distancia +2 buckets (+20 m) |
+| 2026-06-23 | 5,3 km | minuto +28 y distancia +1 (emparejamiento menos seguro) |
+
+**Consecuencia para las dos opciones de arreglo.** La opción (b), hacer la clave tolerante a un bucket
+adyacente, **sólo cubriría 3 de los 7**: no salva el −80 m ni los desfases de 2 y 3 minutos. La opción
+(a) — que ③ sea la única fuente, no almacenar el track en vivo cuando su propio FIT va a escanearse —
+los cubre todos, y además elimina de raíz el problema de que dos tuberías independientes tengan que
+coincidir en un origen que ninguna puede observar de la otra.
+
+Esto refuerza el revert: el arreglo correcto no era realinear ②, sino decidir si ② debe almacenar.
