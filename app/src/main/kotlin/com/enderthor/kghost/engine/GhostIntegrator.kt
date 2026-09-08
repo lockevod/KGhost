@@ -85,6 +85,30 @@ class GhostIntegrator(
             // to the corrected position and KEEP ghostTime + the accrued lead; accrue nothing this tick.
             // (A true odometer reset = a new activity, which gets a fresh integrator — never reached here.)
             lastRiderDist = riderDist
+            // Re-baselining the odometer alone left the breadcrumbs in the OVER-ESTIMATED frame, so
+            // place() kept interpolating the ghost across ground the rider never covered: gapTimeS could
+            // read AHEAD while gapDistM read BEHIND, on the same field, with fmtTime and fmtDistance
+            // deriving their signs independently. The correction proved those crumbs phantom — drop the
+            // tail that now sits ahead of the corrected odometer.
+            //
+            // TRUNCATE, never shift. A uniform `bcDist[i] += dd` would also move the crumbs laid BEFORE
+            // the blind period, which the correction says nothing about: they were recorded against a
+            // trusted odometer and are still exactly right. ghostTime is untouched either way, so the
+            // accrued lead survives — only the invented ground goes.
+            while (bcDist.isNotEmpty() && bcDist.last() > riderDist) {
+                bcDist.removeAt(bcDist.size - 1); bcTime.removeAt(bcTime.size - 1)
+                bcLat.removeAt(bcLat.size - 1); bcLng.removeAt(bcLng.size - 1)
+            }
+            // A correction big enough to invalidate every crumb still needs an anchor. Stamp it with the
+            // RACE clock, not ghostTime: push() would stamp the accrued lead, and a crumb whose bcTime is
+            // AHEAD of elapsedS pins place() into its `lo == 0` branch for gapTimeS seconds — the marker
+            // frozen at one coordinate while gapDistM silently reports "metres since the glitch" instead
+            // of the lead. Levelling the sole crumb means place() falls through to the live-interpolation
+            // branch on the next tick, and gapDistM reads 0 until real crumbs accumulate: after losing the
+            // whole trail there IS no basis for a distance gap, and refusing to guess is the house rule.
+            if (bcDist.isEmpty()) {
+                bcDist.add(riderDist); bcTime.add(elapsedS); bcLat.add(lat); bcLng.add(lng)
+            }
         }
         prevElapsedS = elapsedS
         gapTimeS = ghostTime - elapsedS

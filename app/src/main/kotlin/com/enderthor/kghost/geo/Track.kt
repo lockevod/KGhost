@@ -41,7 +41,7 @@ fun TrackPointDto.toModel() = TrackPoint(lat, lng, distanceM, timeS, eleM)
 class TrackDecimator(private val minSpacingM: Double = 20.0) {
     private var lastKeptDistanceM: Double? = null
 
-    fun shouldKeep(lat: Double, lng: Double, distanceM: Double): Boolean {
+    fun shouldKeep(distanceM: Double): Boolean {
         val last = lastKeptDistanceM
         if (last == null || distanceM - last >= minSpacingM) {
             lastKeptDistanceM = distanceM

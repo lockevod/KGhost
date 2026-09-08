@@ -78,7 +78,7 @@ internal object Rider {
      *  once 20 m of ride distance has passed. Reproduced here so the test is Android-free. */
     fun decimate(t: RecordedTrack): RecordedTrack {
         val d = TrackDecimator(20.0)
-        return t.copy(points = t.points.filter { d.shouldKeep(it.lat, it.lng, it.distanceM) })
+        return t.copy(points = t.points.filter { d.shouldKeep(it.distanceM) })
     }
 }
 

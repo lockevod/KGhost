@@ -1214,12 +1214,20 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         Timber.d("KVP startMap")
         emitter.setCancellable {
             synchronized(mapLock) {
-                mapEmitter = null
-                lastGhostMarker = null
-                lastGhostEmitMs = 0L
-                lastIconRes = 0
+                // Only tear down if THIS emitter is still the current one. The host can call
+                // startMap(B) before cancelling A (page re-entry), and a bare `mapEmitter = null`
+                // would then blank B — the map stays dark until the next startMap. Identity, not
+                // presence, is what the cancellable is allowed to act on.
+                if (mapEmitter === emitter) {
+                    mapEmitter = null
+                    lastGhostMarker = null
+                    lastGhostEmitMs = 0L
+                    lastIconRes = 0
+                    Timber.d("KVP stopMap (cancellable)")
+                } else {
+                    Timber.d("KVP stopMap (cancellable) for a superseded emitter — current one kept")
+                }
             }
-            Timber.d("KVP stopMap (cancellable)")
         }
     }
 
@@ -1252,46 +1260,71 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // re-assert once the heartbeat window elapses so a host map redraw can't drop it for good.
             // An icon/size change also forces a re-emit so the new drawable applies promptly.
             val force = next != null && ((now - lastGhostEmitMs) >= GHOST_HEARTBEAT_MS || iconChanged)
-            when (val decision = decideMapEmit(lastGhostMarker, next, MARKER_MIN_MOVE_M, force)) {
-                is MapEmit.Show -> {
-                    val m = decision.marker
-                    // Drawable changed (rider switched icon/size mid-ride): hide first so the re-Show
-                    // actually swaps the bitmap instead of just repositioning the old one.
-                    if (iconChanged) em.onNext(HideSymbols(listOf(GHOST_SYMBOL_ID)))
-                    // Rotate all directional icons (arrow, ghost, cyclist) to the route heading.
-                    // DOT is rotationally symmetric so stays at 0°.
-                    val orientation = if (ghostIconRotates(ghostIcon)) m.bearingDeg else 0.0f
-                    em.onNext(
-                        ShowSymbols(
-                            listOf(Symbol.Icon(GHOST_SYMBOL_ID, m.lat, m.lng, iconRes, orientation)),
-                        ),
-                    )
-                    lastGhostMarker = m
-                    lastGhostEmitMs = now
-                    lastIconRes = iconRes
-                    // Log only the interesting Shows (heartbeat re-assert / icon swap), NOT every ~1 Hz
-                    // routine move — a per-tick String.format("%.5f", …) would box+format every second
-                    // for hours, and the arg is built even in release (before the no-op log call).
-                    // Include zoom + size here so an icon-swap caused by a zoom change is self-explanatory
-                    // (answers "is the zoom affecting the ghost?").
-                    if (force || iconChanged) {
-                        Timber.d(
-                            "KVP ghost SHOW force=$force iconChanged=$iconChanged " +
-                                "zoom=${"%.1f".format(currentMapZoom)} size=${ghostSizeForZoom(currentMapZoom)} " +
-                                "lat=${"%.5f".format(m.lat)} lng=${"%.5f".format(m.lng)}",
+            // The host process can die between frames. onNext is a SYNCHRONOUS binder transact
+            // (karoo-ext's IHandler passes flags=0, unlike onError/onComplete which are oneway),
+            // so a DeadObjectException/RemoteException surfaces right here — inside a root
+            // coroutine, and the app installs no CoroutineExceptionHandler anywhere, so letting it
+            // escape kills the process and takes the in-memory ride state with it. Same hazard the
+            // stream field already guards in GapStreamDataType; the map path never got it.
+            runCatching {
+                when (val decision = decideMapEmit(lastGhostMarker, next, MARKER_MIN_MOVE_M, force)) {
+                    is MapEmit.Show -> {
+                        val m = decision.marker
+                        // Drawable changed (rider switched icon/size mid-ride): hide first so the re-Show
+                        // actually swaps the bitmap instead of just repositioning the old one.
+                        if (iconChanged) em.onNext(HideSymbols(listOf(GHOST_SYMBOL_ID)))
+                        // Rotate all directional icons (arrow, ghost, cyclist) to the route heading.
+                        // DOT is rotationally symmetric so stays at 0°.
+                        val orientation = if (ghostIconRotates(ghostIcon)) m.bearingDeg else 0.0f
+                        em.onNext(
+                            ShowSymbols(
+                                listOf(Symbol.Icon(GHOST_SYMBOL_ID, m.lat, m.lng, iconRes, orientation)),
+                            ),
                         )
+                        lastGhostMarker = m
+                        lastGhostEmitMs = now
+                        lastIconRes = iconRes
+                        // Log only the interesting Shows (heartbeat re-assert / icon swap), NOT every ~1 Hz
+                        // routine move — a per-tick String.format("%.5f", …) would box+format every second
+                        // for hours, and the arg is built even in release (before the no-op log call).
+                        // Include zoom + size here so an icon-swap caused by a zoom change is self-explanatory
+                        // (answers "is the zoom affecting the ghost?").
+                        if (force || iconChanged) {
+                            Timber.d(
+                                "KVP ghost SHOW force=$force iconChanged=$iconChanged " +
+                                    "zoom=${"%.1f".format(currentMapZoom)} size=${ghostSizeForZoom(currentMapZoom)} " +
+                                    "lat=${"%.5f".format(m.lat)} lng=${"%.5f".format(m.lng)}",
+                            )
+                        }
                     }
+                    MapEmit.Hide -> {
+                        em.onNext(HideSymbols(listOf(GHOST_SYMBOL_ID)))
+                        lastGhostMarker = null
+                        lastIconRes = 0
+                        // Reset the heartbeat clock so "time since last shown" doesn't carry a stale value
+                        // across a Hide (the next Show forces anyway because lastGhostMarker is null).
+                        lastGhostEmitMs = now
+                        Timber.d("KVP ghost HIDE")
+                    }
+                    MapEmit.None -> {}
                 }
-                MapEmit.Hide -> {
-                    em.onNext(HideSymbols(listOf(GHOST_SYMBOL_ID)))
+            }.onFailure { e ->
+                // Drop the emitter ONLY for a genuinely dead host. Nothing but a host-initiated startMap
+                // ever re-assigns mapEmitter, and startMapLoop reads null as "no map page attached" and
+                // stops publishing — so dropping it on a transient throw (a saturated binder buffer, say)
+                // would blank the ghost for the REST of the ride unless the rider happens to navigate off
+                // the map page and back. Keeping it costs one dropped frame at ~5 Hz, and the state fields
+                // are left untouched so the next frame re-decides and re-emits the same Show/Hide.
+                // Never emitter.onError(e): that is another IPC on the same dead binder.
+                if (e is android.os.DeadObjectException) {
+                    Timber.w(e, "KVP ghost emit failed: host is gone, dropping the map emitter")
+                    mapEmitter = null
                     lastGhostMarker = null
+                    lastGhostEmitMs = 0L
                     lastIconRes = 0
-                    // Reset the heartbeat clock so "time since last shown" doesn't carry a stale value
-                    // across a Hide (the next Show forces anyway because lastGhostMarker is null).
-                    lastGhostEmitMs = now
-                    Timber.d("KVP ghost HIDE")
+                } else {
+                    Timber.w(e, "KVP ghost emit failed; keeping the emitter for the next frame")
                 }
-                MapEmit.None -> {}
             }
         }
     }
@@ -1988,7 +2021,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // is recording (only when autoRecord is on). Skipped until a finite GPS fix has
                     // arrived. The recorder decimates by distance, so a 1 Hz feed is fine.
                     if (cfg.autoRecord) {
-                        lastFix?.let { recorder.onSample(it.lat, it.lng, distM, elapsedS) }
+                        // Feed EVERY tick, position or not. The recorder needs the distance to keep its
+                        // dedup identity aligned with the same ride re-imported from its FIT; what it must
+                        // not be handed is a stale coordinate, which the odometer would otherwise stretch
+                        // into a run of identical points. See TrackRecorder's identity/geometry note.
+                        val fix = lastFix?.takeIf { SystemClock.elapsedRealtime() - it.ms <= GPS_FIX_FRESH_MS }
+                        recorder.onSample(fix?.lat, fix?.lng, distM, elapsedS)
                     }
                     // GPS-loss handling, fed the whole-ride odometer coast. Only ① VP mode calls it (the
                     // sole call site is the VP branch below); ② route mode signals a dropout through the
@@ -2714,9 +2752,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         val started = recordingStartedEpoch
         val track = recorder.build(id = started.toString(), startedAtEpoch = started)
         if (track == null) {
-            // Too few decimated points (a very short / stationary ride) → nothing recorded, so this ride
-            // won't become a future ghost. Logged so "my ride didn't become a ghost" is diagnosable.
-            Timber.i("KVP recording: not saved (too few points to build a track)")
+            // Too few decimated points → nothing recorded, so this ride won't become a future ghost.
+            // Log the DISCRIMINATOR, not just the symptom: since the recorder stopped accepting stale
+            // coordinates, a full-length ride whose fix never became usable lands here too, and
+            // "40 km ridden, 0 points" must not read the same as "stationary".
+            Timber.i(
+                "KVP recording: not saved (too few points) — points=${recorder.size()} " +
+                    "identityDist=${"%.0f".format(recorder.identityDistanceM())}m",
+            )
         } else {
             // add() dedups on sourceKey (first writer wins). false means a same-key ride is already
             // stored — e.g. a FitFiles scan ingested this ride first; nothing to do but note it.
@@ -2737,7 +2780,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             if (archived > 0) Timber.i("KVP tidy: archived $archived near-duplicate(s) of ${track.id}")
                         }
                     } else {
-                        Timber.i("KVP recording: track ${track.id} skipped (sourceKey ${track.sourceKey} already stored)")
+                        // add() now returns false for a FAILED WRITE as well as for a duplicate, so this
+                        // must not assert the reason — save() logs a warning naming the write failure.
+                        Timber.i(
+                            "KVP recording: track ${track.id} not stored — duplicate sourceKey " +
+                                "${track.sourceKey}, or the write failed (see any preceding store warning)",
+                        )
                     }
                 }
             }
