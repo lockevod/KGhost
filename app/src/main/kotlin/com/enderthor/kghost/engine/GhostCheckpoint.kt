@@ -16,6 +16,9 @@ data class GhostCheckpoint(
     val leadS: Double,
     val lastRiderDist: Double,
     val pick: GhostPick,
+    // Retained for persisted-schema compatibility only. Since the neutral-fill change it no longer
+    // influences the accrued gap and no longer gates the resume (see KGhostExtension's paramMatch) —
+    // removing the field would be a persisted-schema change, which isn't worth it for a dead value.
     val vpTimePerM: Double,
     val savedAtEpoch: Long,
     // Stable identity (name + length via routeKeyOf) of the route the lead was accrued on. Restore requires

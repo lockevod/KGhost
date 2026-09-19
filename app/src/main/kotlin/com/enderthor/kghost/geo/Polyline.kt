@@ -78,6 +78,28 @@ class PolylinePath(val points: List<LatLng>) {
     }
     val totalM: Double get() = cumulativeM.last()
 
+    // Per-SEGMENT constants, precomputed once alongside cumulativeM. Both are pure functions of the
+    // polyline (segment i runs points[i] -> points[i + 1]), yet every projection scan below used to
+    // recompute them per segment per call: `cos(toRadians(a.lat))` in all five, plus a whole
+    // `Polyline.bearingDeg` (~10 transcendentals) in the two heading-gated ones. That is what made the
+    // GLOBAL scans expensive — the marker BOOTSTRAP before the first lock and the off-route RECOVERY
+    // both retry on EVERY tick for as long as they fail, so a rider who starts off the line or takes a
+    // long detour paid O(points) trigonometry every second for the whole stretch. Reading them from
+    // here leaves those scans as plain arithmetic. The values are stored, not re-derived, so every
+    // scan returns bit-for-bit what it did before — the differential tests still hold.
+    //
+    // The import-time coverage scan does NOT go through the scans below: it runs
+    // SegmentMatcher -> PointGrid.nearestPerpDistM, and PolylinePath.nearestPerpDistM is now only the
+    // brute-force REFERENCE the differential tests compare against. That is why segMPerDegLng is
+    // internal — PointGrid reads it directly, which is where the import-scale win actually lands.
+    private val segBearingDeg = DoubleArray(points.size - 1) { Polyline.bearingDeg(points[it], points[it + 1]) }
+
+    /** Internal so [PointGrid] — which holds this same path and indexes it with the SAME segment index
+     *  (its `pts` is `path.points` verbatim, unclipped; the clip box only decides which segments get
+     *  binned, never renumbers them) — can read it from its own per-query scan instead of recomputing
+     *  the cosine. That scan is the one that actually runs at import scale. */
+    internal val segMPerDegLng = DoubleArray(points.size - 1) { 111_320.0 * cos(Math.toRadians(points[it].lat)) }
+
     /**
      * Point + heading at cumulative route distance [distanceAlongM] (metres), clamped to
      * `[0, totalM]`. Linearly interpolates the coordinate within the containing segment; the bearing
@@ -96,7 +118,7 @@ class PolylinePath(val points: List<LatLng>) {
         val f = if (segLen > 0.0) ((d - cumulativeM[i]) / segLen).coerceIn(0.0, 1.0) else 0.0
         val lat = a.lat + f * (b.lat - a.lat)
         val lng = a.lng + f * (b.lng - a.lng)
-        return RouteSample(LatLng(lat, lng), Polyline.bearingDeg(a, b))
+        return RouteSample(LatLng(lat, lng), segBearingDeg[i])
     }
 
     /**
@@ -129,7 +151,7 @@ class PolylinePath(val points: List<LatLng>) {
         for (i in 0 until n - 1) {
             val a = pts[i]; val b = pts[i + 1]
             val mPerDegLat = 111_320.0
-            val mPerDegLng = 111_320.0 * cos(Math.toRadians(a.lat))
+            val mPerDegLng = segMPerDegLng[i]
             val bx = (b.lng - a.lng) * mPerDegLng; val by = (b.lat - a.lat) * mPerDegLat
             val px = (pLng - a.lng) * mPerDegLng; val py = (pLat - a.lat) * mPerDegLat
             val segLen2 = bx * bx + by * by
@@ -221,7 +243,7 @@ class PolylinePath(val points: List<LatLng>) {
             // Arithmetic mirrors nearestProjectionInRange EXACTLY (same ops, same order, the explicit
             // ax=ay=0 origin) so the result is bit-for-bit identical — verified by PolylineProjectionIntoDiffTest.
             val mPerDegLat = 111_320.0
-            val mPerDegLng = 111_320.0 * cos(Math.toRadians(a.lat))
+            val mPerDegLng = segMPerDegLng[i]
             val ax = 0.0; val ay = 0.0
             val bx = (b.lng - a.lng) * mPerDegLng; val by = (b.lat - a.lat) * mPerDegLat
             val px = (pLng - a.lng) * mPerDegLng; val py = (pLat - a.lat) * mPerDegLat
@@ -295,9 +317,9 @@ class PolylinePath(val points: List<LatLng>) {
             val a = points[i]; val b = points[i + 1]
             // Direction filter: skip a segment whose bearing doesn't match the rider's heading (the
             // opposite pass of an overlap is ~180° off). Cheap reject before the perp math.
-            if (Polyline.bearingDiffDeg(Polyline.bearingDeg(a, b), headingDeg) > maxHeadingDiffDeg) continue
+            if (Polyline.bearingDiffDeg(segBearingDeg[i], headingDeg) > maxHeadingDiffDeg) continue
             val mPerDegLat = 111_320.0
-            val mPerDegLng = 111_320.0 * cos(Math.toRadians(a.lat))
+            val mPerDegLng = segMPerDegLng[i]
             val bx = (b.lng - a.lng) * mPerDegLng; val by = (b.lat - a.lat) * mPerDegLat
             val px = (p.lng - a.lng) * mPerDegLng; val py = (p.lat - a.lat) * mPerDegLat
             val segLen2 = bx * bx + by * by
@@ -340,9 +362,9 @@ class PolylinePath(val points: List<LatLng>) {
         val alongs = ArrayList<Double>()
         for (i in 0 until points.size - 1) {
             val a = points[i]; val b = points[i + 1]
-            if (Polyline.bearingDiffDeg(Polyline.bearingDeg(a, b), headingDeg) > maxHeadingDiffDeg) continue
+            if (Polyline.bearingDiffDeg(segBearingDeg[i], headingDeg) > maxHeadingDiffDeg) continue
             val mPerDegLat = 111_320.0
-            val mPerDegLng = 111_320.0 * cos(Math.toRadians(a.lat))
+            val mPerDegLng = segMPerDegLng[i]
             val bx = (b.lng - a.lng) * mPerDegLng; val by = (b.lat - a.lat) * mPerDegLat
             val px = (p.lng - a.lng) * mPerDegLng; val py = (p.lat - a.lat) * mPerDegLat
             val segLen2 = bx * bx + by * by
@@ -399,7 +421,7 @@ class PolylinePath(val points: List<LatLng>) {
             val a = points[i]; val b = points[i + 1]
             // Local metric plane (metres) centred at `a`.
             val mPerDegLat = 111_320.0
-            val mPerDegLng = 111_320.0 * cos(Math.toRadians(a.lat))
+            val mPerDegLng = segMPerDegLng[i]
             val ax = 0.0; val ay = 0.0
             val bx = (b.lng - a.lng) * mPerDegLng; val by = (b.lat - a.lat) * mPerDegLat
             val px = (p.lng - a.lng) * mPerDegLng; val py = (p.lat - a.lat) * mPerDegLat

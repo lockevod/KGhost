@@ -76,6 +76,14 @@ class PointGridDiffTest {
         val grid = PointGrid(path, tol)
         val brute = brutePerp(path, q.lat, q.lng)
         val g = grid.nearestPerpDistM(q.lat, q.lng)
+        // Property 0: PolylinePath's own scan matches this reference EXACTLY. [brutePerp] computes
+        // `111_320.0 * cos(toRadians(a.lat))` inline, independently of PolylinePath's precomputed
+        // segMPerDegLng, so this is the one assertion in the suite that would catch an off-by-one in
+        // that array — the projection diff tests read the same array on BOTH sides, which cancels the
+        // term out and cannot see a shifted index. PointGrid is covered by the same argument (it reads
+        // the array; brutePerp does not). The track sits at lat ~40 with ~0.0002 deg steps, so the
+        // cosine genuinely varies point to point and a one-segment shift changes the result.
+        assertEquals("PolylinePath.nearestPerpDistM differs from brute at q=$q", brute, path.nearestPerpDistM(q.lat, q.lng), 0.0)
         // Property 1: coverage decision identical.
         assertEquals(
             "coverage boolean differs at q=$q tol=$tol (brute=$brute grid=$g)",

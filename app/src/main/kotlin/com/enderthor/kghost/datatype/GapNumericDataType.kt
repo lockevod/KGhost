@@ -95,17 +95,28 @@ class GapNumericDataType(
         // (a few ms later) would be silently dropped — on mid-ride page re-entry that left the
         // field showing `---` for ~1 s while a valid gap existed. Seeding with the LIVE current
         // state (the same values the dropped frame would carry) makes that drop harmless.
-        emitter.updateView(
-            buildView(
-                if (config.preview) DEMO_STATE else GapStateHolder.state.value,
-                RenderPrefs.gapDisplay.value,
-                RenderPrefs.imperialDistance.value,
-                context.isKarooNightMode(),
-            ),
-        )
+        // The seed runs SYNCHRONOUSLY on the host's binder thread, outside any coroutine and outside
+        // viewJob's catch. updateView is the same non-oneway transact as onNext, so a host that dies
+        // mid-startView throws straight back into Binder.execTransact. That fails the transaction
+        // rather than the process, but a lost seed frame is not worth propagating either.
+        runCatching {
+            emitter.updateView(
+                buildView(
+                    if (config.preview) DEMO_STATE else GapStateHolder.state.value,
+                    RenderPrefs.gapDisplay.value,
+                    RenderPrefs.imperialDistance.value,
+                    context.isKarooNightMode(),
+                ),
+            )
+        }.onFailure { Timber.w(it, "KVP gap-numeric seed frame failed") }
 
         val configJob = scope.launch {
-            emitter.onNext(UpdateGraphicConfig(showHeader = false))
+            // onNext is a SYNCHRONOUS binder transact (karoo-ext's IHandler passes flags=0), so a host
+            // that dies here throws DeadObjectException/RemoteException out of a root coroutine in a
+            // scope with no CoroutineExceptionHandler → process death. Losing the header config is a
+            // cosmetic degradation; losing the process is not. Same guard as GapStreamDataType.
+            runCatching { emitter.onNext(UpdateGraphicConfig(showHeader = false)) }
+                .onFailure { Timber.w(it, "KVP config emit failed") }
             awaitCancellation()
         }
 

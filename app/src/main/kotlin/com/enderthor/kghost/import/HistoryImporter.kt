@@ -37,7 +37,10 @@ class HistoryImporter(
     private val importDir: File,
     private val trackStore: TrackStore,
     private val decimate: (RecordedTrack) -> RecordedTrack = HistoryImporter::defaultDecimate,
-    private val fitDecode: (File, Source) -> RecordedTrack? = FitDecoder::decode,
+    // decodeForImport, not decode: it is the one that distinguishes the DETERMINISTIC sport/file-type
+    // rejection (an empty FitDecoder.notARide track → Invalid → ledgered once) from a TRANSIENT failure
+    // (null → retried every import). See FitDecoder.notARide.
+    private val fitDecode: (File, Source) -> RecordedTrack? = FitDecoder::decodeForImport,
     private val gpxParse: (File) -> RecordedTrack? = GpxParser::parse,
     private val lastScanProvider: () -> Long = { 0L },
     // suspend so the caller can AWAIT each persist: the lastScan write must be ordered and complete
@@ -95,15 +98,15 @@ class HistoryImporter(
 
         val workList = ArrayList<WorkItem>()
 
-        fitFilesDir.listFiles { f -> f.isFile && f.name.endsWith(".fit", ignoreCase = true) }
+        fitFilesDir.listFiles { f -> isFit(f) }
             ?.filter(::passesFilter)
             ?.forEach { workList.add(WorkItem(it, Kind.FITFILES_FIT)) }
 
-        importDir.listFiles { f -> f.isFile && f.name.endsWith(".fit", ignoreCase = true) }
+        importDir.listFiles { f -> isFit(f) }
             ?.filter(::passesFilter)
             ?.forEach { workList.add(WorkItem(it, Kind.IMPORT_FIT)) }
 
-        importDir.listFiles { f -> f.isFile && f.name.endsWith(".gpx", ignoreCase = true) }
+        importDir.listFiles { f -> isGpx(f) }
             ?.filter(::passesFilter)
             ?.forEach { workList.add(WorkItem(it, Kind.IMPORT_GPX)) }
 
@@ -129,6 +132,7 @@ class HistoryImporter(
         // running totals — accumulated across flushes, finalized identically to the old single addAll.
         var failed = 0
         var imported = 0
+        var enriched = 0
         var skippedDuplicates = 0
         // Bulk sink: keeps the index + known keys IN MEMORY across every chunk of this run and
         // persists the aggregate index.json/sourcekeys.json ONCE at commit() (below, in the
@@ -153,6 +157,39 @@ class HistoryImporter(
         val chunkPending = ArrayList<PendingMark>(FLUSH_EVERY)
         // L-F2: highest lastModified among files whose decoded tracks have been FLUSHED so far.
         var maxFlushedLastModified = Long.MIN_VALUE
+        // Lowest lastModified among files whose track DECODED fine but could not be WRITTEN. The mtime
+        // filter at the top of import() runs BEFORE the ledger partition, so letting lastScan pass one of
+        // these would drop it from every future onlyNew scan — permanently, and with no ledger entry to
+        // explain why. A store failure is by definition transient IO (disk full, IO error), so the retry
+        // this buys will eventually succeed.
+        //
+        // DECODE failures deliberately do NOT clamp, and this is a KNOWN, ACCEPTED GAP rather than a proof.
+        // `Failed` conflates two things: a null decode from a corrupt file, which is DETERMINISTIC and —
+        // since Failed is never ledgered — would be re-listed and re-DECODED on every import forever if it
+        // clamped; and a genuinely transient failure. Some transient cases self-heal (a file still being
+        // written gets a fresh mtime when the write completes, putting it back above any watermark), but
+        // NOT all: FitDecoder wraps its read in runCatching, so descriptor exhaustion or a passing storage
+        // error also returns null with the file's bytes and mtime untouched, and a newer successful file
+        // can then carry lastScan past it for good. Closing that needs Failed to carry the file plus a
+        // transient/deterministic classification — see docs/reviews/2026-09-08-triage-plan.md. Clamping on
+        // every decode failure is NOT the fix: it trades a rare loss for a guaranteed permanent re-decode.
+        // Invalid files stay excluded for the original reason — deterministic and already ledgered.
+        var minFailedLastModified = Long.MAX_VALUE
+
+        // Reconcile the scan watermark: forward past everything flushed, but never past the oldest
+        // file that failed transiently this run.
+        suspend fun syncLastScan() {
+            val current = lastScanProvider()
+            val advanced = maxOf(current, maxFlushedLastModified)
+            // Clamp BELOW the oldest unwritten file — and lower an already-advanced watermark if that
+            // failure surfaced after the flush that raised it (decode results arrive out of mtime order).
+            // Lowering only costs a directory listing plus ledger lookups next run: every file it re-lists
+            // other than the failed one is already ledgered, so none of them reach decode.
+            val target =
+                if (minFailedLastModified == Long.MAX_VALUE) advanced
+                else minOf(advanced, minFailedLastModified - 1)
+            if (target != current) lastScanSetter(target)
+        }
 
         // Flush the current chunk into the store, fold its counts into the running totals, mark the
         // flushed files' ledger entries, advance lastScan past them (success-only), and clear the
@@ -164,10 +201,14 @@ class HistoryImporter(
         suspend fun flushChunk() {
             if (chunk.isEmpty()) return
             val added = sink.addAll(chunk)
+            // Tracks the sink could not WRITE. They were neither stored nor deduped, so ledgering them
+            // or letting lastScan pass them would lose the ride with no way to retry it — the exact
+            // failure the discarded atomicWriteText Boolean used to hide.
+            val storeFailed = sink.lastFailedIds
             imported += added
-            skippedDuplicates += (chunk.size - added)
-            val chunkMax = chunkLastModified.max()
-            if (chunkMax > maxFlushedLastModified) maxFlushedLastModified = chunkMax
+            enriched += sink.lastEnrichedCount
+            skippedDuplicates += (chunk.size - added - storeFailed.size)
+            failed += storeFailed.size
             // Mark the ledger for exactly the files whose tracks were just persisted above — NOT at
             // buffer time — so a cancel before this point leaves those files unmarked and therefore
             // re-importable on the next run (ledger.save() in the finally only persists marks already
@@ -177,10 +218,24 @@ class HistoryImporter(
             // ledger (marked here) stay consistent with each other at the cancel point — only lastScan
             // itself may lag by one chunk, which is harmless (a re-run just re-decodes+skips those
             // already-ledgered files instead of re-storing them).
-            chunkPending.forEach { ledger.mark(ledgerMap, it.file, it.size, it.lastModified) }
+            // `chunk`, `chunkLastModified` and `chunkPending` are index-parallel by construction (the
+            // Decoded branch appends all three together, flushChunk clears all three together). The
+            // outcome itself is looked up by TRACK ID, which is derived from the ride's first timestamp
+            // — so the same ride present in both FitFiles/ and import/ yields two entries with one id and
+            // a failure on either marks both. Over-conservative, never corrupting: the survivor is simply
+            // re-decoded next run and deduped then.
+            chunk.forEachIndexed { i, t ->
+                if (t.id in storeFailed) {
+                    if (chunkLastModified[i] < minFailedLastModified) minFailedLastModified = chunkLastModified[i]
+                } else {
+                    if (chunkLastModified[i] > maxFlushedLastModified) maxFlushedLastModified = chunkLastModified[i]
+                    val pm = chunkPending[i]
+                    ledger.mark(ledgerMap, pm.file, pm.size, pm.lastModified)
+                }
+            }
             // L-F2: advance per successful flush so a cancel after some flushes still leaves lastScan
             // correctly past them (re-run with onlyNew won't reprocess flushed files).
-            if (maxFlushedLastModified > lastScanProvider()) lastScanSetter(maxFlushedLastModified)
+            syncLastScan()
             chunk.clear()
             chunkLastModified.clear()
             chunkPending.clear()
@@ -209,7 +264,8 @@ class HistoryImporter(
                 if (decimated.points.size < 2) {
                     // L-F1: a <2-point track is unusable/unraceable — and, since it decoded fully, this
                     // is DETERMINISTIC (not transient), so mark it Invalid: the collector ledgers it
-                    // immediately so it isn't re-decoded on every subsequent import.
+                    // immediately so it isn't re-decoded on every subsequent import. Also the landing
+                    // spot for FitDecoder.notARide (a 0-point track): same determinism, same treatment.
                     Timber.w("import dropped %s: decimated to %d point(s)", item.file.name, decimated.points.size)
                     DecodedOrFail.Invalid(item.file, srcSize, srcMtime)
                 } else {
@@ -302,6 +358,7 @@ class HistoryImporter(
                                 imported = imported,
                                 skippedDuplicates = skippedDuplicates,
                                 failed = failed,
+                                enriched = enriched,
                             ),
                         )
                     }
@@ -309,6 +366,9 @@ class HistoryImporter(
 
                 // --- STORE (final flush of the trailing partial chunk) ---
                 flushChunk()
+                // A pure-failure run never flushes, so flushChunk's syncLastScan never ran: reconcile
+                // once here so an old failed file is not left behind a watermark set by an earlier run.
+                syncLastScan()
             }
         } finally {
             // Persist the in-memory index/sourcekeys ONCE — on normal completion AND on a Cancel, so
@@ -339,11 +399,27 @@ class HistoryImporter(
                 imported = imported,
                 skippedDuplicates = skippedDuplicates,
                 failed = failed,
+                enriched = enriched,
             ),
         )
     }
 
     companion object {
+        private fun isFit(f: File) = f.isFile && f.name.endsWith(".fit", ignoreCase = true)
+        private fun isGpx(f: File) = f.isFile && f.name.endsWith(".gpx", ignoreCase = true)
+
+        /**
+         * How many files an import over these two dirs would find — the SAME predicates [import] scans
+         * with (deliberately shared, so the rebuild's safety count and the scan can't drift apart).
+         * A missing/unreadable dir contributes 0, which is exactly the case the rebuild must catch: a
+         * `listFiles` returning null is what turns "the folder is gone" into a silent `total = 0` run.
+         * Ignores the `onlyNew` cutoff and the ledger — the rebuild clears both, so every one of these
+         * files really is re-readable.
+         */
+        fun sourceFileCount(fitFilesDir: File, importDir: File): Int =
+            (fitFilesDir.listFiles { f -> isFit(f) }?.size ?: 0) +
+                (importDir.listFiles { f -> isFit(f) || isGpx(f) }?.size ?: 0)
+
         /** Emit a PARSING progress every this many processed files (plus always on the last). */
         private const val PROGRESS_EVERY = 10
 
@@ -361,7 +437,7 @@ class HistoryImporter(
          */
         fun defaultDecimate(track: RecordedTrack): RecordedTrack {
             val decimator = TrackDecimator(20.0)
-            val kept = track.points.filter { decimator.shouldKeep(it.lat, it.lng, it.distanceM) }
+            val kept = track.points.filter { decimator.shouldKeep(it.distanceM) }
             // Recompute the dedup key off the DECIMATED tail so a scanned/imported ride collapses
             // onto the same key ② (TrackRecorder) produces from its already-decimated buffer.
             val total = kept.lastOrNull()?.distanceM ?: 0.0

@@ -4,7 +4,9 @@ import com.enderthor.kghost.import_.HistoryImporter
 import com.enderthor.kghost.import_.sourceKeyOf
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TrackRecorderTest {
@@ -134,5 +136,77 @@ class TrackRecorderTest {
         // After reset the decimator must treat the next sample as the new "first" (always kept).
         rec.onSample(40.0, -3.0, 1000.0, 2.0)
         assertEquals(1, rec.size())
+    }
+
+    // ---- stale-fix handling: identity must survive, geometry must not be fabricated ----------------
+    //
+    // A GPS fix can freeze (LOCATION terminates or goes silent) while the odometer keeps advancing from
+    // the wheel/map-match. Feeding the frozen coordinate writes a run of points that all share it, with a
+    // degenerate bearing, which then feeds route matching, GradePace and CorridorSeeder on every LATER
+    // ride. The obvious fix — stop calling onSample — is worse: it also stops the decimator, so ②'s
+    // dedup tail diverges from ③'s, the 10 m buckets differ, dedup fails, and the twin pair never
+    // self-heals. These two tests pin BOTH halves.
+
+    @Test fun `the identity tail survives a ride that ENDS in a stale stretch`() {
+        // THE case that discriminates identityTailM from buffer.last(): every other sequence ends on a
+        // positioned kept sample, where the two are equal. Here the fix dies at 20 m and the rider
+        // carries on to 120 m, so the key must still describe a 120 m ride. Keying off the buffer would
+        // call it a 20 m ride, put it in a different 10 m bucket from the same ride's FIT, and store
+        // that FIT as a permanent twin.
+        val rec = TrackRecorder(TrackDecimator(minSpacingM = 20.0), TrackDecimator(minSpacingM = 20.0))
+        rec.onSample(40.0, -3.0, 0.0, 0.0)
+        rec.onSample(40.001, -3.001, 20.0, 1.0)
+        (2..6).forEach { i -> rec.onSample(null, null, i * 20.0, i.toDouble()) }
+
+        val track = rec.build(id = "T", startedAtEpoch = 7_000L)!!
+        assertEquals(sourceKeyOf(7_000L, 120.0), track.sourceKey)
+        assertNotEquals(
+            "keying off the geometry buffer would describe a 20 m ride",
+            sourceKeyOf(7_000L, 20.0),
+            track.sourceKey,
+        )
+    }
+
+    @Test fun `unpositioned samples cannot starve the geometry of its anchors`() {
+        // With ONE shared decimator, nulls landing on the 20 m anchors claim every keep slot and every
+        // real position is dropped — build() then returns null and a ride full of usable geometry is
+        // silently lost. Two decimators make that unconstructible.
+        val rec = TrackRecorder(TrackDecimator(minSpacingM = 20.0), TrackDecimator(minSpacingM = 20.0))
+        var d = 0.0
+        var t = 0.0
+        repeat(6) { i ->
+            rec.onSample(null, null, d, t); d += 5.0; t += 1.0                    // null ON the anchor
+            rec.onSample(40.0 + i * 0.001, -3.0 + i * 0.001, d, t); d += 5.0; t += 1.0
+            rec.onSample(40.0 + i * 0.001, -3.0 + i * 0.001, d, t); d += 10.0; t += 1.0
+        }
+
+        val track = rec.build(id = "T", startedAtEpoch = 7_000L)
+        assertNotNull("the positioned samples must survive their own lattice", track)
+        assertTrue("and there must be real geometry, not just an endpoint", track!!.points.size >= 2)
+    }
+
+    @Test fun `a stale stretch contributes no points and no repeated coordinate`() {
+        val rec = TrackRecorder(TrackDecimator(minSpacingM = 20.0))
+        rec.onSample(40.0, -3.0, 0.0, 0.0)
+        rec.onSample(40.001, -3.001, 20.0, 1.0)
+        // LOCATION goes silent; the wheel keeps turning for 100 m.
+        (2..6).forEach { i -> rec.onSample(null, null, 20.0 + i * 20.0, i.toDouble()) }
+        rec.onSample(40.002, -3.002, 160.0, 7.0)
+
+        val track = rec.build(id = "T", startedAtEpoch = 7_000L)!!
+        assertEquals(listOf(0.0, 20.0, 160.0), track.points.map { it.distanceM })
+        assertEquals(
+            "no coordinate may repeat — that is the geometry the stale fix would have fabricated",
+            track.points.size,
+            track.points.map { it.lat to it.lng }.distinct().size,
+        )
+        // Identity still counts the unpositioned metres: the decimator kept 40/60/.../160.
+        assertEquals(sourceKeyOf(7_000L, 160.0), track.sourceKey)
+    }
+
+    @Test fun `a ride whose fix never arrives records nothing rather than a degenerate track`() {
+        val rec = TrackRecorder(TrackDecimator(minSpacingM = 20.0))
+        (0..10).forEach { i -> rec.onSample(null, null, i * 25.0, i.toDouble()) }
+        assertNull("no positions means no comparable segment", rec.build(id = "T", startedAtEpoch = 1L))
     }
 }

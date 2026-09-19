@@ -8,6 +8,7 @@ data class ImportProgress(
     val skippedDuplicates: Int,
     val failed: Int,
     val message: String? = null,
+    val enriched: Int = 0,
 ) {
     enum class Phase { SCANNING, PARSING, DONE, ERROR }
 }

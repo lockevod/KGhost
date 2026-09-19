@@ -2,11 +2,7 @@ package com.enderthor.kghost.engine
 
 import com.enderthor.kghost.geo.LatLng
 import com.enderthor.kghost.geo.Polyline
-import com.enderthor.kghost.geo.Source
-import com.enderthor.kghost.import_.FitDecoder
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
-import java.io.File
 import org.junit.Test
 
 /**
@@ -24,14 +20,8 @@ import org.junit.Test
  */
 class B2Sergi1ReplayTest {
 
-    private fun sergi1OrSkip() =
-        File(System.getenv("SERGI1_FIT") ?: "/Users/sergi/AndroidStudioProjects/KGhost/sergi1.fit")
-            .also { assumeTrue("sergi1.fit present at ${it.path}", it.exists()) }
-
     @Test fun `the gap never teleports across Sergi1's shortcut`() {
-        val track = FitDecoder.decode(sergi1OrSkip(), Source.FIT_IMPORT)
-        assumeTrue("sergi1.fit decoded", track != null)
-        requireNotNull(track)
+        val track = loadSergi1()
         assertTrue("need a real ride", track.points.size > 100)
 
         // Historical pace = the ride itself (the ghost rides the rider's own path at their own pace);

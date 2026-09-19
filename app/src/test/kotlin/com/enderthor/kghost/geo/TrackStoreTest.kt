@@ -187,7 +187,7 @@ class TrackStoreTest {
         assertEquals(listOf("aaa", "zzz"), ranked)
     }
 
-    @Test fun `loadTopCandidates parses only the ranked overlapping tracks`() {
+    @Test fun `the ranked candidate set parses only the overlapping tracks`() {
         val store = TrackStore(tmp.newFolder("tracks"))
         // A overlaps the query bbox (near 40.0,-3.0); C is far away (near 50.0,7.0) → not a candidate.
         val a = track("A", 40.0, -3.0)
@@ -196,8 +196,20 @@ class TrackStoreTest {
         store.save(c)
 
         val queryA = BBox.around(a.points.map { LatLng(it.lat, it.lng) })!!
-        val loaded = store.loadTopCandidates(queryA, maxTracks = 24)
+        val loaded = store.loadByIds(store.rankedCandidateIdsFor(queryA, maxTracks = 24))
         assertEquals(listOf("A"), loaded.map { it.id })
+    }
+
+    @Test fun `loadByIds keeps the captured ranking when the index changes`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        val original = track("original", 40.0, -3.0)
+        store.save(original)
+        val route = BBox.around(original.points.map { LatLng(it.lat, it.lng) })!!
+        val selectedIds = store.rankedCandidateIdsFor(route, maxTracks = 24).toSet()
+
+        store.save(track("later", 40.0, -3.0))
+
+        assertEquals(listOf("original"), store.loadByIds(selectedIds).map { it.id })
     }
 
     @Test fun `path-cell ranking ranks a SHORT overlapping track above a LONG bystander`() {
@@ -391,5 +403,94 @@ class TrackStoreTest {
 
         assertEquals(setOf("A"), TrackStore.candidateIds(snapshot, bboxA))
         assertEquals(setOf("B"), TrackStore.candidateIds(snapshot, bboxB))
+    }
+
+    @Test fun `allTracksMeta reports id source and sourceKey for every stored track`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        store.save(track("A", 40.0, -3.0).copy(source = Source.RECORDED, sourceKey = "1:2"))
+        store.save(track("B", 50.0, 7.0).copy(source = Source.FITFILES_SCAN, sourceKey = "3:4"))
+
+        assertEquals(
+            setOf(
+                TrackIdentity("A", Source.RECORDED, "1:2"),
+                TrackIdentity("B", Source.FITFILES_SCAN, "3:4"),
+            ),
+            store.allTracksMeta().toSet(),
+        )
+    }
+
+    @Test fun `forEachTrack streams every stored track exactly once`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        store.save(track("A", 40.0, -3.0))
+        store.save(track("B", 50.0, 7.0))
+
+        val seen = ArrayList<String>()
+        store.forEachTrack { seen.add(it.id) }
+
+        assertEquals(listOf("A", "B"), seen.sorted())
+    }
+
+    @Test fun `dropSourceKeys subtracts from what is on disk and keeps the rest`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        store.add(track("A", 40.0, -3.0).copy(sourceKey = "keep"))
+        store.add(track("B", 41.0, -3.0).copy(sourceKey = "drop"))
+
+        assertTrue(store.dropSourceKeys(setOf("drop", "never-there")))
+
+        assertEquals(setOf("keep"), store.knownSourceKeys())
+    }
+
+    @Test fun `an imported fit fills missing altitude without replacing recorded identity`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        val recorded = track("live", 40.0, -3.0).copy(sourceKey = "1:20", source = Source.RECORDED)
+        val fit = recorded.copy(
+            id = "fit",
+            source = Source.FITFILES_SCAN,
+            points = listOf(
+                TrackPointDto(0.0, 0.0, 0.0, 0.0, 100.0),
+                TrackPointDto(0.0, 0.0, 200.0, 40.0, 140.0),
+            ),
+        )
+        assertTrue(store.add(recorded))
+        // An enrichment is NOT a store: add() must stay false, or the ride-end caller runs tidyGroup
+        // (archiving real rides) against a track it never saved.
+        assertFalse(store.add(fit))
+        assertEquals(listOf("live"), store.allTrackIds())
+        assertEquals(listOf(100.0, 120.0, 140.0), store.loadByIds(listOf("live")).single().points.map { it.eleM })
+    }
+
+    /**
+     * The sink caches sourceKey -> RECORDED id across chunks, but `tidyGroup`/`sweep` take `tidyLock`
+     * while `archive` takes `indexLock`, so a ride ending mid-import can archive a cached twin between
+     * two chunks. Enriching from a cached OBJECT would write it back into the live dir, un-indexed, and
+     * `prewarmAndReconcile` would re-adopt the archived near-duplicate at next startup.
+     */
+    @Test fun `a twin archived mid-import is not resurrected by a later enrichment`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        val recorded = track("live", 40.0, -3.0).copy(sourceKey = "1:20", source = Source.RECORDED)
+        val fit = recorded.copy(
+            id = "fit",
+            source = Source.FITFILES_SCAN,
+            points = listOf(
+                TrackPointDto(0.0, 0.0, 0.0, 0.0, 100.0),
+                TrackPointDto(0.0, 0.0, 200.0, 40.0, 140.0),
+            ),
+        )
+        assertTrue(store.add(recorded))
+
+        val sink = store.openBulkSink()
+        sink.addAll(listOf(fit))                        // chunk 1: primes the key -> id cache on "live"
+        assertEquals(1, store.archive(listOf("live")))  // a ride ends between chunks
+        sink.addAll(listOf(fit.copy(id = "fit2")))      // chunk 2: same key, cache still points at "live"
+
+        assertEquals(emptyList<String>(), store.allTrackIds())
+    }
+
+    @Test fun `an imported duplicate with no usable altitude stays a duplicate`() {
+        val store = TrackStore(tmp.newFolder("tracks"))
+        val recorded = track("live", 40.0, -3.0).copy(sourceKey = "1:20", source = Source.RECORDED)
+        assertTrue(store.add(recorded))
+        assertFalse(store.add(recorded.copy(id = "fit", source = Source.FITFILES_SCAN)))
+        assertEquals(listOf("live"), store.allTrackIds())
     }
 }

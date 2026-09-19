@@ -111,7 +111,7 @@ class HistoryImporterTest {
         // ②'s path: run the same raw points through the decimator and key off the decimated tail.
         val decimator = TrackDecimator(20.0)
         val decimatedTotal = rawPoints
-            .filter { decimator.shouldKeep(it.lat, it.lng, it.distanceM) }
+            .filter { decimator.shouldKeep(it.distanceM) }
             .last().distanceM
         val recorderKey = sourceKeyOf(startedAt, decimatedTotal)
 

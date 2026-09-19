@@ -28,8 +28,8 @@ import javax.xml.parsers.SAXParserFactory
  */
 object GpxParser {
 
-    /** Raw collected point: position plus an optional epoch-ms timestamp. */
-    private data class RawPoint(val lat: Double, val lng: Double, val timeEpochMs: Long?)
+    /** Raw collected point: position plus an optional epoch-ms timestamp and altitude. */
+    private data class RawPoint(val lat: Double, val lng: Double, val timeEpochMs: Long?, val eleM: Double?)
 
     private val fallbackFormat: SimpleDateFormat
         get() = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
@@ -93,6 +93,11 @@ object GpxParser {
         private var inTime = false
         private val timeBuffer = StringBuilder()
 
+        // <ele> character accumulation.
+        private var curEleM: Double? = null
+        private var inEle = false
+        private val eleBuffer = StringBuilder()
+
         var result: RecordedTrack? = null
             private set
 
@@ -104,16 +109,23 @@ object GpxParser {
                     curLat = attributes?.getValue("lat")?.toDoubleOrNull()
                     curLng = attributes?.getValue("lon")?.toDoubleOrNull()
                     curTimeMs = null
+                    curEleM = null
                 }
                 "time" -> if (inTrkpt) {
                     inTime = true
                     timeBuffer.setLength(0)
                 }
+                "ele" -> if (inTrkpt) {
+                    inEle = true
+                    eleBuffer.setLength(0)
+                }
             }
         }
 
         override fun characters(ch: CharArray?, start: Int, length: Int) {
-            if (inTime && ch != null) timeBuffer.appendRange(ch, start, start + length)
+            if (ch == null) return
+            if (inTime) timeBuffer.appendRange(ch, start, start + length)
+            if (inEle) eleBuffer.appendRange(ch, start, start + length)
         }
 
         override fun endElement(uri: String?, localName: String?, qName: String?) {
@@ -123,17 +135,22 @@ object GpxParser {
                     curTimeMs = parseTime(timeBuffer.toString())
                     inTime = false
                 }
+                "ele" -> if (inEle) {
+                    curEleM = eleBuffer.toString().trim().toDoubleOrNull()
+                    inEle = false
+                }
                 "trkpt" -> {
                     val lat = curLat
                     val lng = curLng
                     // Skip points with missing/NaN coordinates.
                     if (lat != null && lng != null && !lat.isNaN() && !lng.isNaN()) {
-                        raw.add(RawPoint(lat, lng, curTimeMs))
+                        raw.add(RawPoint(lat, lng, curTimeMs, curEleM))
                     }
                     inTrkpt = false
                     curLat = null
                     curLng = null
                     curTimeMs = null
+                    curEleM = null
                 }
             }
         }
@@ -170,6 +187,7 @@ object GpxParser {
                         lng = rp.lng,
                         distanceM = cumulativeM,
                         timeS = (rp.timeEpochMs!! - firstEpochMs) / 1000.0,
+                        eleM = rp.eleM,
                     ),
                 )
                 prev = rp

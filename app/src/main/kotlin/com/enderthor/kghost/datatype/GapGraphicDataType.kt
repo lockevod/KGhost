@@ -128,7 +128,12 @@ class GapGraphicDataType(
         val scope = CoroutineScope(Dispatchers.Default + scopeJob)
 
         val configJob = scope.launch {
-            emitter.onNext(UpdateGraphicConfig(showHeader = false))
+            // onNext is a SYNCHRONOUS binder transact (karoo-ext's IHandler passes flags=0), so a host
+            // that dies here throws DeadObjectException/RemoteException out of a root coroutine in a
+            // scope with no CoroutineExceptionHandler → process death. Losing the header config is a
+            // cosmetic degradation; losing the process is not. Same guard as GapStreamDataType.
+            runCatching { emitter.onNext(UpdateGraphicConfig(showHeader = false)) }
+                .onFailure { Timber.w(it, "KVP config emit failed") }
             awaitCancellation()
         }
 
@@ -158,7 +163,12 @@ class GapGraphicDataType(
             )
             val seedRv = RemoteViews(context.packageName, R.layout.field_gap)
             seedRv.setImageViewBitmap(R.id.field_gap_image, seedBmp)
-            emitter.updateView(seedRv)
+            // The seed runs SYNCHRONOUSLY on the host's binder thread, outside any coroutine and outside
+            // viewJob's catch. updateView is the same non-oneway transact as onNext, so a host that dies
+            // mid-startView throws straight back into Binder.execTransact. That fails the transaction
+            // rather than the process, but a lost seed frame is not worth propagating either.
+            runCatching { emitter.updateView(seedRv) }
+                .onFailure { Timber.w(it, "KVP gap-graphic seed frame failed") }
         }
 
         val viewJob = scope.launch {

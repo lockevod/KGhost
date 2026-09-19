@@ -19,12 +19,35 @@ class GhostIntegratorTest {
         assertTrue(g.gapDistM > 0.0)
     }
 
-    @Test fun `novel road accrues at the VP pace`() {
+    @Test fun `novel road is neutral - it neither grows nor shrinks the lead`() {
         val g = newInt(vp = 0.4); val src = pace(0.2, 50.0)
         g.onTick(0.0, 0.0, 0.0, 90.0, 0.0, src)       // baseline
-        g.onTick(50.0, 0.0, 50.0, 90.0, 10.0, src)    // +50 m hist 0.2 → +10
-        g.onTick(100.0, 0.0, 100.0, 90.0, 25.0, src)  // +50 m VP 0.4 → +20
-        assertEquals(30.0, g.ghostTime, 1e-6)
+        g.onTick(50.0, 0.0, 50.0, 90.0, 5.0, src)     // +50 m hist 0.2 → ghost +10 vs elapsed 5 → lead +5
+        assertEquals(5.0, g.gapTimeS, 1e-6)
+        g.onTick(100.0, 0.0, 100.0, 90.0, 20.0, src)  // +50 m novel in 15 s → ghost +15 → lead UNCHANGED
+        assertEquals(25.0, g.ghostTime, 1e-6)
+        assertEquals(5.0, g.gapTimeS, 1e-6)
+    }
+
+    // The reported field bug: a whole route on ground with NO history used to accrue at the 12 km/h VP
+    // target, so a rider averaging > 2× that target ended up "ahead" by MORE than their own elapsed time
+    // (and by kilometres). Novel ground must return no verdict at all, not a fabricated one.
+    @Test fun `a fully novel route never fabricates a gap`() {
+        val g = newInt(vp = 0.3); val src = pace(0.2, -1.0) // history nowhere
+        for (i in 0..300) g.onTick(i * 100.0, 0.0, i * 100.0, 90.0, i * 10.0, src) // 30 km at 10 m/s
+        assertEquals(0.0, g.gapTimeS, 1e-6)
+        assertEquals(0.0, g.gapDistM, 1.0)
+    }
+
+    // A repeated ELAPSED_TIME value against a fresh distance (the caller's combine+sample can emit one)
+    // must accrue NOTHING on novel ground. Charging the VP pace there minted unearned lead on every such
+    // tick, one-signed and never given back — a 4 h ride with one repeat a minute came out +10 min AHEAD.
+    @Test fun `a repeated race-clock tick accrues nothing on novel ground`() {
+        val g = newInt(vp = 0.4); val src = pace(0.2, -1.0)
+        g.onTick(0.0, 0.0, 0.0, 90.0, 10.0, src)      // baseline
+        g.onTick(50.0, 0.0, 50.0, 90.0, 10.0, src)    // +50 m, Δelapsed = 0 → neutral contribution = 0
+        assertEquals(10.0, g.ghostTime, 1e-9)
+        assertEquals(0.0, g.gapTimeS, 1e-9)
     }
 
     @Test fun `a stop accrues nothing`() {
@@ -66,6 +89,63 @@ class GhostIntegratorTest {
         assertEquals(ghostBefore, g.ghostTime, 1e-9)        // lead NOT wiped (old reset set it to 1510)
         g.onTick(7200.0, 0.0, 7200.0, 90.0, 1525.0, src)   // forward +100 m at 0.2 → +20
         assertEquals(ghostBefore + 20.0, g.ghostTime, 1e-6) // accrual resumed, NOT frozen
+    }
+
+    // The rollback used to re-baseline the odometer ONLY, leaving every breadcrumb in the
+    // over-estimated frame. place() then interpolated the ghost across ground the rider never
+    // covered, so the SAME field could read AHEAD in time and BEHIND in distance — GapFormat derives
+    // the two signs independently, so it renders "+0:01" green next to "-20 m". The existing rollback
+    // test above only asserts ghostTime, which survived the bug untouched.
+    @Test fun `a rollback leaves time and distance agreeing on who is ahead`() {
+        val g = newInt()
+        // A pace source whose value this test drives tick by tick: the sequence needs a genuine TIE
+        // (rider exactly at historical pace) for the contradiction to be visible — with the rider
+        // already ahead, a positive gapDistM hides it.
+        var p: Double? = 0.1
+        val src: (Double, Double, Double) -> Double? = { _, _, _ -> p }
+
+        g.onTick(0.0, 0.0, 0.0, 90.0, 0.0, src)         // anchor
+        g.onTick(100.0, 0.0, 100.0, 90.0, 10.0, src)    // 100 m at 0.1 s/m in 10 s → dead level
+        assertEquals(0.0, g.gapTimeS, 1e-6)
+        p = null
+        g.onTick(200.0, 0.0, 200.0, 90.0, 20.0, src)    // 100 m of novel ground → neutral, still level
+        assertEquals(0.0, g.gapTimeS, 1e-6)
+
+        // GPS returns and the coast estimator hands back 50 phantom metres. The crumb at 200 m was
+        // recorded against ground the rider never covered.
+        p = 0.1
+        g.onTick(150.0, 0.0, 150.0, 90.0, 20.0, src)
+        assertEquals("still a tie in time", 0.0, g.gapTimeS, 1e-6)
+        assertEquals("so it must be a tie in distance too (was -50)", 0.0, g.gapDistM, 1e-6)
+
+        // And on the next real metres: +10 m buying +2 s of history against +1 s of clock.
+        p = 0.2
+        g.onTick(160.0, 0.0, 160.0, 90.0, 21.0, src)
+        assertTrue("rider is ahead in time", g.gapTimeS > 0.0)
+        // Assert the VALUE, not the sign: a "clamp every negative AHEAD distance to zero" fix also
+        // satisfies >= 0 while leaving the field useless. The ghost is interpolated between the 100 m
+        // crumb (ghost-time 10) and the fresh 160 m crumb (ghost-time 22), at elapsed 21 → 155 m.
+        assertEquals("the placement itself must be right, not merely non-negative", 5.0, g.gapDistM, 0.01)
+    }
+
+    // A correction bigger than every crumb must still leave a usable anchor rather than an empty trail.
+    @Test fun `a rollback past every crumb re-seeds instead of emptying the trail`() {
+        val g = newInt(); val src = pace(0.2, 1e9)
+        g.onTick(1000.0, 0.0, 1000.0, 90.0, 100.0, src)  // anchor at 1000 m
+        g.onTick(1200.0, 0.0, 1200.0, 90.0, 120.0, src)
+        val ghostBefore = g.ghostTime
+        g.onTick(10.0, 0.0, 10.0, 90.0, 125.0, src)      // odometer collapses below every crumb
+        assertEquals("the accrued lead is never a casualty of the correction", ghostBefore, g.ghostTime, 1e-9)
+        assertTrue("gapDistM stays finite", g.gapDistM.isFinite())
+
+        // The re-seed must be stamped with the RACE clock, not ghostTime. Stamping the accrued lead puts
+        // the sole crumb AHEAD of elapsedS, which pins place() into its `lo == 0` branch: the marker
+        // freezes at one coordinate for gapTimeS seconds while gapDistM quietly reports "metres since the
+        // glitch" instead of the lead. Assert the marker MOVES, not merely that the number is finite.
+        val frozenLng = g.ghostLng
+        g.onTick(110.0, 0.0, 110.0, 90.0, 135.0, src)    // +100 m at 0.2 → +20 s accrues normally
+        assertEquals(ghostBefore + 20.0, g.ghostTime, 1e-6)
+        assertTrue("the ghost marker must not be frozen at the re-seed point", g.ghostLng != frozenLng)
     }
 
     @Test fun `gap distance never reports ahead while the rider is behind (end clamp)`() {

@@ -19,7 +19,7 @@ class TrackStoreArchiveTest {
         store.add(RecordedTrack("keep", 1L, pts(), sourceKey = "k:1"))
         store.add(RecordedTrack("gone", 2L, pts(), sourceKey = "k:2"))
         // touch the path-cell index so both are indexed
-        store.loadTopCandidates(BBox(40.9, 41.1, 1.9, 2.1), 10)
+        store.loadByIds(store.rankedCandidateIdsFor(BBox(40.9, 41.1, 1.9, 2.1), 10))
 
         val moved = store.archive(listOf("gone"))
         assertEquals(1, moved)
@@ -30,7 +30,7 @@ class TrackStoreArchiveTest {
         // sourcekeys untouched: re-adding the same keyed ride is still deduped
         assertFalse(store.add(RecordedTrack("gone", 2L, pts(), sourceKey = "k:2")))
         // archived id no longer a match candidate
-        assertEquals(listOf("keep"), store.loadTopCandidates(BBox(40.9, 41.1, 1.9, 2.1), 10).map { it.id })
+        assertEquals(listOf("keep"), store.loadByIds(store.rankedCandidateIdsFor(BBox(40.9, 41.1, 1.9, 2.1), 10)).map { it.id })
     }
 
     @Test fun `archive of empty list is a no-op`() {
