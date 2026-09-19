@@ -1957,10 +1957,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // previous tick's — the phasing signature CoastingEstimator reads as a freeze.
                     // Emitted periodically as well as at ride end so a mid-ride power-off still
                     // leaves a usable sample behind.
-                    tickCount++
                     probeRiderMoving = (speedMs ?: 0.0) >= StalenessLogic.MIN_MOVING_MS
                     lastFix?.let { fixAgeProbe.add(SystemClock.elapsedRealtime() - it.ms) }
-                    if (distM == lastTickDistM) distRepeatTicks++
+                    // Paused ticks (autopause included) are skipped: DISTANCE is frozen by definition
+                    // there, so a café stop inflated distRepeat to ~36% on the 2026-09-12 ride and hid
+                    // the phase-slip rate this counter exists to measure.
+                    if (!ridePaused) {
+                        tickCount++
+                        if (distM == lastTickDistM) distRepeatTicks++
+                    }
                     lastTickDistM = distM
                     val cadNow = SystemClock.elapsedRealtime()
                     if (cadNow - lastCadenceLogMs >= CADENCE_LOG_MS) {
@@ -2017,7 +2022,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             lossAlerted = false
                             lossWorst = cq
                         }
-                        lossTicks++
+                        // Moving ticks only: an autopause inside an episode read as ticks=2472 durS=4.
+                        if (!ridePaused) lossTicks++
                         if (cq > lossWorst) lossWorst = cq
                         if (speedMs == null) lossNullSpeedTicks++
                         // handleGpsLoss() runs LATER in this tick, so a fire is observed on the next one
@@ -2704,6 +2710,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
      * after finish()). Cancels the GPS consumer too. Suspends — call only from a coroutine.
      */
     private suspend fun stopTickAndJoin() {
+        // The real ride end (Idle) comes through here, not stopTick() — without this no ride ever
+        // logged its ride-end cadence line. Zeroing tickCount keeps a later onDestroy → stopTick() from
+        // printing it a second time (startTick() resets the counters for the next ride anyway).
+        logCadence("ride-end")
+        tickCount = 0L
         isRecording = false
         // See stopTick(): a previewed route must not leak into the next ride via the startTick replay.
         pendingNavState = null
