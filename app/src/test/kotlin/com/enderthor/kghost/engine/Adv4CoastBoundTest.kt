@@ -71,17 +71,23 @@ class Adv4CoastBoundTest {
         var raceClockS = 0.0; private set
 
         fun tick(rawDistM: Double, elapsedS: Double, speedMs: Double?, pace: Double?, fixFresh: Boolean = true) {
-            coast.update(rawDistM, speedMs, elapsedS)
-            if (moveStart == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS) moveStart = elapsedS
+            // Production normalizes SPEED (`?.takeIf { it.isFinite() }`, KGhostExtension.kt:1947) before
+            // either the estimator or the guard sees it; do the same here once, up front.
+            val sp = speedMs?.takeIf { it.isFinite() }
+            coast.update(rawDistM, sp, elapsedS)
+            if (moveStart == null && sp != null && sp > StalenessLogic.MIN_MOVING_MS) moveStart = elapsedS
             var ms = moveStart ?: return
             val riderDist = coast.effectiveDistanceM
             val p = prevEl
             // Guard (a): race clock, keyed on pendingSample — a pending tick must NOT freeze it.
             // A settle tick can land on a stopped rider (CoastingEstimator's `changed` clear runs
-            // before its stop branch), so `stoppedNow` also freezes — it can't coincide with
-            // pendingSample (the hold sits past the estimator's stop test).
-            val stoppedNow = speedMs != null && speedMs < StalenessLogic.MIN_MOVING_MS
-            if (p != null && elapsedS > p && (stoppedNow || (riderDist <= integLast && !coast.pendingSample))) {
+            // before its stop branch): freeze there ONLY when the settlement resolved an unresolved
+            // hold (`coast.settledPending`) — a coast-recovery residual landing on a stopped tick must
+            // NOT freeze (GhostIntegrator ignores the elapsed delta whenever a historical pace is
+            // available, so freezing there mints lead with nothing to offset it).
+            val stoppedNow = sp != null && sp < StalenessLogic.MIN_MOVING_MS
+            if (p != null && elapsedS > p &&
+                ((stoppedNow && coast.settledPending) || (riderDist <= integLast && !coast.pendingSample))) {
                 ms += (elapsedS - p); moveStart = ms
             }
             prevEl = elapsedS   // ALWAYS, on every tick

@@ -2279,9 +2279,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // (stopped at the finish or a light), HOLD raceElapsed by advancing the origin, so the
                         // gap FREEZES at the result instead of drifting BEHIND, and resumes cleanly on moving.
                         // Keyed on the odometer delta — the SAME signal the integrator accrues on (ghostTime only
-                        // grows when dd>0), so the two stay consistent (both frozen while stopped). Auto-pause
-                        // already freezes ELAPSED_TIME, so this only bites a stop-while-Recording (incl. the sim
-                        // sitting at the line). NOT applied before a prior tick exists.
+                        // grows when dd>0) — EXCEPT on a settlement (see below), where that symmetry is
+                        // deliberately broken. Auto-pause already freezes ELAPSED_TIME, so this only bites a
+                        // stop-while-Recording (incl. the sim sitting at the line). NOT applied before a prior
+                        // tick exists.
                         // A PENDING SAMPLE is not a stop: the odometer is flat only because the
                         // distance stream has not delivered its next value. Freezing the race clock
                         // there would DELETE the rider's second from the race — roughly +1 s per
@@ -2292,14 +2293,22 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val prevEl = prevTickElapsedS
                         // A settle tick can land on a stopped rider: the estimator's `changed` clear
                         // (CoastingEstimator :240) runs BEFORE its stop branch (:261), so the odometer
-                        // ADVANCES on a tick where the rider is provably stopped THIS tick. Without
-                        // `stoppedNow` this guard would see riderDist > integLastRiderDist and refuse to
-                        // freeze, charging a stopped second. `stoppedNow` and pendingSample can't both be
-                        // true (the hold sits past the estimator's stop test), so there's no ordering
-                        // hazard between the two freeze conditions.
+                        // ADVANCES on a tick where the rider is provably stopped THIS tick. Without a
+                        // freeze there this guard would see riderDist > integLastRiderDist and refuse
+                        // to freeze, charging a stopped second. But `stoppedNow` alone is TOO BROAD: a
+                        // coast-recovery tick can also land on a stopped rider, correcting metres that
+                        // were already dead-reckoned and already neutral-filled — freezing THERE mints
+                        // lead, because GhostIntegrator (:79/:114) ignores the elapsed delta whenever a
+                        // historical pace is available, so crediting `hist * dd` with the clock frozen
+                        // raises the gap with nothing to offset it. `coast.settledPending` is what tells
+                        // the two apart: it is true only on the ONE tick where a raw-distance change
+                        // resolved an UNRESOLVED pending hold (the delayed sample finally arriving), not
+                        // on a coast recovery (which was never held). Freeze only that settlement, not
+                        // every stopped tick with an advancing odometer.
                         val stoppedNow = speedMs != null && speedMs < StalenessLogic.MIN_MOVING_MS
                         if (prevEl != null && elapsedS > prevEl &&
-                            (stoppedNow || (riderDist <= integLastRiderDist && !coast.pendingSample))) {
+                            ((stoppedNow && coast.settledPending) ||
+                                (riderDist <= integLastRiderDist && !coast.pendingSample))) {
                             moveStart += (elapsedS - prevEl)
                             firstMoveElapsedS = moveStart
                         }

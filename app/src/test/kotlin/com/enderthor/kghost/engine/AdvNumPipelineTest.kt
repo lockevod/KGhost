@@ -52,17 +52,23 @@ class AdvNumPipelineTest {
         /** [pace] = what the tiers would answer at this position (null = tier 3 / neutral fill).
          *  [fixFresh] = the GPS-fix freshness gate that both tier 1 and tier 2 sit behind. */
         fun tick(rawDistM: Double, elapsedS: Double, speedMs: Double?, pace: Double?, fixFresh: Boolean = true) {
-            coast.update(rawDistM, speedMs, elapsedS)
-            if (moveStart == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS) moveStart = elapsedS
+            // Production normalizes SPEED (`?.takeIf { it.isFinite() }`, KGhostExtension.kt:1947) before
+            // either the estimator or the guard sees it; do the same here once, up front.
+            val sp = speedMs?.takeIf { it.isFinite() }
+            coast.update(rawDistM, sp, elapsedS)
+            if (moveStart == null && sp != null && sp > StalenessLogic.MIN_MOVING_MS) moveStart = elapsedS
             var ms = moveStart ?: return // race not started: holdGap() before prevTickElapsedS is stamped
             val riderDist = coast.effectiveDistanceM
             val p = prevEl
             // Guard (a): race clock, keyed on pendingSample — a pending tick must NOT freeze it.
             // A settle tick can land on a stopped rider (CoastingEstimator's `changed` clear runs
-            // before its stop branch), so `stoppedNow` also freezes — it can't coincide with
-            // pendingSample (the hold sits past the estimator's stop test).
-            val stoppedNow = speedMs != null && speedMs < StalenessLogic.MIN_MOVING_MS
-            if (p != null && elapsedS > p && (stoppedNow || (riderDist <= integLast && !coast.pendingSample))) {
+            // before its stop branch): freeze there ONLY when the settlement resolved an unresolved
+            // hold (`coast.settledPending`) — a coast-recovery residual landing on a stopped tick must
+            // NOT freeze (GhostIntegrator ignores the elapsed delta whenever a historical pace is
+            // available, so freezing there mints lead with nothing to offset it).
+            val stoppedNow = sp != null && sp < StalenessLogic.MIN_MOVING_MS
+            if (p != null && elapsedS > p &&
+                ((stoppedNow && coast.settledPending) || (riderDist <= integLast && !coast.pendingSample))) {
                 ms += (elapsedS - p); moveStart = ms
             }
             prevEl = elapsedS   // ALWAYS, on every tick
@@ -563,5 +569,28 @@ class AdvNumPipelineTest {
         println("PENDING 9: settle-on-stop beat gap=${"%.2f".format(beatGap)}s (broken build reads -1.00)")
         assertEquals("a beating stream must not change the answer", ride(beat = false), beatGap, 1e-6)
         assertEquals("the stopped settle tick charges no stopped second", 0.0, beatGap, 1e-6)
+    }
+
+    @Test fun `PENDING 10 - a coast recovery landing on a stopped tick cannot mint lead`() {
+        // A genuine dropout escalates past the pending tolerance with an UNDER-REPORTED speed
+        // (2.0 m/s), so the coast dead-reckons LESS than the rider actually covered (3.0 s at
+        // 2.0 m/s -> 6 m coasted by the time the tolerance is spent). When the real fix returns, raw
+        // jumps to 9 m — a 3 m positive residual — on a tick where the rider happens to be STOPPED.
+        // That is a coast-RECOVERY correction, not a settling pending hold: the hold was already
+        // flushed by the escalation two ticks earlier, so `coast.settledPending` reads false here.
+        // The broad `stoppedNow` guard (bd04ba2) cannot tell the two apart and freezes anyway.
+        // GhostIntegrator credits `hist * dd` for the residual regardless of the guard (it ignores
+        // the elapsed delta whenever a historical pace is available) — freezing the race clock
+        // removes the only thing that offsets that credit, minting lead out of a stationary tick.
+        val hist = 0.2
+        val r = Rig(pendingToleranceS = 2.0)
+        r.tick(0.0, 0.0, 5.0, hist)                  // anchor
+        r.tick(0.0, 1.0, 2.0, hist)                  // frozen, under-reported speed -> pending (1/2 s)
+        r.tick(0.0, 2.0, 2.0, hist)                  // still held (2/2 s, tolerance boundary)
+        r.tick(0.0, 3.0, 2.0, hist)                  // escalates: flush + coast -> effective 6 m
+        r.tick(9.0, 4.0, 0.0, hist)                  // fix returns (residual +3 m) on a STOPPED tick
+        println("PENDING 10: coast-recovery-on-stop gap=${"%.2f".format(r.gap)}s (broken build reads +0.60)")
+        assertEquals("the residual arithmetic is pinned", -0.4, r.gap, 1e-6)
+        assertTrue("a residual arriving while stationary must not mint lead", r.gap <= 0.0)
     }
 }

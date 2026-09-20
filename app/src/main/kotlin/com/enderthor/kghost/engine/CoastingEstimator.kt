@@ -118,6 +118,14 @@ class CoastingEstimator(
     var pendingSample: Boolean = false
         private set
 
+    /** True on the ONE tick where a raw-distance change RESOLVED an unresolved pending hold — i.e. the
+     *  delayed sample finally arrived. Distinguishes that settlement from a coast recovery correcting
+     *  metres that were already dead-reckoned and already neutral-filled, which must NOT freeze the
+     *  race clock: `GhostIntegrator` ignores `de` when a historical pace is available, so freezing
+     *  there credits `hist * dd` with nothing to offset it and mints lead. */
+    var settledPending: Boolean = false
+        private set
+
     /** True while a pending interval is UNRESOLVED — including across a stop inside it. Drives the
      *  route tick's integrator and publication guards: the integrator must not be ticked with
      *  `dd == 0` while a hold is outstanding, because `GhostIntegrator` advances `prevElapsedS`
@@ -220,6 +228,7 @@ class CoastingEstimator(
      */
     fun update(rawDistanceM: Double, speedMs: Double?, elapsedS: Double) {
         pendingSample = false   // set true only by the hold branch below; must run even on a non-finite tick
+        settledPending = false  // set true only by the settle branch below; must run even on a non-finite tick
         // Guard non-finite inputs: ignore the sample and keep the previous state (no NaN propagation).
         if (!rawDistanceM.isFinite() || !elapsedS.isFinite()) return
         // A non-finite SPEED is ABSENT, not a rate: NaN < minMovingMs is false, so it slipped past the
@@ -249,6 +258,7 @@ class CoastingEstimator(
             rawAtFreezeM = if (firstCall) rawDistanceM else prevRawM
             coastedSurplusM = if (firstCall) 0.0 else effectiveDistanceM - prevRawM
             if (speedMs != null && speedMs in minMovingMs..AGG_MAX_SPEED_MS) lastMovingSpeedMs = speedMs
+            settledPending = pendingHold
             deferredM = 0.0; heldS = 0.0; pendingHold = false
             effectiveDistanceM = rawDistanceM
             quality = CoastQuality.LIVE

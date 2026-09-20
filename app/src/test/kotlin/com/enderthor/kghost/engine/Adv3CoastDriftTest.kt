@@ -37,17 +37,23 @@ class Adv3CoastDriftTest {
         var publishCount = 0; private set
 
         fun tick(rawDistM: Double, elapsedS: Double, speedMs: Double?, pace: Double?, fixFresh: Boolean = true) {
-            coast.update(rawDistM, speedMs, elapsedS)
-            if (moveStart == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS) moveStart = elapsedS
+            // Production normalizes SPEED (`?.takeIf { it.isFinite() }`, KGhostExtension.kt:1947) before
+            // either the estimator or the guard sees it; do the same here once, up front.
+            val sp = speedMs?.takeIf { it.isFinite() }
+            coast.update(rawDistM, sp, elapsedS)
+            if (moveStart == null && sp != null && sp > StalenessLogic.MIN_MOVING_MS) moveStart = elapsedS
             var ms = moveStart ?: return
             val riderDist = coast.effectiveDistanceM
             val p = prevEl
             // Guard (a): race clock, keyed on pendingSample — a pending tick must NOT freeze it.
             // A settle tick can land on a stopped rider (CoastingEstimator's `changed` clear runs
-            // before its stop branch), so `stoppedNow` also freezes — it can't coincide with
-            // pendingSample (the hold sits past the estimator's stop test).
-            val stoppedNow = speedMs != null && speedMs < StalenessLogic.MIN_MOVING_MS
-            if (p != null && elapsedS > p && (stoppedNow || (riderDist <= integLast && !coast.pendingSample))) {
+            // before its stop branch): freeze there ONLY when the settlement resolved an unresolved
+            // hold (`coast.settledPending`) — a coast-recovery residual landing on a stopped tick must
+            // NOT freeze (GhostIntegrator ignores the elapsed delta whenever a historical pace is
+            // available, so freezing there mints lead with nothing to offset it).
+            val stoppedNow = sp != null && sp < StalenessLogic.MIN_MOVING_MS
+            if (p != null && elapsedS > p &&
+                ((stoppedNow && coast.settledPending) || (riderDist <= integLast && !coast.pendingSample))) {
                 ms += (elapsedS - p); moveStart = ms
             }
             prevEl = elapsedS   // ALWAYS, on every tick
@@ -164,7 +170,9 @@ class Adv3CoastDriftTest {
             var trueD = 0.0; var t = 0.0
             var sumErrRaw = 0.0; var sumErrOdo = 0.0; var maxOver = 0.0; var minErr = 0.0
             val n = 7200
-            repeat(n) {
+            // q=20 ticks 11-14, captured for the concrete cycle assertion below (0-indexed slots).
+            val cycle20 = DoubleArray(4)
+            repeat(n) { i ->
                 trueD += 6.0; t += 1.0
                 val raw = floor(trueD / q) * q
                 c.update(raw, 6.0, t)
@@ -172,6 +180,7 @@ class Adv3CoastDriftTest {
                 sumErrOdo += eo; sumErrRaw += raw - trueD
                 maxOver = maxOf(maxOver, c.effectiveDistanceM - raw)
                 minErr = minOf(minErr, eo)
+                if (q == 20.0 && i + 1 in 11..14) cycle20[i + 1 - 11] = c.effectiveDistanceM
             }
             println(
                 "H1c q=${q}m: mean(odo-true)=${"%.2f".format(sumErrOdo / n)} m  " +
@@ -184,6 +193,15 @@ class Adv3CoastDriftTest {
                 // maxOver == 0 — an always-return-raw implementation would pass every assertion
                 // above. Require the sawtooth this test is named for: a POSITIVE overshoot.
                 assertTrue("the 20 m quantum must escape the hold and reach real dead-reckoning (maxOver > 0)", maxOver > 0.0)
+                // `maxOver > 0.0` alone is satisfiable by an implementation that merely returns
+                // `raw + 1 m` on unchanged ticks. Pin the actual cycle: ticks 11-12 held (raw frozen
+                // at 60, nothing applied yet), tick 13 escalates past the 2 s tolerance (flushes the
+                // 12 m deferred by the hold, then coasts 6 m more on top of the 60 m anchor -> 78),
+                // tick 14 re-anchors to the fresh raw (80).
+                assertEquals("tick 11: held, still anchored at the last raw", 60.0, cycle20[0], 1e-9)
+                assertEquals("tick 12: still held (2/2 s, tolerance boundary)", 60.0, cycle20[1], 1e-9)
+                assertEquals("tick 13: flush (+12) then coast (+6) on the 60 m anchor", 78.0, cycle20[2], 1e-9)
+                assertEquals("tick 14: raw returns, re-anchor discards the coast", 80.0, cycle20[3], 1e-9)
             }
         }
     }
