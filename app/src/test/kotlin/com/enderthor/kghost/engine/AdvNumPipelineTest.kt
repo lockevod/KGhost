@@ -60,15 +60,17 @@ class AdvNumPipelineTest {
             var ms = moveStart ?: return // race not started: holdGap() before prevTickElapsedS is stamped
             val riderDist = coast.effectiveDistanceM
             val p = prevEl
-            // Guard (a): race clock, keyed on pendingSample — a pending tick must NOT freeze it.
-            // A settle tick can land on a stopped rider (CoastingEstimator's `changed` clear runs
-            // before its stop branch): freeze there ONLY when the settlement resolved an unresolved
-            // hold (`coast.settledPending`) — a coast-recovery residual landing on a stopped tick must
-            // NOT freeze (GhostIntegrator ignores the elapsed delta whenever a historical pace is
-            // available, so freezing there mints lead with nothing to offset it).
+            // Guard (a): race clock. The freeze policy lives in one place — [raceClockFreezes] in
+            // CoastingEstimator.kt — so this rig cannot silently diverge from production; see its
+            // KDoc for the false green that motivated extracting it.
             val stoppedNow = sp != null && sp < StalenessLogic.MIN_MOVING_MS
             if (p != null && elapsedS > p &&
-                ((stoppedNow && coast.settledPending) || (riderDist <= integLast && !coast.pendingSample))) {
+                raceClockFreezes(
+                    stoppedNow = stoppedNow,
+                    settledPending = coast.settledPending,
+                    odometerAdvanced = riderDist > integLast,
+                    pendingSample = coast.pendingSample,
+                )) {
                 ms += (elapsedS - p); moveStart = ms
             }
             prevEl = elapsedS   // ALWAYS, on every tick
@@ -571,7 +573,7 @@ class AdvNumPipelineTest {
         assertEquals("the stopped settle tick charges no stopped second", 0.0, beatGap, 1e-6)
     }
 
-    @Test fun `PENDING 10 - a coast recovery landing on a stopped tick cannot mint lead`() {
+    @Test fun `PENDING 10 - this ride's coast-recovery residual on a stopped tick does not flip the sign`() {
         // A genuine dropout escalates past the pending tolerance with an UNDER-REPORTED speed
         // (2.0 m/s), so the coast dead-reckons LESS than the rider actually covered (3.0 s at
         // 2.0 m/s -> 6 m coasted by the time the tolerance is spent). When the real fix returns, raw
@@ -591,6 +593,9 @@ class AdvNumPipelineTest {
         r.tick(9.0, 4.0, 0.0, hist)                  // fix returns (residual +3 m) on a STOPPED tick
         println("PENDING 10: coast-recovery-on-stop gap=${"%.2f".format(r.gap)}s (broken build reads +0.60)")
         assertEquals("the residual arithmetic is pinned", -0.4, r.gap, 1e-6)
-        assertTrue("a residual arriving while stationary must not mint lead", r.gap <= 0.0)
+        // Not a universal claim: a larger recovery residual can still flip this positive (the narrow
+        // guard leaves ~+0.20 s of headroom where historical credit outweighs the one charged second).
+        // This pins that THIS ride's 3 m residual does not.
+        assertTrue("this ride's residual does not flip the sign positive", r.gap <= 0.0)
     }
 }

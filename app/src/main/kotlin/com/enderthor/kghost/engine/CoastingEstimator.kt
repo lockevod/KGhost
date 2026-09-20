@@ -19,6 +19,33 @@ package com.enderthor.kghost.engine
 fun verdictAllowed(fixAgeOk: Boolean, quality: CoastQuality): Boolean =
     fixAgeOk && quality == CoastQuality.LIVE
 
+/**
+ * The ONE definition of when the moving-time race clock FREEZES. Same reasoning as
+ * [verdictAllowed], same history: the expression used to be duplicated in the production tick and
+ * in each of the four rigs that declare themselves verbatim replicas of it, so a change to
+ * production alone left every rig — and every lock riding on them — asserting the old behaviour
+ * while reporting green.
+ *
+ * Two disjuncts, and they are NOT interchangeable:
+ *  - [stoppedNow] && [settledPending]: a delayed sample arriving on a tick where the rider has
+ *    stopped. The estimator's `changed` branch runs before its stop branch, so the odometer
+ *    advances on that tick even though the rider is stopped; without this the stopped second is
+ *    charged. It is gated on [settledPending] rather than on [stoppedNow] alone because a coast
+ *    RECOVERY residual also advances the odometer while stopped, and freezing there mints lead:
+ *    GhostIntegrator credits `hist * dd` and ignores the elapsed delta when a historical pace
+ *    exists, so there is nothing to offset the frozen clock.
+ *  - !odometerAdvanced && !pendingSample: the original rule. The rider is not advancing on the
+ *    ground, and this flat odometer is not merely a sample the stream has yet to deliver.
+ *
+ * Keep it a single expression. If it grows, the rigs get the growth for free.
+ */
+fun raceClockFreezes(
+    stoppedNow: Boolean,
+    settledPending: Boolean,
+    odometerAdvanced: Boolean,
+    pendingSample: Boolean,
+): Boolean = (stoppedNow && settledPending) || (!odometerAdvanced && !pendingSample)
+
 /** Quality of the distance [CoastingEstimator] produces this tick. */
 enum class CoastQuality {
     /** A real fix (distance changed) or a legitimate stop (speed ≈ 0): measured, fully reliable. */
@@ -118,11 +145,14 @@ class CoastingEstimator(
     var pendingSample: Boolean = false
         private set
 
-    /** True on the ONE tick where a raw-distance change RESOLVED an unresolved pending hold — i.e. the
-     *  delayed sample finally arrived. Distinguishes that settlement from a coast recovery correcting
-     *  metres that were already dead-reckoned and already neutral-filled, which must NOT freeze the
-     *  race clock: `GhostIntegrator` ignores `de` when a historical pace is available, so freezing
-     *  there credits `hist * dd` with nothing to offset it and mints lead. */
+    /** True on the ONE tick where a raw-distance change CLOSED an unresolved pending hold — i.e. the
+     *  hold resolved, most often because the delayed sample finally arrived, but also on a raw
+     *  DECREASE (a source reset): that still closes the hold, and reaches the integrator as `dd < 0`
+     *  taking the rebaseline branch with no historical credit, so it does not break the guard below.
+     *  Distinguishes that settlement from a coast recovery correcting metres that were already
+     *  dead-reckoned and already neutral-filled, which must NOT freeze the race clock:
+     *  `GhostIntegrator` ignores `de` when a historical pace is available, so freezing there credits
+     *  `hist * dd` with nothing to offset it and mints lead. */
     var settledPending: Boolean = false
         private set
 

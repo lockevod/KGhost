@@ -12,6 +12,7 @@ import com.enderthor.kghost.engine.CadenceProbe
 import com.enderthor.kghost.engine.CoastQuality
 import com.enderthor.kghost.engine.CoastingEstimator
 import com.enderthor.kghost.engine.verdictAllowed
+import com.enderthor.kghost.engine.raceClockFreezes
 import com.enderthor.kghost.engine.GapCalculator
 import com.enderthor.kghost.engine.GapState
 import com.enderthor.kghost.engine.GapStateHolder
@@ -2291,24 +2292,18 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // a pending interval must still freeze the clock.
                         var moveStart = moveStart0
                         val prevEl = prevTickElapsedS
-                        // A settle tick can land on a stopped rider: the estimator's `changed` clear
-                        // (CoastingEstimator :240) runs BEFORE its stop branch (:261), so the odometer
-                        // ADVANCES on a tick where the rider is provably stopped THIS tick. Without a
-                        // freeze there this guard would see riderDist > integLastRiderDist and refuse
-                        // to freeze, charging a stopped second. But `stoppedNow` alone is TOO BROAD: a
-                        // coast-recovery tick can also land on a stopped rider, correcting metres that
-                        // were already dead-reckoned and already neutral-filled — freezing THERE mints
-                        // lead, because GhostIntegrator (:79/:114) ignores the elapsed delta whenever a
-                        // historical pace is available, so crediting `hist * dd` with the clock frozen
-                        // raises the gap with nothing to offset it. `coast.settledPending` is what tells
-                        // the two apart: it is true only on the ONE tick where a raw-distance change
-                        // resolved an UNRESOLVED pending hold (the delayed sample finally arriving), not
-                        // on a coast recovery (which was never held). Freeze only that settlement, not
-                        // every stopped tick with an advancing odometer.
+                        // The freeze policy lives in one place — [engine.raceClockFreezes] — so this
+                        // tick and the four adversarial rigs that replicate it cannot silently diverge;
+                        // see its KDoc for the false green that motivated extracting it and for why the
+                        // two disjuncts below are not interchangeable.
                         val stoppedNow = speedMs != null && speedMs < StalenessLogic.MIN_MOVING_MS
                         if (prevEl != null && elapsedS > prevEl &&
-                            ((stoppedNow && coast.settledPending) ||
-                                (riderDist <= integLastRiderDist && !coast.pendingSample))) {
+                            raceClockFreezes(
+                                stoppedNow = stoppedNow,
+                                settledPending = coast.settledPending,
+                                odometerAdvanced = riderDist > integLastRiderDist,
+                                pendingSample = coast.pendingSample,
+                            )) {
                             moveStart += (elapsedS - prevEl)
                             firstMoveElapsedS = moveStart
                         }

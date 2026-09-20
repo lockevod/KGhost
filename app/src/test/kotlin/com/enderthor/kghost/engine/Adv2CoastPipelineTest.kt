@@ -51,15 +51,17 @@ class Adv2CoastPipelineTest {
             var ms = moveStart ?: return
             val riderDist = coast.effectiveDistanceM
             val p = prevEl
-            // Guard (a): race clock, keyed on pendingSample — a pending tick must NOT freeze it.
-            // A settle tick can land on a stopped rider (CoastingEstimator's `changed` clear runs
-            // before its stop branch): freeze there ONLY when the settlement resolved an unresolved
-            // hold (`coast.settledPending`) — a coast-recovery residual landing on a stopped tick must
-            // NOT freeze (GhostIntegrator ignores the elapsed delta whenever a historical pace is
-            // available, so freezing there mints lead with nothing to offset it).
+            // Guard (a): race clock. The freeze policy lives in one place — [raceClockFreezes] in
+            // CoastingEstimator.kt — so this rig cannot silently diverge from production; see its
+            // KDoc for the false green that motivated extracting it.
             val stoppedNow = sp != null && sp < StalenessLogic.MIN_MOVING_MS
             if (p != null && elapsedS > p &&
-                ((stoppedNow && coast.settledPending) || (riderDist <= integLast && !coast.pendingSample))) {
+                raceClockFreezes(
+                    stoppedNow = stoppedNow,
+                    settledPending = coast.settledPending,
+                    odometerAdvanced = riderDist > integLast,
+                    pendingSample = coast.pendingSample,
+                )) {
                 ms += (elapsedS - p); moveStart = ms
             }
             prevEl = elapsedS   // ALWAYS, on every tick
