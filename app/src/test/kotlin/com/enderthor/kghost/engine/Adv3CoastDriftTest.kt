@@ -148,14 +148,14 @@ class Adv3CoastDriftTest {
     }
 
     /** Quantised DISTANCE: the one place the integration is visible with GPS healthy. A host that steps
-     *  DISTANCE in whole units leaves ticks where raw is frozen but the rider is moving. At these quanta
-     *  (q <= 10 m, rider at 6 m/s) every such freeze is at most 2 ticks — inside the 2 s pending
-     *  tolerance — so it now HOLDS rather than dead-reckoning: the odometer never runs ahead of raw at
-     *  all, and `maxOver` measures 0 across the board. Kept as a lock (not a cumulative-bias check
-     *  any more, since there is nothing left to dead-reckon at these quanta) so a quantum large enough
-     *  to escape the tolerance would have to face it. */
+     *  DISTANCE in whole units leaves ticks where raw is frozen but the rider is moving. At the small
+     *  quanta (q <= 10 m, rider at 6 m/s) every such freeze is at most 2 ticks — inside the 2 s pending
+     *  tolerance — so it is now absorbed by the HOLD rather than dead-reckoned: the odometer never runs
+     *  ahead of raw at all for those, and `maxOver` measures 0. The 20 m quantum is the one that escapes
+     *  the tolerance (freezes run 3+ ticks at 6 m/s), reaching the real dead-reckoning path and
+     *  restoring the genuine one-signed sawtooth the assertions below measure. */
     @Test fun `H1c - quantised DISTANCE makes a one-signed sawtooth that never accumulates`() {
-        for (q in listOf(1.0, 5.0, 10.0)) {
+        for (q in listOf(1.0, 5.0, 10.0, 20.0)) {
             val c = CoastingEstimator()
             var trueD = 0.0; var t = 0.0
             var sumErrRaw = 0.0; var sumErrOdo = 0.0; var maxOver = 0.0; var minErr = 0.0

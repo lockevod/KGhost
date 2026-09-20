@@ -43,7 +43,9 @@ enum class CoastQuality {
  *
  * ## Two independent clocks
  * A stop has to do two OPPOSITE things, so they are tracked separately:
- *  * the **odometer** ([effectiveDistanceM]) INTEGRATES speed tick by tick while blind. A stop simply
+ *  * the **odometer** ([effectiveDistanceM]) HOLDS for up to [PENDING_TOLERANCE_S] seconds of a fresh
+ *    freeze with a reported speed (the stream may simply be slower than the 1 Hz tick, not blind — see
+ *    case 3 below), then INTEGRATES speed tick by tick while genuinely blind. A stop simply
  *    holds it: the stop adds nothing (no phantom metres), and takes nothing away (metres already
  *    dead-reckoned were really ridden and are kept). Integrating per tick — rather than multiplying
  *    one speed sample by the whole frozen span — also makes it monotone: a speed sample that drops
@@ -59,7 +61,11 @@ enum class CoastQuality {
  *  1. **Distance changing** (new value): real movement → effective = raw, quality = LIVE, both clocks
  *     reset. Remembers the last moving speed.
  *  2. **Frozen + provably stopped** (`speed < minMovingMs`): legitimate stop → hold everything.
- *  3. **Frozen + moving (or speed unavailable)**: GPS dropout → COAST: `effective += speed * dt` with
+ *  3. **Frozen + moving (or speed unavailable)**: GPS dropout → first, if a REPORTED speed arrives
+ *     within [PENDING_TOLERANCE_S] s of the freeze, HOLD: record what would have been dead-reckoned in
+ *     `deferredM` and apply nothing yet — quality stays LIVE — because the 1 Hz tick oversamples a
+ *     slower distance stream and most such freezes are that, not a dropout. Once the hold either
+ *     resolves (a raw change) or outlives the tolerance, COAST: `effective += speed * dt` with
  *     the speed capped at [AGG_MAX_SPEED_MS] (a corrupt sample may not buy a rate no bicycle reaches), and
  *     the loss clock advances. quality is COASTING while the loss is within `coastWindowMs`, else
  *     LONG_LOSS. Either way we keep extrapolating — we never blank, because a bike computer should
@@ -98,8 +104,10 @@ class CoastingEstimator(
 
     /**
      * The loss clock: seconds the raw distance has been frozen while the rider was NOT provably
-     * stopped. 0 when [quality] is LIVE. It is what the GPS-lost alert and the give-up blank run on,
-     * and it SURVIVES a stop (see the class KDoc) — only a real change in the raw distance clears it.
+     * stopped. 0 when [quality] is LIVE, EXCEPT during an unresolved [pendingHold]: there quality
+     * still reads LIVE (nothing has been invented yet) while this holds the interval's elapsed
+     * seconds (up to [PENDING_TOLERANCE_S]). It is what the GPS-lost alert and the give-up blank run
+     * on, and it SURVIVES a stop (see the class KDoc) — only a real change in the raw distance clears it.
      */
     var coastingSeconds: Double = 0.0
         private set
@@ -211,6 +219,7 @@ class CoastingEstimator(
      * ride-elapsed rather than wall-clock (pause-safety).
      */
     fun update(rawDistanceM: Double, speedMs: Double?, elapsedS: Double) {
+        pendingSample = false   // set true only by the hold branch below; must run even on a non-finite tick
         // Guard non-finite inputs: ignore the sample and keep the previous state (no NaN propagation).
         if (!rawDistanceM.isFinite() || !elapsedS.isFinite()) return
         // A non-finite SPEED is ABSENT, not a rate: NaN < minMovingMs is false, so it slipped past the
@@ -218,7 +227,6 @@ class CoastingEstimator(
         // freeze does not help (NaN * 0.0 is NaN). Production only survived it because the caller filters
         // with takeIf { isFinite() }; the class now guarantees it itself.
         @Suppress("NAME_SHADOWING") val speedMs = speedMs?.takeIf { it.isFinite() }
-        pendingSample = false   // set true only by the hold branch below
 
         val firstCall = prevElapsedS.isNaN()
         // Elapsed-based, so a pause (ELAPSED_TIME frozen) advances nothing. coerceAtLeast(0) guards a
