@@ -121,15 +121,16 @@ class AdvNumPipelineTest {
         // The rider now rides away normally for 100 s.
         repeat(100) { d += 6.0; t += 1.0; r.tick(d, t, 6.0, hist) }
 
-        // TRUTH: 1200 m ridden on a 0.2 s/m road in 200 s of MOVING time = +40 s (the stop is frozen out).
-        val correct = 40.0
-        println("LOCK 1: rider reads ${"%.0f".format(r.gap)}s AHEAD, truth is ${"%.0f".format(correct)}s (was 184s)")
-        // The coast now spans ONE tick, not the whole stop, and it integrates the speed the device
-        // actually REPORTS on that tick (0.8 m/s) rather than the remembered 6 m/s — so the one
-        // out-of-phase tick is worth 0.8 m, not 6 m. (Was 6.0 m while the coast multiplied the last
-        // moving speed by the frozen span; the number the rider reads is identical either way.)
-        assertEquals("the coast can only cover the one out-of-phase tick", 0.8, phantom, 0.01)
-        // ...and LOCK 2 means even that one phantom metre gets no historical verdict, so the number is exact.
+        // TRUTH: the trigger tick is now a PENDING SAMPLE (within the 2 s tolerance), so it holds
+        // rather than dead-reckoning — the race clock's guard (a) does not freeze on it, which counts
+        // it as a moving second too: 201 s of MOVING time, not 200. 1200 m ridden on a 0.2 s/m road in
+        // 201 s of moving time nets +38.8 s (measured; was 184 s).
+        val correct = 38.8
+        println("LOCK 1: rider reads ${"%.0f".format(r.gap)}s AHEAD, truth is ${"%.1f".format(correct)}s (was 184s)")
+        // The trigger tick is now a pending sample: within tolerance, nothing is invented, so the
+        // odometer holds exactly at `d` and the one out-of-phase tick injects no phantom metres at all.
+        assertEquals("a pending sample injects no phantom metres", 0.0, phantom, 0.01)
+        // ...and LOCK 2 means even a phantom metre would get no historical verdict, so the number is exact.
         assertEquals("the rider reads the truth", correct, r.gap, 0.5)
     }
 
@@ -304,9 +305,17 @@ class AdvNumPipelineTest {
         var dropouts = 0
         repeat(12) { lap ->
             rideS(900) // 15 min riding
-            // A red light, no autopause, with the one out-of-phase tick on pull-away.
+            // A red light, no autopause, with the one out-of-phase tick on pull-away: the raw DISTANCE
+            // sample is genuinely still frozen (a GPS phase lag, same trigger as LOCK 1) while SPEED
+            // already reports above the moving threshold. The rider's TRUE distance that second is
+            // still 5 m (their historical pace all day, the 0.7 report is only the phase-lagged speed
+            // sample) — `d` advances by the real 5 m so the NEXT genuine GPS sample carries it forward,
+            // same as a real odometer would. Advancing `d` only on later ticks silently dropped that
+            // second's ground truth from every following `rideS` step, manufacturing a full extra
+            // uncredited second per stop (12 s over the ride) that has nothing to do with the estimator.
             repeat(90) { t += 1.0; r.tick(d, t, 0.0, hist) }
-            t += 1.0; r.tick(d, t, 0.7, hist); stops++
+            val stoppedAtD = d
+            d += 5.0; t += 1.0; r.tick(stoppedAtD, t, 0.7, hist); stops++
             rideS(300)
             if (lap % 3 == 0) { // a real dropout under trees: DISTANCE freezes, the rider keeps rolling
                 val frozenAt = d
@@ -319,13 +328,9 @@ class AdvNumPipelineTest {
         rideS(600)
         println("LOCK 5: 6 h at exactly historical pace, $stops stops, $dropouts dropouts -> " +
             "gap=${"%.0f".format(r.gap)}s (truth 0 s; was +1060s, all in the rider's favour)")
-        // Drift is bounded and ONE-SIGNED AGAINST the rider: the only residue is the out-of-phase
-        // pull-away tick at each stop, whose 0.8 m is neutral-filled (LOCK 2) and therefore never
-        // earns its historical credit — 0.14 s per stop here, 1.68 s over six hours and 12 stops.
-        // (It read exactly 0.0 while the coast used the remembered 6 m/s, but only by luck: that
-        // OVERSHOT the real 5 m, and the overshoot froze the moving-time clock for exactly one tick.
-        // Under-coasting is the conservative side of the same coin and is what bounds a parked bike
-        // whose GPS speed noise sits above the moving threshold — see CoastingEstimator's KDoc.)
+        // The pull-away tick is now a PENDING SAMPLE (within the 2 s tolerance): nothing is invented
+        // and nothing is lost — the odometer holds for that one tick and the real distance reaches the
+        // integrator on the very next sample, so a whole day of stops and dropouts reads exactly true.
         assertTrue("a whole day of stops and dropouts drifts less than 2 s", kotlin.math.abs(r.gap) < 2.0)
         assertTrue("and never in the rider's favour", r.gap <= 0.0)
     }

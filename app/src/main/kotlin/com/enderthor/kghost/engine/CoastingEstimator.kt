@@ -368,6 +368,8 @@ class CoastingEstimator(
          * that produced 495 "gps-loss episodes" with `fixAge@tick` never above 1180 ms against a
          * 5000 ms gate; 470 of them lasted exactly one second, 483 two or less.
          */
-        const val PENDING_TOLERANCE_S = 0.0   // Task 5 raises this to 2.0
+        // 2.0 s covers 483 of the 495 episodes measured on the 2026-09-20 ride; the 3-10 s tail is
+        // left to the existing, proven dead-reckoning path.
+        const val PENDING_TOLERANCE_S = 2.0
     }
 }

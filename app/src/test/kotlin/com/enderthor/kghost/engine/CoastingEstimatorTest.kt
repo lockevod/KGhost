@@ -83,8 +83,9 @@ class CoastingEstimatorTest {
     @Test fun `coasting uses the last MOVING speed not a later low speed`() {
         val c = newEstimator(coastWindowMs = 30_000L)
         c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 0.0)  // remember 10 m/s
-        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 2.0)  // coast 100 + 10*2 = 120
-        assertEquals(120.0, c.effectiveDistanceM, 1e-6)
+        // Past the pending tolerance (2 s): this is a genuine coast, not a held pending sample.
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 3.0)  // coast 100 + 10*3 = 130
+        assertEquals(130.0, c.effectiveDistanceM, 1e-6)
         assertEquals(CoastQuality.COASTING, c.quality)
     }
 
@@ -113,11 +114,11 @@ class CoastingEstimatorTest {
         // Rolling again, but DISTANCE has not caught up yet → the coast branch fires.
         c.update(rawDistanceM = 1000.0, speedMs = 0.8, elapsedS = 121.0)
 
-        // ONE tick of movement at the speed actually REPORTED (0.8 m/s), not 121 s of it, and not the
-        // remembered 6 m/s: the dead reckoning integrates the speed stream tick by tick.
-        assertEquals(1000.8, c.effectiveDistanceM, 1e-6)
-        assertEquals(1.0, c.coastingSeconds, 1e-6)          // the alert clock, not 121 s
-        assertEquals(CoastQuality.COASTING, c.quality)      // NOT LONG_LOSS → no false "GPS lost"
+        // The resume tick is a PENDING SAMPLE (within the 2 s tolerance): nothing is invented, so the
+        // odometer holds exactly at the raw value and no metres are dead-reckoned at all.
+        assertEquals(1000.0, c.effectiveDistanceM, 1e-6)
+        assertEquals(1.0, c.coastingSeconds, 1e-6)          // the alert clock, not 121 s — unchanged
+        assertEquals(CoastQuality.LIVE, c.quality)          // a pending sample reads LIVE, not COASTING
         // Ageing the anchor across the stop instead gives 1000 + 6 × 121 = 1726 m: ~726 phantom
         // metres in one tick.
     }
@@ -198,13 +199,13 @@ class CoastingEstimatorTest {
     @Test fun `dropout then recovery reports the freeze point and the discarded surplus`() {
         val c = newEstimator(coastWindowMs = 30_000L)
         c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 0.0)
-        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 1.0) // frozen, coasting
-        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 2.0)
-        assertEquals(120.0, c.effectiveDistanceM, 1e-6)               // 20 m dead-reckoned
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 1.0) // frozen: within tolerance, a hold
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 2.0) // still within tolerance (2 s)
+        assertEquals(100.0, c.effectiveDistanceM, 1e-6)               // held, nothing dead-reckoned yet
         c.update(rawDistanceM = 105.0, speedMs = 10.0, elapsedS = 3.0) // fix back: raw resumed, not jumped
         assertEquals(CoastQuality.LIVE, c.quality)
         assertEquals(100.0, c.rawAtFreezeM, 1e-6)                     // frozen AT 100 m
-        assertEquals(20.0, c.coastedSurplusM, 1e-6)                   // 20 m discarded by effective = raw
+        assertEquals(0.0, c.coastedSurplusM, 1e-6)                    // nothing was ever invented to discard
         assertEquals(105.0, c.effectiveDistanceM, 1e-6)
     }
 
@@ -221,31 +222,42 @@ class CoastingEstimatorTest {
     @Test fun `a stop INSIDE a dropout keeps the metres already dead-reckoned in the surplus`() {
         val c = newEstimator(coastWindowMs = 30_000L)
         c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 0.0)
-        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 2.0) // 20 m coasted while blind
-        c.update(rawDistanceM = 100.0, speedMs = 0.0, elapsedS = 12.0) // stop mid-dropout: hold, add nothing
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 2.0) // within tolerance: held, not coasted
+        c.update(rawDistanceM = 100.0, speedMs = 0.0, elapsedS = 12.0) // stop mid-hold: hold stays open
         c.update(rawDistanceM = 100.0, speedMs = 0.0, elapsedS = 22.0)
         c.update(rawDistanceM = 101.0, speedMs = 4.0, elapsedS = 23.0) // fix back
         assertEquals(100.0, c.rawAtFreezeM, 1e-6)
-        assertEquals(20.0, c.coastedSurplusM, 1e-6) // the stop neither added nor removed metres
+        assertEquals(0.0, c.coastedSurplusM, 1e-6) // nothing was ever dead-reckoned to discard
+    }
+
+    @Test fun `escalated - a stop INSIDE a dropout past the pending tolerance keeps the metres already dead-reckoned`() {
+        val c = newEstimator(coastWindowMs = 30_000L)
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 0.0)
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 3.0) // past tolerance: 30 m genuinely coasted
+        c.update(rawDistanceM = 100.0, speedMs = 0.0, elapsedS = 13.0) // stop mid-dropout: hold, add nothing
+        c.update(rawDistanceM = 100.0, speedMs = 0.0, elapsedS = 23.0)
+        c.update(rawDistanceM = 101.0, speedMs = 4.0, elapsedS = 24.0) // fix back
+        assertEquals(100.0, c.rawAtFreezeM, 1e-6)
+        assertEquals(30.0, c.coastedSurplusM, 1e-6) // the stop neither added nor removed metres
     }
 
     @Test fun `each episode reports its own numbers and a live stretch resets them`() {
         val c = newEstimator(coastWindowMs = 30_000L)
         c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 0.0)
-        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 1.0) // episode 1: 10 m
+        c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 1.0) // episode 1: within tolerance, held
         c.update(rawDistanceM = 108.0, speedMs = 10.0, elapsedS = 2.0)
         assertEquals(100.0, c.rawAtFreezeM, 1e-6)
-        assertEquals(10.0, c.coastedSurplusM, 1e-6)
+        assertEquals(0.0, c.coastedSurplusM, 1e-6) // held, nothing dead-reckoned to discard
         // A clean live tick in between: nothing was frozen, so the surplus is zero again.
         c.update(rawDistanceM = 118.0, speedMs = 10.0, elapsedS = 3.0)
         assertEquals(108.0, c.rawAtFreezeM, 1e-6)
         assertEquals(0.0, c.coastedSurplusM, 1e-6)
-        // Episode 2, back to back: 2 s at 10 m/s = 20 m from a different freeze point.
+        // Episode 2, back to back: 2 s at 10 m/s from a different freeze point — still within tolerance.
         c.update(rawDistanceM = 118.0, speedMs = 10.0, elapsedS = 4.0)
         c.update(rawDistanceM = 118.0, speedMs = 10.0, elapsedS = 5.0)
         c.update(rawDistanceM = 130.0, speedMs = 10.0, elapsedS = 6.0)
         assertEquals(118.0, c.rawAtFreezeM, 1e-6)
-        assertEquals(20.0, c.coastedSurplusM, 1e-6)
+        assertEquals(0.0, c.coastedSurplusM, 1e-6) // held, nothing dead-reckoned to discard
     }
 
     @Test fun `the first call has no freeze to report`() {
