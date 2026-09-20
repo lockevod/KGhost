@@ -549,6 +549,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // The last odometer distance handed to the integrator this ride — persisted in the checkpoint so a
     // mid-ride power-off resumes with the accrued lead (GhostIntegrator keeps lastRiderDist private).
     @Volatile private var integLastRiderDist: Double = 0.0
+    // Whether [integrator] has taken its first onTick. restore() only stores pendingResumeLead; the
+    // actual re-anchor happens INSIDE the first onTick, so that call must never be skipped or the
+    // integrator publishes (and checkpoints) a default ZERO gap over a restored lead.
+    @Volatile private var integInitialised: Boolean = false
     // The pick the integrator is CURRENTLY racing — re-stamped every tick, because a pick-only repick
     // keeps the integrator (the pace lookup already reads eff.ghostPick live, so the number follows the
     // new pick immediately) and the checkpoint must record the pick the lead was actually earned under.
@@ -599,6 +603,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         lap2Started = false
         integrator = null
         integLastRiderDist = 0.0
+        integInitialised = false
         integPick = null
         integVpTpm = 0.0
         lastCheckpointMs = 0L
@@ -2277,9 +2282,16 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // grows when dd>0), so the two stay consistent (both frozen while stopped). Auto-pause
                         // already freezes ELAPSED_TIME, so this only bites a stop-while-Recording (incl. the sim
                         // sitting at the line). NOT applied before a prior tick exists.
+                        // A PENDING SAMPLE is not a stop: the odometer is flat only because the
+                        // distance stream has not delivered its next value. Freezing the race clock
+                        // there would DELETE the rider's second from the race — roughly +1 s per
+                        // event, ~470 events per ride, a lead minted out of missing time rather than
+                        // phantom metres. Keyed on pendingSample, NOT pendingHold: a real stop inside
+                        // a pending interval must still freeze the clock.
                         var moveStart = moveStart0
                         val prevEl = prevTickElapsedS
-                        if (prevEl != null && elapsedS > prevEl && riderDist <= integLastRiderDist) {
+                        if (prevEl != null && elapsedS > prevEl && riderDist <= integLastRiderDist &&
+                            !coast.pendingSample) {
                             moveStart += (elapsedS - prevEl)
                             firstMoveElapsedS = moveStart
                         }
@@ -2292,6 +2304,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             val vpTpm = (1.0 / eff.targetSpeedMs.coerceAtLeast(0.1)).coerceIn(0.05, 20.0)
                             integ = GhostIntegrator(eff.ghostPick, vpTimePerM = vpTpm, decimateM = 20.0)
                             integrator = integ
+                            integInitialised = false
                             integPick = eff.ghostPick
                             integVpTpm = vpTpm
                             lastCheckpointMs = 0L
@@ -2383,8 +2396,17 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             null
                         }
                         val paceNow = paceHere ?: paceGrade
-                        integ.onTick(riderDist, gLat, gLng, gHdg, elapsedS - moveStart) { _, _, _ -> paceNow }
-                        integLastRiderDist = riderDist
+                        // Guard (b): keyed on pendingHold (NOT pendingSample) so it survives a genuine stop
+                        // inside a pending interval — that tick must still be skipped, not just held.
+                        // integInitialised forces the very first call through regardless of coast's state:
+                        // restore() only stores pendingResumeLead, and the actual re-anchor over a restored
+                        // lead happens INSIDE this call, so it must never be skipped or a checkpoint resume
+                        // publishes (and re-persists) a default ZERO gap.
+                        if (!coast.pendingHold || !integInitialised) {
+                            integ.onTick(riderDist, gLat, gLng, gHdg, elapsedS - moveStart) { _, _, _ -> paceNow }
+                            integInitialised = true
+                            integLastRiderDist = riderDist
+                        }
                         // Persist the scalar race state ~every CHECKPOINT_INTERVAL_MS so a mid-ride power-off /
                         // crash resumes with the LEAD (integ.gapTimeS), not the raw ghostTime. The snapshot is
                         // built HERE (Main) so the IO writer never reads the integrator's non-volatile scalars
@@ -2556,7 +2578,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             markerReliable -> ghostRouteDist
                             else -> lastReliableGhostRouteDist // off-route: hold the last reliable position
                         }
-                        GapStateHolder.update(gap)
+                        // Freeze the WHOLE published number while a hold is unresolved. Freezing
+                        // gapTimeS alone is not enough: while BEHIND, gapDistM is recomputed from
+                        // rg.distanceAt(rg.timeAt(riderR) - gapTimeS), and a fresh fix moves riderR,
+                        // so the distance field would drift mid-hold. The marker is deliberately NOT
+                        // frozen — it keeps tracking the rider.
+                        if (!coast.pendingHold) GapStateHolder.update(gap)
                         // SEG/GP tag: SEG when the number got a verdict this tick (PacePatch or GradePace, either
                         // tier), GP on neutral-fill where the number measures nothing. The field reads only
                         // non-null (SEG) — the label is unused, so a stable instance (deduped by the holder)
