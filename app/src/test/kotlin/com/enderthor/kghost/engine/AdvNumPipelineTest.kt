@@ -40,6 +40,9 @@ class AdvNumPipelineTest {
         private var moveStart: Double? = null
         private var prevEl: Double? = null
         private var integLast = 0.0
+        private var integInitialised = false
+        /** Guard (c): how many ticks published a gap. A pending tick must not. */
+        var publishCount = 0; private set
 
         /** [pace] = what the tiers would answer at this position (null = tier 3 / neutral fill).
          *  [fixFresh] = the GPS-fix freshness gate that both tier 1 and tier 2 sit behind. */
@@ -49,11 +52,20 @@ class AdvNumPipelineTest {
             var ms = moveStart ?: return // race not started: holdGap() before prevTickElapsedS is stamped
             val riderDist = coast.effectiveDistanceM
             val p = prevEl
-            if (p != null && elapsedS > p && riderDist <= integLast) { ms += (elapsedS - p); moveStart = ms }
-            prevEl = elapsedS
+            // Guard (a): race clock, keyed on pendingSample — a pending tick must NOT freeze it.
+            if (p != null && elapsedS > p && riderDist <= integLast && !coast.pendingSample) {
+                ms += (elapsedS - p); moveStart = ms
+            }
+            prevEl = elapsedS   // ALWAYS, on every tick
             val paceNow = if (verdictAllowed(fixFresh, coast.quality)) pace else null
-            g.onTick(riderDist, 0.0, riderDist * 1e-5, 90.0, elapsedS - ms) { _, _, _ -> paceNow }
-            integLast = riderDist
+            // Guard (b): keyed on pendingHold, so it survives a stop inside the interval.
+            if (!coast.pendingHold || !integInitialised) {
+                g.onTick(riderDist, 0.0, riderDist * 1e-5, 90.0, elapsedS - ms) { _, _, _ -> paceNow }
+                integInitialised = true
+                integLast = riderDist
+            }
+            // Guard (c): publication, also keyed on pendingHold.
+            if (!coast.pendingHold) publishCount++
         }
 
         /** What the rider reads: + = ahead of the historical self. */
