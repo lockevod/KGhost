@@ -58,7 +58,11 @@ class AdvNumPipelineTest {
             val riderDist = coast.effectiveDistanceM
             val p = prevEl
             // Guard (a): race clock, keyed on pendingSample — a pending tick must NOT freeze it.
-            if (p != null && elapsedS > p && riderDist <= integLast && !coast.pendingSample) {
+            // A settle tick can land on a stopped rider (CoastingEstimator's `changed` clear runs
+            // before its stop branch), so `stoppedNow` also freezes — it can't coincide with
+            // pendingSample (the hold sits past the estimator's stop test).
+            val stoppedNow = speedMs != null && speedMs < StalenessLogic.MIN_MOVING_MS
+            if (p != null && elapsedS > p && (stoppedNow || (riderDist <= integLast && !coast.pendingSample))) {
                 ms += (elapsedS - p); moveStart = ms
             }
             prevEl = elapsedS   // ALWAYS, on every tick
@@ -534,5 +538,30 @@ class AdvNumPipelineTest {
             return r.gap
         }
         assertEquals("a budget under the tolerance must behave as today", ride(0.0), ride(2.0), 1e-6)
+    }
+
+    @Test fun `PENDING 9 - a hold that settles on a stopped tick charges no stopped second`() {
+        // Guard (a)'s riderDist/pendingSample test runs BEFORE CoastingEstimator's stop branch is
+        // reached on the SETTLE tick, so a settle that lands on a stopped rider used to look like
+        // ordinary movement (the odometer had just advanced) and the stopped second was charged.
+        // Both rides carry the same 5 m held-then-settled step and the same stop; they differ only
+        // in whether the stream beats first.
+        val hist = 0.2
+        fun ride(beat: Boolean): Double {
+            val r = Rig(pendingToleranceS = 2.0)
+            r.tick(100.0, 0.0, 5.0, hist)                    // anchor
+            if (beat) {
+                r.tick(100.0, 1.0, 5.0, hist)                // stream owes us a sample -> pending
+                r.tick(105.0, 2.0, 0.0, hist)                // settle lands on a STOPPED tick
+            } else {
+                r.tick(105.0, 1.0, 5.0, hist)                // timely: the 5 m arrive on time
+                r.tick(105.0, 2.0, 0.0, hist)                // unchanged, rider now stopped
+            }
+            return r.gap
+        }
+        val beatGap = ride(beat = true)
+        println("PENDING 9: settle-on-stop beat gap=${"%.2f".format(beatGap)}s (broken build reads -1.00)")
+        assertEquals("a beating stream must not change the answer", ride(beat = false), beatGap, 1e-6)
+        assertEquals("the stopped settle tick charges no stopped second", 0.0, beatGap, 1e-6)
     }
 }

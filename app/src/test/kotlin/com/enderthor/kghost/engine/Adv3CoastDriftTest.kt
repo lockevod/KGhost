@@ -43,7 +43,11 @@ class Adv3CoastDriftTest {
             val riderDist = coast.effectiveDistanceM
             val p = prevEl
             // Guard (a): race clock, keyed on pendingSample — a pending tick must NOT freeze it.
-            if (p != null && elapsedS > p && riderDist <= integLast && !coast.pendingSample) {
+            // A settle tick can land on a stopped rider (CoastingEstimator's `changed` clear runs
+            // before its stop branch), so `stoppedNow` also freezes — it can't coincide with
+            // pendingSample (the hold sits past the estimator's stop test).
+            val stoppedNow = speedMs != null && speedMs < StalenessLogic.MIN_MOVING_MS
+            if (p != null && elapsedS > p && (stoppedNow || (riderDist <= integLast && !coast.pendingSample))) {
                 ms += (elapsedS - p); moveStart = ms
             }
             prevEl = elapsedS   // ALWAYS, on every tick
@@ -175,6 +179,12 @@ class Adv3CoastDriftTest {
             )
             assertTrue("overshoot is bounded by one quantum, not cumulative", maxOver <= q + 1e-9)
             assertTrue("the coast is CLOSER to the truth than the raw it replaces", abs(sumErrOdo) <= abs(sumErrRaw) + 1e-9)
+            if (q == 20.0) {
+                // The stimulus fix (the 20 m quantum) is worthless if the oracle still accepts
+                // maxOver == 0 — an always-return-raw implementation would pass every assertion
+                // above. Require the sawtooth this test is named for: a POSITIVE overshoot.
+                assertTrue("the 20 m quantum must escape the hold and reach real dead-reckoning (maxOver > 0)", maxOver > 0.0)
+            }
         }
     }
 

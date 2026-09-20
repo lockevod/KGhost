@@ -2290,8 +2290,16 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // a pending interval must still freeze the clock.
                         var moveStart = moveStart0
                         val prevEl = prevTickElapsedS
-                        if (prevEl != null && elapsedS > prevEl && riderDist <= integLastRiderDist &&
-                            !coast.pendingSample) {
+                        // A settle tick can land on a stopped rider: the estimator's `changed` clear
+                        // (CoastingEstimator :240) runs BEFORE its stop branch (:261), so the odometer
+                        // ADVANCES on a tick where the rider is provably stopped THIS tick. Without
+                        // `stoppedNow` this guard would see riderDist > integLastRiderDist and refuse to
+                        // freeze, charging a stopped second. `stoppedNow` and pendingSample can't both be
+                        // true (the hold sits past the estimator's stop test), so there's no ordering
+                        // hazard between the two freeze conditions.
+                        val stoppedNow = speedMs != null && speedMs < StalenessLogic.MIN_MOVING_MS
+                        if (prevEl != null && elapsedS > prevEl &&
+                            (stoppedNow || (riderDist <= integLastRiderDist && !coast.pendingSample))) {
                             moveStart += (elapsedS - prevEl)
                             firstMoveElapsedS = moveStart
                         }

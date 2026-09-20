@@ -77,7 +77,11 @@ class Adv4CoastBoundTest {
             val riderDist = coast.effectiveDistanceM
             val p = prevEl
             // Guard (a): race clock, keyed on pendingSample — a pending tick must NOT freeze it.
-            if (p != null && elapsedS > p && riderDist <= integLast && !coast.pendingSample) {
+            // A settle tick can land on a stopped rider (CoastingEstimator's `changed` clear runs
+            // before its stop branch), so `stoppedNow` also freezes — it can't coincide with
+            // pendingSample (the hold sits past the estimator's stop test).
+            val stoppedNow = speedMs != null && speedMs < StalenessLogic.MIN_MOVING_MS
+            if (p != null && elapsedS > p && (stoppedNow || (riderDist <= integLast && !coast.pendingSample))) {
                 ms += (elapsedS - p); moveStart = ms
             }
             prevEl = elapsedS   // ALWAYS, on every tick
