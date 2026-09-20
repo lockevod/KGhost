@@ -3,9 +3,9 @@
   "packageName": "com.enderthor.kghost",
   "latestApkUrl": "https://github.com/lockevod/KGhost/releases/latest/download/kghost.apk",
   "iconUrl": "https://github.com/lockevod/KGhost/releases/latest/download/kghost.png",
-  "latestVersion": "1.0.0",
-  "latestVersionCode": 202609071,
+  "latestVersion": "1.1.0",
+  "latestVersionCode": 202609201,
   "developer": "github.com/lockevod",
   "description": "Race against a ghost on your Karoo: a fixed-pace Ghost Pace or your own past self on a route, stitched into one continuous ghost. Shows the live time/distance gap on graphical and numeric data fields and draws the ghost's position on the map. Records each ride automatically and can import GPX/FIT ghosts dropped in /sdcard/KGhost. Keeps estimating during GPS dropouts.",
-  "releaseNotes": "The ghost now follows the road you actually ride: the gap no longer jumps on a shortcut, a reroute or a second lap, and the ghost icon holds its place instead of guessing. The gap freezes while you are stopped and resumes when you roll again. If the Karoo restarts mid-ride, your lead comes back with it. On roads you have never ridden, the ghost paces you from your own history at the same gradient, and stays neutral when it has nothing to go on. New Rebuild history action re-imports your whole library from scratch. Fixed: a long stop without auto-pause no longer adds a phantom lead, and GPS dropouts no longer inflate the gap. E-bike and generic rides are now imported. Settings recover from a corrupted preferences file, and the history index rebuilds itself if its cache is damaged. Lower battery use during a ride."
+  "releaseNotes": "The gap is more accurate on every ride. The Karoo's distance reading sometimes arrives a moment late, and KGhost was treating that as a lost GPS fix, so short stretches of your riding did not count towards the gap. They count now."
 }
