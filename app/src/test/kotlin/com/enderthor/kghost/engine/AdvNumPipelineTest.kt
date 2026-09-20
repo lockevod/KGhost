@@ -1,6 +1,7 @@
 package com.enderthor.kghost.engine
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -34,8 +35,12 @@ import org.junit.Test
 class AdvNumPipelineTest {
 
     /** Faithful replica of the B2 tick: raw host streams in, the gap the rider reads out. */
-    private class Rig(vp: Double = 0.3) {
-        val coast = CoastingEstimator()
+    private class Rig(
+        vp: Double = 0.3,
+        pendingToleranceS: Double = CoastingEstimator.PENDING_TOLERANCE_S,
+        maxCoastS: Double = CoastingEstimator.MAX_COAST_S,
+    ) {
+        val coast = CoastingEstimator(maxCoastS = maxCoastS, pendingToleranceS = pendingToleranceS)
         val g = GhostIntegrator(GhostPick.AVERAGE, vpTimePerM = vp, decimateM = 20.0)
         private var moveStart: Double? = null
         private var prevEl: Double? = null
@@ -351,5 +356,178 @@ class AdvNumPipelineTest {
         println("LOCK 6: an abandoned ride checkpoints lead=${"%.2f".format(r.gap)}s at " +
             "${"%.0f".format(d)} m (was >60s)")
         assertEquals("no minutes can be stuffed into the 300 m window any more", 0.0, r.gap, 1e-9)
+    }
+
+    // =============================================================================================
+    // PENDING SAMPLE INTERVAL — the 1 Hz tick oversamples a slower-changing DISTANCE value, so two
+    // consecutive ticks routinely read the same raw distance with the GPS perfectly healthy. These
+    // lock the three refuted designs OUT: R1 (hold and let the race clock freeze → mints lead),
+    // R3 (hold but keep ticking the integrator → loses 2 s per long loss), R4 (hang both guards on
+    // pendingSample → a stop inside the hold consumes the interval).
+    // =============================================================================================
+    @Test fun `PENDING 1 - a one second beat cannot move the number`() {
+        val hist = 0.2
+        fun ride(beat: Boolean): Double {
+            val r = Rig(pendingToleranceS = 2.0)
+            var d = 0.0; var t = 0.0
+            r.tick(d, t, 5.0, hist)
+            repeat(20) {
+                if (beat) {
+                    t += 1.0; r.tick(d, t, 5.0, hist)          // the stream skips a sample
+                    d += 10.0; t += 1.0; r.tick(d, t, 5.0, hist) // and delivers both metres next tick
+                } else {
+                    d += 5.0; t += 1.0; r.tick(d, t, 5.0, hist)
+                    d += 5.0; t += 1.0; r.tick(d, t, 5.0, hist)
+                }
+            }
+            return r.gap
+        }
+        assertEquals("a sampling beat must not change the number", ride(false), ride(true), 1e-6)
+    }
+
+    @Test fun `PENDING 2 - 470 beats at historical pace mint nothing`() {
+        val r = Rig(pendingToleranceS = 2.0)
+        val hist = 0.2
+        var d = 0.0; var t = 0.0
+        r.tick(d, t, 5.0, hist)
+        repeat(470) {
+            t += 1.0; r.tick(d, t, 5.0, hist)            // pending
+            d += 10.0; t += 1.0; r.tick(d, t, 5.0, hist) // settle
+        }
+        println("PENDING 2: 470 beats -> gap=${"%.2f".format(r.gap)}s (R1 would read +470)")
+        assertEquals("470 beats cannot ratchet the lead", 0.0, r.gap, 1e-6)
+    }
+
+    @Test fun `PENDING 3 - a pending tick publishes nothing`() {
+        val r = Rig(pendingToleranceS = 2.0)
+        val hist = 0.2
+        r.tick(0.0, 0.0, 5.0, hist)
+        val before = r.publishCount
+        r.tick(0.0, 1.0, 5.0, hist)                      // pending
+        assertEquals("a pending tick must not publish", before, r.publishCount)
+        r.tick(10.0, 2.0, 5.0, hist)                     // settle
+        assertEquals("the settle tick publishes once", before + 1, r.publishCount)
+    }
+
+    @Test fun `PENDING 4 - pending then stop then settle loses no time`() {
+        // NEUTRAL pace (null) on purpose: with a historical pace the settle tick charges
+        // `ghostTime += hist * dd`, which is identical whoever consumed `prevElapsedS`, so the test
+        // could not tell the correct guard from R4. Only the neutral path reads `de`, which is
+        // exactly the quantity a stopped tick would eat.
+        // Both rides contain the SAME two moving seconds, the SAME one stopped second and the SAME
+        // ten metres. They differ only in whether the stream beats.
+        fun ride(withBeat: Boolean): Double {
+            val r = Rig(pendingToleranceS = 2.0)
+            var d = 0.0; var t = 0.0
+            r.tick(d, t, 5.0, null)                          // anchor
+            if (withBeat) {
+                t += 1.0; r.tick(d, t, 5.0, null)            // moving, stream frozen -> pending
+                t += 1.0; r.tick(d, t, 0.0, null)            // STOPPED inside the hold
+                d += 10.0; t += 1.0; r.tick(d, t, 5.0, null) // moving, stream delivers both metres
+            } else {
+                d += 5.0; t += 1.0; r.tick(d, t, 5.0, null)  // moving
+                t += 1.0; r.tick(d, t, 0.0, null)            // STOPPED
+                d += 5.0; t += 1.0; r.tick(d, t, 5.0, null)  // moving
+            }
+            return r.gap
+        }
+        // Correct: both 0. Under R4 the stopped tick calls onTick with dd==0, consumes the held
+        // second, and the beating ride reads -1.
+        assertEquals("a stop inside a hold must not eat the interval", 0.0, ride(withBeat = false), 1e-6)
+        assertEquals("a stop inside a hold must not eat the interval", 0.0, ride(withBeat = true), 1e-6)
+    }
+
+    @Test fun `PENDING 4b - a stop inside a hold publishes nothing`() {
+        val r = Rig(pendingToleranceS = 2.0)
+        r.tick(0.0, 0.0, 5.0, null)
+        val before = r.publishCount
+        r.tick(0.0, 1.0, 5.0, null)                          // pending
+        r.tick(0.0, 2.0, 0.0, null)                          // stopped, hold still unresolved
+        assertEquals("a stopped tick inside a hold must not publish", before, r.publishCount)
+        r.tick(10.0, 3.0, 5.0, null)                         // settle
+        assertEquals("the settle tick publishes once", before + 1, r.publishCount)
+    }
+
+    @Test fun `PENDING 5 - escalation past the tolerance matches today exactly`() {
+        val hist = 0.2
+        fun ride(tolerance: Double): Double {
+            val r = Rig(pendingToleranceS = tolerance)
+            var d = 0.0; var t = 0.0
+            r.tick(d, t, 10.0, hist)
+            repeat(30) { t += 1.0; r.tick(d, t, 10.0, hist) }   // 30 s blind
+            d += 300.0; t += 1.0; r.tick(d, t, 10.0, hist)      // fix returns
+            return r.gap
+        }
+        assertEquals("a real dropout must be unaffected by the hold", ride(0.0), ride(2.0), 1e-6)
+    }
+
+    @Test fun `PENDING 5b - escalation leaves the odometer and the budget where today leaves them`() {
+        fun odo(tolerance: Double): Pair<Double, Double> {
+            val c = CoastingEstimator(pendingToleranceS = tolerance)
+            c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 0.0)
+            repeat(10) { c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = it + 1.0) }
+            return c.effectiveDistanceM to c.coastingSeconds
+        }
+        assertEquals("odometer and loss clock must match today past the tolerance", odo(0.0), odo(2.0))
+    }
+
+    @Test fun `PENDING 6 - a first tick during a hold keeps a restored lead`() {
+        val r = Rig(pendingToleranceS = 2.0)
+        val hist = 0.2
+        // The estimator is SHARED and ticks before route mode exists, so its first-call guard is
+        // already spent by the time the first ROUTE tick runs. Warm it here or the next update()
+        // takes the `changed` path and no hold is possible — the test would prove nothing.
+        r.coast.update(rawDistanceM = 100.0, speedMs = 5.0, elapsedS = 0.0)
+        r.g.restore(leadS = 42.0, lastRiderDist = 100.0)
+        // The first ROUTE tick lands on a repeated raw distance: pendingHold is true.
+        r.tick(100.0, 1.0, 5.0, hist)
+        // Guard (b) must let the INITIALISING call through: restore() only stores pendingResumeLead,
+        // and onTick is where it becomes gapTimeS. Skipping it publishes a default zero.
+        assertEquals("the initialising onTick is never skipped", 42.0, r.gap, 1e-6)
+        // Guard (c) has NO initialisation carve-out, and that is deliberate: the hold is still
+        // unresolved, so the published number stays frozen even though the integrator is now
+        // correctly anchored. What the external review actually required is the assertion above —
+        // that the integrator gets its initialising call, so the checkpoint cannot persist a zero
+        // over a restored lead. Publication is a separate contract, and adding an exception here
+        // would let the number move mid-hold, which is the jitter guard (c) exists to prevent.
+        assertEquals("a pending tick publishes nothing, not even the initialising one", 0, r.publishCount)
+        r.tick(110.0, 2.0, 5.0, hist)   // settle
+        assertEquals("the restored lead reaches the holder on the settle tick", 1, r.publishCount)
+    }
+
+    @Test fun `PENDING 8 - both null variants are exact on both sides of the tolerance`() {
+        // Null WITH a remembered rate, not crossing the tolerance.
+        run {
+            val c = CoastingEstimator(pendingToleranceS = 2.0)
+            c.update(rawDistanceM = 100.0, speedMs = 10.0, elapsedS = 0.0)
+            c.update(rawDistanceM = 110.0, speedMs = 10.0, elapsedS = 1.0)   // remembers 10 m/s
+            c.update(rawDistanceM = 110.0, speedMs = 10.0, elapsedS = 1.5)   // hold, defer 5
+            c.update(rawDistanceM = 110.0, speedMs = null, elapsedS = 2.0)   // null, still under 2 s
+            assertEquals(120.0, c.effectiveDistanceM, 1e-9)                  // 110 + 5 deferred + 5
+            assertFalse(c.pendingHold)
+        }
+        // Null WITHOUT a usable rate, not crossing the tolerance.
+        run {
+            val c = CoastingEstimator(pendingToleranceS = 2.0)
+            c.update(rawDistanceM = 0.0, speedMs = 40.0, elapsedS = 0.0)     // implausible, not remembered
+            c.update(rawDistanceM = 10.0, speedMs = 40.0, elapsedS = 1.0)    // everMoved, rate still 0
+            c.update(rawDistanceM = 10.0, speedMs = 6.0, elapsedS = 1.5)     // hold, defer 3
+            c.update(rawDistanceM = 10.0, speedMs = null, elapsedS = 1.9)    // no rate, under 2 s
+            assertEquals(13.0, c.effectiveDistanceM, 1e-9)                   // the 3 m must not strand
+            assertFalse(c.pendingHold)
+        }
+    }
+
+    @Test fun `PENDING 7 - a budget below the tolerance never holds`() {
+        val hist = 0.2
+        fun ride(tolerance: Double): Double {
+            val r = Rig(pendingToleranceS = tolerance, maxCoastS = 1.0)
+            var d = 0.0; var t = 0.0
+            r.tick(d, t, 10.0, hist)
+            repeat(3) { t += 1.0; r.tick(d, t, 10.0, hist) }
+            d += 30.0; t += 1.0; r.tick(d, t, 10.0, hist)
+            return r.gap
+        }
+        assertEquals("a budget under the tolerance must behave as today", ride(0.0), ride(2.0), 1e-6)
     }
 }
