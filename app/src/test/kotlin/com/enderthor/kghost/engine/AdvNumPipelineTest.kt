@@ -181,15 +181,35 @@ class AdvNumPipelineTest {
             repeat(60) { d += 12.0; t += 1.0; r.tick(d, t, 12.0, hist) }
             val before = r.gap
             repeat(dropouts) {
-                // GPS drops: the host re-emits the LAST distance for 20 s while the rider brakes to 2 m/s.
+                // GPS drops: the host re-emits the LAST distance for 20 s. The rider brakes to 2 m/s, but
+                // the SPEED stream lags and keeps reporting 12 m/s — and THAT is what makes this an
+                // overshoot at all, because the coast spends the REPORTED speed, not the rider's true rate
+                // (CoastingEstimator's `speedMs.coerceAtMost(AGG_MAX_SPEED_MS) * room`). It dead-reckons
+                // 12 * 20 = 240 m while the rider covers 40.
+                //
+                // Feeding the true 2 m/s here instead — as this test did until now, while its comments
+                // described the 12 m/s case — made the coast accrue exactly the 40 m the raw stream came
+                // back with. dd == 0 on recovery: no overshoot, GhostIntegrator's dd<0 branch never taken,
+                // and the lock asserted "a dropout must not move the number" about a stimulus in which
+                // nothing could have moved it. The assertions below are unchanged; only the stimulus is
+                // real now.
                 // The fix is still <5 s old for the first 5 ticks (fixFresh stays true there).
                 val frozenAt = d
-                repeat(5) { t += 1.0; r.tick(frozenAt, t, 2.0, hist, fixFresh = true) }
-                repeat(15) { t += 1.0; r.tick(frozenAt, t, 2.0, hist, fixFresh = false) }
+                repeat(5) { t += 1.0; r.tick(frozenAt, t, 12.0, hist, fixFresh = true) }
+                repeat(15) { t += 1.0; r.tick(frozenAt, t, 12.0, hist, fixFresh = false) }
                 // Fix returns: raw distance snaps back to what the rider ACTUALLY covered (2 m/s * 20 s),
                 // 200 m behind the coast's guess → GhostIntegrator's dd<0 branch, which KEEPS ghostTime.
                 d = frozenAt + 40.0
                 t += 1.0; r.tick(d, t, 2.0, hist, fixFresh = true)
+                // GUARD ON THE STIMULUS, not on the behaviour. Everything below only means something if
+                // the coast REALLY overshot; this is the assertion whose absence let the test rot into a
+                // no-op. coastedSurplusM is the invention sitting on top of the frozen raw at the moment
+                // the freeze resolves: 12 m/s * 20 s = 240 m, against a real 40 m, so recovery hands the
+                // integrator dd = 40 - 240 = -200 m and the dd<0 branch is genuinely exercised.
+                assertEquals(
+                    "the dropout must actually build an overshoot, or this lock proves nothing",
+                    240.0, r.coast.coastedSurplusM, 1e-9,
+                )
                 repeat(30) { d += 5.0; t += 1.0; r.tick(d, t, 5.0, hist) } // ride on at exactly historical pace
             }
             return r.gap - before
