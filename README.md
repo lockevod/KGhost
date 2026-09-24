@@ -48,7 +48,7 @@ live on a data field and as a marker on the map.
 
 ## Getting started
 
-1. **Install** KGhost (see [Install](#install-sideload) below) and open the app on the Karoo once.
+1. **Install** KGhost (see [Install](#install) below — from the Karoo's Extensions store, or by sideload) and open the app on the Karoo once.
 2. **Add a data field** — on a ride profile, add **Gap (graphic)** and/or **Gap (numeric)** from the
    Extensions section of the Karoo's data-field picker.
 3. **(Optional) Bring in past rides** — in the KGhost app, grant **All files access** when asked, then
@@ -220,15 +220,34 @@ Device-level switches and recorded-track-library management (not per profile):
 > [`docs/import-pipeline.md`](docs/import-pipeline.md) covers the recorded-ghost library (import,
 > storage, the all-files-access reminder, and the large-library import performance).
 
-## Install (sideload)
+## Install
 
-1. Download the latest APK from the project's Releases.
-2. On your phone, long-press the APK link and share it to the **Hammerhead Companion** app, which
-   installs it to the paired Karoo. (Both Karoo 2 and Karoo 3 are supported.)
-3. On the Karoo, add the KGhost data fields to a ride profile and/or open the KGhost app to
-   configure it.
+### Hammerhead's Karoo Extensions store *(recommended)*
 
-To import external rides you must grant **All files access** when prompted (used to read
+KGhost is **officially distributed by Hammerhead** in the Karoo's built-in Extensions store. This is
+the supported path for the great majority of riders: no APK file, no sideloading, no Companion-app
+workaround, no developer options, no ADB. Hammerhead handles signing, hosting and update delivery, so
+installs and version bumps land on the device the same way every other Karoo-native feature does.
+
+On the Karoo:
+
+1. Open the **Extensions store** from the main menu.
+2. Find **KGhost** in the list, tap **Install**.
+3. Add the KGhost data fields to a ride profile and/or open the KGhost app to configure it.
+
+Updates published by Hammerhead arrive in the same store entry — no manual re-install needed.
+
+### Sideloading *(advanced / pre-release builds)*
+
+For riders who want a pre-release build, a custom fork, or who need to install before a version
+reaches the store:
+
+1. Open `https://github.com/lockevod/KGhost/releases/latest/download/kghost.apk` on your phone.
+2. Share the file with the **Hammerhead Companion** app, which installs it to the paired Karoo.
+   (Both Karoo 2 and Karoo 3 are supported.)
+3. Add the KGhost data fields to a ride profile and/or open the KGhost app to configure it.
+
+Whichever install method you used, to import external rides you must grant **All files access** when prompted (used to read
 `/sdcard/FitFiles` and `/sdcard/KGhost`). Without it KGhost can't load recorded ghosts and runs as a
 fixed-pace virtual partner only — so it surfaces the missing access on its main screen and with an
 occasional in-ride reminder until you grant it.
