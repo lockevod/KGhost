@@ -64,21 +64,45 @@ class Adv4CoastBoundTest {
         private var moveStart: Double? = null
         private var prevEl: Double? = null
         private var integLast = 0.0
+        private var integInitialised = false
+        /** Guard (c): how many ticks published a gap. A pending tick must not. */
+        var publishCount = 0; private set
 
         var raceClockS = 0.0; private set
 
         fun tick(rawDistM: Double, elapsedS: Double, speedMs: Double?, pace: Double?, fixFresh: Boolean = true) {
-            coast.update(rawDistM, speedMs, elapsedS)
-            if (moveStart == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS) moveStart = elapsedS
+            // Production normalizes SPEED (`?.takeIf { it.isFinite() }`, KGhostExtension.kt:1947) before
+            // either the estimator or the guard sees it; do the same here once, up front.
+            val sp = speedMs?.takeIf { it.isFinite() }
+            coast.update(rawDistM, sp, elapsedS)
+            if (moveStart == null && sp != null && sp > StalenessLogic.MIN_MOVING_MS) moveStart = elapsedS
             var ms = moveStart ?: return
             val riderDist = coast.effectiveDistanceM
             val p = prevEl
-            if (p != null && elapsedS > p && riderDist <= integLast) { ms += (elapsedS - p); moveStart = ms }
-            prevEl = elapsedS
+            // Guard (a): race clock. The freeze policy lives in one place — [raceClockFreezes] in
+            // CoastingEstimator.kt — so this rig cannot silently diverge from production; see its
+            // KDoc for the false green that motivated extracting it.
+            val stoppedNow = sp != null && sp < StalenessLogic.MIN_MOVING_MS
+            if (p != null && elapsedS > p &&
+                raceClockFreezes(
+                    stoppedNow = stoppedNow,
+                    settledPending = coast.settledPending,
+                    odometerAdvanced = riderDist > integLast,
+                    pendingSample = coast.pendingSample,
+                )) {
+                ms += (elapsedS - p); moveStart = ms
+            }
+            prevEl = elapsedS   // ALWAYS, on every tick
             raceClockS = elapsedS - ms
             val paceNow = if (verdictAllowed(fixFresh, coast.quality)) pace else null
-            g.onTick(riderDist, 0.0, riderDist * 1e-5, 90.0, elapsedS - ms) { _, _, _ -> paceNow }
-            integLast = riderDist
+            // Guard (b): keyed on pendingHold, so it survives a stop inside the interval.
+            if (!coast.pendingHold || !integInitialised) {
+                g.onTick(riderDist, 0.0, riderDist * 1e-5, 90.0, elapsedS - ms) { _, _, _ -> paceNow }
+                integInitialised = true
+                integLast = riderDist
+            }
+            // Guard (c): publication, also keyed on pendingHold.
+            if (!coast.pendingHold) publishCount++
         }
 
         val gap get() = g.gapTimeS
@@ -149,8 +173,13 @@ class Adv4CoastBoundTest {
         var d = 0.0; var t = 0.0
         repeat(60) { d += 6.0; t += 1.0; c.update(d, 6.0, t) }   // 6 m/s cruising, healthy fix
         val frozen = d
-        t += 1.0; c.update(frozen, 100.0, t)                     // ONE corrupt sample, raw now frozen
-        val phantom = c.effectiveDistanceM - frozen
+        // Escalate past the 2 s pending tolerance on a plausible speed first, so the freeze is already
+        // a genuine coast by the time the corrupt sample arrives — a freeze within tolerance is held,
+        // not dead-reckoned, and would clamp nothing at all.
+        repeat(3) { t += 1.0; c.update(frozen, 6.0, t) }
+        val beforeCorrupt = c.effectiveDistanceM
+        t += 1.0; c.update(frozen, 100.0, t)                     // ONE corrupt sample, raw still frozen
+        val phantom = c.effectiveDistanceM - beforeCorrupt
         println("A1: one 100 m/s sample inside a dropout coasts ${"%.0f".format(phantom)} m (was 100 m unclamped)")
         assertEquals("clamped to the not-a-bicycle ceiling", AGG_MAX_SPEED_MS, phantom, 1e-9)
     }
@@ -340,11 +369,15 @@ class Adv4CoastBoundTest {
                     1 -> 0.0            // provable stop
                     else -> 6.0
                 }
+                // A pending hold can only be OPENED by a reported (non-null) speed, so a null tick that
+                // flushes one is carrying reported-speed metres, not null-sourced ones — bill those to
+                // totalSpend only, never to nullSpend, or the flush inflates the null budget it never spent.
+                val wasPending = c.pendingHold
                 c.update(frozen, speed, t)
                 val gained = c.effectiveDistanceM - odo
                 odo = c.effectiveDistanceM
                 totalSpend += gained / 6.0
-                if (speed == null) nullSpend += gained / 6.0
+                if (speed == null && !wasPending) nullSpend += gained / 6.0
             }
             assertTrue("seed=$seed total spend ${"%.3f".format(totalSpend)} s <= MAX_COAST_S", totalSpend <= CoastingEstimator.MAX_COAST_S + 1e-6)
             assertTrue("seed=$seed null spend ${"%.3f".format(nullSpend)} s <= one coast window", nullSpend <= 30.0 + 1e-6)

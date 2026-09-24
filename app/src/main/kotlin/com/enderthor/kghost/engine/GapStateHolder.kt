@@ -19,7 +19,9 @@ object GapStateHolder {
     /** Latest computed gap. Starts [GapState.inactive] until the first Recording tick. */
     val state: StateFlow<GapState> = _state.asStateFlow()
 
-    /** Publishes a freshly computed gap. Called once per tick by the extension. */
+    /** Publishes a freshly computed gap. Called by the extension on most ticks — skipped while a
+     *  pending sample hold is unresolved (`CoastingEstimator.pendingHold`), since that tick has
+     *  nothing new to publish. Still the single writer. */
     fun update(s: GapState) {
         _state.value = s
     }

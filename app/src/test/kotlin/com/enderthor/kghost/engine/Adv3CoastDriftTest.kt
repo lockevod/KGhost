@@ -32,18 +32,42 @@ class Adv3CoastDriftTest {
         private var moveStart: Double? = null
         private var prevEl: Double? = null
         private var integLast = 0.0
+        private var integInitialised = false
+        /** Guard (c): how many ticks published a gap. A pending tick must not. */
+        var publishCount = 0; private set
 
         fun tick(rawDistM: Double, elapsedS: Double, speedMs: Double?, pace: Double?, fixFresh: Boolean = true) {
-            coast.update(rawDistM, speedMs, elapsedS)
-            if (moveStart == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS) moveStart = elapsedS
+            // Production normalizes SPEED (`?.takeIf { it.isFinite() }`, KGhostExtension.kt:1947) before
+            // either the estimator or the guard sees it; do the same here once, up front.
+            val sp = speedMs?.takeIf { it.isFinite() }
+            coast.update(rawDistM, sp, elapsedS)
+            if (moveStart == null && sp != null && sp > StalenessLogic.MIN_MOVING_MS) moveStart = elapsedS
             var ms = moveStart ?: return
             val riderDist = coast.effectiveDistanceM
             val p = prevEl
-            if (p != null && elapsedS > p && riderDist <= integLast) { ms += (elapsedS - p); moveStart = ms }
-            prevEl = elapsedS
+            // Guard (a): race clock. The freeze policy lives in one place — [raceClockFreezes] in
+            // CoastingEstimator.kt — so this rig cannot silently diverge from production; see its
+            // KDoc for the false green that motivated extracting it.
+            val stoppedNow = sp != null && sp < StalenessLogic.MIN_MOVING_MS
+            if (p != null && elapsedS > p &&
+                raceClockFreezes(
+                    stoppedNow = stoppedNow,
+                    settledPending = coast.settledPending,
+                    odometerAdvanced = riderDist > integLast,
+                    pendingSample = coast.pendingSample,
+                )) {
+                ms += (elapsedS - p); moveStart = ms
+            }
+            prevEl = elapsedS   // ALWAYS, on every tick
             val paceNow = if (verdictAllowed(fixFresh, coast.quality)) pace else null
-            g.onTick(riderDist, 0.0, riderDist * 1e-5, 90.0, elapsedS - ms) { _, _, _ -> paceNow }
-            integLast = riderDist
+            // Guard (b): keyed on pendingHold, so it survives a stop inside the interval.
+            if (!coast.pendingHold || !integInitialised) {
+                g.onTick(riderDist, 0.0, riderDist * 1e-5, 90.0, elapsedS - ms) { _, _, _ -> paceNow }
+                integInitialised = true
+                integLast = riderDist
+            }
+            // Guard (c): publication, also keyed on pendingHold.
+            if (!coast.pendingHold) publishCount++
         }
 
         val gap get() = g.gapTimeS
@@ -136,16 +160,21 @@ class Adv3CoastDriftTest {
     }
 
     /** Quantised DISTANCE: the one place the integration is visible with GPS healthy. A host that steps
-     *  DISTANCE in whole units leaves ticks where raw is frozen but the rider is moving — those get
-     *  dead-reckoned. Measures whether the resulting bias ACCUMULATES (it must not: the next real step
-     *  re-anchors) and whether it is one-signed. */
+     *  DISTANCE in whole units leaves ticks where raw is frozen but the rider is moving. At the small
+     *  quanta (q <= 10 m, rider at 6 m/s) every such freeze is at most 2 ticks — inside the 2 s pending
+     *  tolerance — so it is now absorbed by the HOLD rather than dead-reckoned: the odometer never runs
+     *  ahead of raw at all for those, and `maxOver` measures 0. The 20 m quantum is the one that escapes
+     *  the tolerance (freezes run 3+ ticks at 6 m/s), reaching the real dead-reckoning path and
+     *  restoring the genuine one-signed sawtooth the assertions below measure. */
     @Test fun `H1c - quantised DISTANCE makes a one-signed sawtooth that never accumulates`() {
-        for (q in listOf(1.0, 5.0, 10.0)) {
+        for (q in listOf(1.0, 5.0, 10.0, 20.0)) {
             val c = CoastingEstimator()
             var trueD = 0.0; var t = 0.0
             var sumErrRaw = 0.0; var sumErrOdo = 0.0; var maxOver = 0.0; var minErr = 0.0
             val n = 7200
-            repeat(n) {
+            // q=20 ticks 11-14, captured for the concrete cycle assertion below (0-indexed slots).
+            val cycle20 = DoubleArray(4)
+            repeat(n) { i ->
                 trueD += 6.0; t += 1.0
                 val raw = floor(trueD / q) * q
                 c.update(raw, 6.0, t)
@@ -153,6 +182,7 @@ class Adv3CoastDriftTest {
                 sumErrOdo += eo; sumErrRaw += raw - trueD
                 maxOver = maxOf(maxOver, c.effectiveDistanceM - raw)
                 minErr = minOf(minErr, eo)
+                if (q == 20.0 && i + 1 in 11..14) cycle20[i + 1 - 11] = c.effectiveDistanceM
             }
             println(
                 "H1c q=${q}m: mean(odo-true)=${"%.2f".format(sumErrOdo / n)} m  " +
@@ -160,6 +190,21 @@ class Adv3CoastDriftTest {
             )
             assertTrue("overshoot is bounded by one quantum, not cumulative", maxOver <= q + 1e-9)
             assertTrue("the coast is CLOSER to the truth than the raw it replaces", abs(sumErrOdo) <= abs(sumErrRaw) + 1e-9)
+            if (q == 20.0) {
+                // The stimulus fix (the 20 m quantum) is worthless if the oracle still accepts
+                // maxOver == 0 — an always-return-raw implementation would pass every assertion
+                // above. Require the sawtooth this test is named for: a POSITIVE overshoot.
+                assertTrue("the 20 m quantum must escape the hold and reach real dead-reckoning (maxOver > 0)", maxOver > 0.0)
+                // `maxOver > 0.0` alone is satisfiable by an implementation that merely returns
+                // `raw + 1 m` on unchanged ticks. Pin the actual cycle: ticks 11-12 held (raw frozen
+                // at 60, nothing applied yet), tick 13 escalates past the 2 s tolerance (flushes the
+                // 12 m deferred by the hold, then coasts 6 m more on top of the 60 m anchor -> 78),
+                // tick 14 re-anchors to the fresh raw (80).
+                assertEquals("tick 11: held, still anchored at the last raw", 60.0, cycle20[0], 1e-9)
+                assertEquals("tick 12: still held (2/2 s, tolerance boundary)", 60.0, cycle20[1], 1e-9)
+                assertEquals("tick 13: flush (+12) then coast (+6) on the 60 m anchor", 78.0, cycle20[2], 1e-9)
+                assertEquals("tick 14: raw returns, re-anchor discards the coast", 80.0, cycle20[3], 1e-9)
+            }
         }
     }
 

@@ -38,18 +38,42 @@ class Adv2CoastPipelineTest {
         private var moveStart: Double? = null
         private var prevEl: Double? = null
         private var integLast = 0.0
+        private var integInitialised = false
+        /** Guard (c): how many ticks published a gap. A pending tick must not. */
+        var publishCount = 0; private set
 
         fun tick(rawDistM: Double, elapsedS: Double, speedMs: Double?, pace: Double?, fixFresh: Boolean = true) {
-            coast.update(rawDistM, speedMs, elapsedS)
-            if (moveStart == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS) moveStart = elapsedS
+            // Production normalizes SPEED (`?.takeIf { it.isFinite() }`, KGhostExtension.kt:1947) before
+            // either the estimator or the guard sees it; do the same here once, up front.
+            val sp = speedMs?.takeIf { it.isFinite() }
+            coast.update(rawDistM, sp, elapsedS)
+            if (moveStart == null && sp != null && sp > StalenessLogic.MIN_MOVING_MS) moveStart = elapsedS
             var ms = moveStart ?: return
             val riderDist = coast.effectiveDistanceM
             val p = prevEl
-            if (p != null && elapsedS > p && riderDist <= integLast) { ms += (elapsedS - p); moveStart = ms }
-            prevEl = elapsedS
+            // Guard (a): race clock. The freeze policy lives in one place — [raceClockFreezes] in
+            // CoastingEstimator.kt — so this rig cannot silently diverge from production; see its
+            // KDoc for the false green that motivated extracting it.
+            val stoppedNow = sp != null && sp < StalenessLogic.MIN_MOVING_MS
+            if (p != null && elapsedS > p &&
+                raceClockFreezes(
+                    stoppedNow = stoppedNow,
+                    settledPending = coast.settledPending,
+                    odometerAdvanced = riderDist > integLast,
+                    pendingSample = coast.pendingSample,
+                )) {
+                ms += (elapsedS - p); moveStart = ms
+            }
+            prevEl = elapsedS   // ALWAYS, on every tick
             val paceNow = if (verdictAllowed(fixFresh, coast.quality)) pace else null
-            g.onTick(riderDist, 0.0, riderDist * 1e-5, 90.0, elapsedS - ms) { _, _, _ -> paceNow }
-            integLast = riderDist
+            // Guard (b): keyed on pendingHold, so it survives a stop inside the interval.
+            if (!coast.pendingHold || !integInitialised) {
+                g.onTick(riderDist, 0.0, riderDist * 1e-5, 90.0, elapsedS - ms) { _, _, _ -> paceNow }
+                integInitialised = true
+                integLast = riderDist
+            }
+            // Guard (c): publication, also keyed on pendingHold.
+            if (!coast.pendingHold) publishCount++
         }
 
         val gap get() = g.gapTimeS
@@ -262,11 +286,12 @@ class Adv2CoastPipelineTest {
     }
 
     // =============================================================================================
-    // LOCK E — unchanged by this work, and the reason the route number is safe: whenever the DISTANCE
-    // stream is merely OUT OF PHASE with the 1 Hz `sample()`, the tick is COASTING, so layer 2
-    // withholds the historical verdict on metres that are perfectly real and the ghost silently stops
-    // judging half the stretch. Bounded and one-signed AGAINST the rider — kept as a lock so a future
-    // change to the gate has to face it.
+    // LOCK E — Task 5 changes this one on purpose: whenever the DISTANCE stream is merely OUT OF PHASE
+    // with the 1 Hz `sample()` (each freeze ≤ the 2 s pending tolerance), the frozen tick is now a
+    // PENDING SAMPLE, not a COASTING one — guard (c) withholds publication for it entirely rather than
+    // feeding the integrator a neutral-filled tick, so every metre that DOES arrive is a genuine raw
+    // change and gets the historical verdict. Coverage recovers from ~half to ~all; kept as a lock so
+    // a future change to the tolerance or the gate has to face it.
     // =============================================================================================
     @Test fun `E - a DISTANCE stream slower than the tick silently withholds the verdict`() {
         val r = RouteRig()
@@ -285,8 +310,12 @@ class Adv2CoastPipelineTest {
                 "filled=${"%.0f".format(r.g.filledM)} m",
         )
         val coverage = r.g.matchedM / (r.g.matchedM + r.g.filledM)
-        assertEquals("HALF the real metres get no verdict at all", 0.5, coverage, 0.01)
-        assertEquals("so the lead reads about half the truth", truth / 2.0, r.gap, truth * 0.01)
+        // Each frozen tick is now a PENDING SAMPLE within the 2 s tolerance: guard (c) withholds
+        // publication for it entirely, so it never reaches the integrator as a neutral-filled tick.
+        // Every metre that DOES arrive is a genuine raw change, so ALL of it gets the verdict now —
+        // the intended sensitivity recovery, not a regression.
+        assertEquals("every real metre now gets a verdict", 1.0, coverage, 0.01)
+        assertEquals("so the lead reads the truth", truth, r.gap, truth * 0.01)
     }
 
     /** Control for E: the SAME ride with DISTANCE in phase reads the truth exactly, so E is purely the

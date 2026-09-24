@@ -19,6 +19,33 @@ package com.enderthor.kghost.engine
 fun verdictAllowed(fixAgeOk: Boolean, quality: CoastQuality): Boolean =
     fixAgeOk && quality == CoastQuality.LIVE
 
+/**
+ * The ONE definition of when the moving-time race clock FREEZES. Same reasoning as
+ * [verdictAllowed], same history: the expression used to be duplicated in the production tick and
+ * in each of the four rigs that declare themselves verbatim replicas of it, so a change to
+ * production alone left every rig — and every lock riding on them — asserting the old behaviour
+ * while reporting green.
+ *
+ * Two disjuncts, and they are NOT interchangeable:
+ *  - [stoppedNow] && [settledPending]: a delayed sample arriving on a tick where the rider has
+ *    stopped. The estimator's `changed` branch runs before its stop branch, so the odometer
+ *    advances on that tick even though the rider is stopped; without this the stopped second is
+ *    charged. It is gated on [settledPending] rather than on [stoppedNow] alone because a coast
+ *    RECOVERY residual also advances the odometer while stopped, and freezing there mints lead:
+ *    GhostIntegrator credits `hist * dd` and ignores the elapsed delta when a historical pace
+ *    exists, so there is nothing to offset the frozen clock.
+ *  - !odometerAdvanced && !pendingSample: the original rule. The rider is not advancing on the
+ *    ground, and this flat odometer is not merely a sample the stream has yet to deliver.
+ *
+ * Keep it a single expression. If it grows, the rigs get the growth for free.
+ */
+fun raceClockFreezes(
+    stoppedNow: Boolean,
+    settledPending: Boolean,
+    odometerAdvanced: Boolean,
+    pendingSample: Boolean,
+): Boolean = (stoppedNow && settledPending) || (!odometerAdvanced && !pendingSample)
+
 /** Quality of the distance [CoastingEstimator] produces this tick. */
 enum class CoastQuality {
     /** A real fix (distance changed) or a legitimate stop (speed ≈ 0): measured, fully reliable. */
@@ -43,7 +70,9 @@ enum class CoastQuality {
  *
  * ## Two independent clocks
  * A stop has to do two OPPOSITE things, so they are tracked separately:
- *  * the **odometer** ([effectiveDistanceM]) INTEGRATES speed tick by tick while blind. A stop simply
+ *  * the **odometer** ([effectiveDistanceM]) HOLDS for up to [PENDING_TOLERANCE_S] seconds of a fresh
+ *    freeze with a reported speed (the stream may simply be slower than the 1 Hz tick, not blind — see
+ *    case 3 below), then INTEGRATES speed tick by tick while genuinely blind. A stop simply
  *    holds it: the stop adds nothing (no phantom metres), and takes nothing away (metres already
  *    dead-reckoned were really ridden and are kept). Integrating per tick — rather than multiplying
  *    one speed sample by the whole frozen span — also makes it monotone: a speed sample that drops
@@ -59,7 +88,11 @@ enum class CoastQuality {
  *  1. **Distance changing** (new value): real movement → effective = raw, quality = LIVE, both clocks
  *     reset. Remembers the last moving speed.
  *  2. **Frozen + provably stopped** (`speed < minMovingMs`): legitimate stop → hold everything.
- *  3. **Frozen + moving (or speed unavailable)**: GPS dropout → COAST: `effective += speed * dt` with
+ *  3. **Frozen + moving (or speed unavailable)**: GPS dropout → first, if a REPORTED speed arrives
+ *     within [PENDING_TOLERANCE_S] s of the freeze, HOLD: record what would have been dead-reckoned in
+ *     `deferredM` and apply nothing yet — quality stays LIVE — because the 1 Hz tick oversamples a
+ *     slower distance stream and most such freezes are that, not a dropout. Once the hold either
+ *     resolves (a raw change) or outlives the tolerance, COAST: `effective += speed * dt` with
  *     the speed capped at [AGG_MAX_SPEED_MS] (a corrupt sample may not buy a rate no bicycle reaches), and
  *     the loss clock advances. quality is COASTING while the loss is within `coastWindowMs`, else
  *     LONG_LOSS. Either way we keep extrapolating — we never blank, because a bike computer should
@@ -86,6 +119,7 @@ class CoastingEstimator(
     private val coastWindowMs: Long = COAST_WINDOW_MS,
     private val minMovingMs: Double = StalenessLogic.MIN_MOVING_MS,
     private val maxCoastS: Double = MAX_COAST_S,
+    private val pendingToleranceS: Double = PENDING_TOLERANCE_S,
 ) {
     /** The distance (m) the gap engine should use this tick — raw, frozen, or coasted. */
     var effectiveDistanceM: Double = 0.0
@@ -97,10 +131,36 @@ class CoastingEstimator(
 
     /**
      * The loss clock: seconds the raw distance has been frozen while the rider was NOT provably
-     * stopped. 0 when [quality] is LIVE. It is what the GPS-lost alert and the give-up blank run on,
-     * and it SURVIVES a stop (see the class KDoc) — only a real change in the raw distance clears it.
+     * stopped. 0 when [quality] is LIVE, EXCEPT during an unresolved [pendingHold]: there quality
+     * still reads LIVE (nothing has been invented yet) while this holds the interval's elapsed
+     * seconds (up to [PENDING_TOLERANCE_S]). It is what the GPS-lost alert and the give-up blank run
+     * on, and it SURVIVES a stop (see the class KDoc) — only a real change in the raw distance clears it.
      */
     var coastingSeconds: Double = 0.0
+        private set
+
+    /** True when THIS TICK's flat odometer is a pending sample rather than a stop or a dropout.
+     *  Drives the route tick's race-clock guard: a pending tick must NOT freeze the race clock,
+     *  because the rider really is moving. False on a stop, where the clock MUST freeze. */
+    var pendingSample: Boolean = false
+        private set
+
+    /** True on the ONE tick where a raw-distance change CLOSED an unresolved pending hold — i.e. the
+     *  hold resolved, most often because the delayed sample finally arrived, but also on a raw
+     *  DECREASE (a source reset): that still closes the hold, and reaches the integrator as `dd < 0`
+     *  taking the rebaseline branch with no historical credit, so it does not break the guard below.
+     *  Distinguishes that settlement from a coast recovery correcting metres that were already
+     *  dead-reckoned and already neutral-filled, which must NOT freeze the race clock:
+     *  `GhostIntegrator` ignores `de` when a historical pace is available, so freezing there credits
+     *  `hist * dd` with nothing to offset it and mints lead. */
+    var settledPending: Boolean = false
+        private set
+
+    /** True while a pending interval is UNRESOLVED — including across a stop inside it. Drives the
+     *  route tick's integrator and publication guards: the integrator must not be ticked with
+     *  `dd == 0` while a hold is outstanding, because `GhostIntegrator` advances `prevElapsedS`
+     *  unconditionally and would consume the held interval. */
+    var pendingHold: Boolean = false
         private set
 
     /**
@@ -175,12 +235,30 @@ class CoastingEstimator(
      *  stays honest. */
     private var coastSpentS: Double = 0.0
 
+    /** Metres this class WOULD have dead-reckoned during the current hold, recorded but not applied. */
+    private var deferredM: Double = 0.0
+
+    /** Seconds deferred in the current hold, to be debited to [coastSpentS] on a flush. */
+    private var heldS: Double = 0.0
+
+    /** Apply a hold's deferred metres and close it. Called on EVERY exit from the hold except a
+     *  genuine stop (which leaves the hold open) and a raw change (which discards, because the real
+     *  distance arrived). Must run BEFORE any branch that returns early, or the metres are stranded. */
+    private fun flushPending() {
+        if (!pendingHold) return
+        effectiveDistanceM += deferredM
+        coastSpentS += heldS
+        deferredM = 0.0; heldS = 0.0; pendingHold = false
+    }
+
     /**
      * Feed the latest raw distance (m), speed (m/s, or null if unavailable) and the ride's elapsed
      * time (seconds) once per tick. [elapsedS] is the coast clock — see the class KDoc on why this is
      * ride-elapsed rather than wall-clock (pause-safety).
      */
     fun update(rawDistanceM: Double, speedMs: Double?, elapsedS: Double) {
+        pendingSample = false   // set true only by the hold branch below; must run even on a non-finite tick
+        settledPending = false  // set true only by the settle branch below; must run even on a non-finite tick
         // Guard non-finite inputs: ignore the sample and keep the previous state (no NaN propagation).
         if (!rawDistanceM.isFinite() || !elapsedS.isFinite()) return
         // A non-finite SPEED is ABSENT, not a rate: NaN < minMovingMs is false, so it slipped past the
@@ -210,6 +288,8 @@ class CoastingEstimator(
             rawAtFreezeM = if (firstCall) rawDistanceM else prevRawM
             coastedSurplusM = if (firstCall) 0.0 else effectiveDistanceM - prevRawM
             if (speedMs != null && speedMs in minMovingMs..AGG_MAX_SPEED_MS) lastMovingSpeedMs = speedMs
+            settledPending = pendingHold
+            deferredM = 0.0; heldS = 0.0; pendingHold = false
             effectiveDistanceM = rawDistanceM
             quality = CoastQuality.LIVE
             coastingSeconds = 0.0
@@ -227,7 +307,7 @@ class CoastingEstimator(
             // (a junction stop mid-dropout used to rewind the odometer to where the fix died and then
             // hand every discarded metre back as one huge LIVE step when it returned).
             // The loss clock is frozen but NOT cleared: a dropout is still a dropout after a red light.
-            quality = qualityOf(coastingSeconds)
+            quality = if (pendingHold) CoastQuality.LIVE else qualityOf(coastingSeconds)
             return
         }
 
@@ -238,6 +318,7 @@ class CoastingEstimator(
                 // first emits, so the stop check above can't fire on a null speed. Nothing to
                 // dead-reckon, and nothing has gone wrong: treat the frozen distance as LIVE rather than
                 // coasting a standing start into a false "GPS lost" after the window.
+                deferredM = 0.0; heldS = 0.0; pendingHold = false
                 effectiveDistanceM = rawDistanceM
                 quality = CoastQuality.LIVE
                 coastingSeconds = 0.0
@@ -248,6 +329,7 @@ class CoastingEstimator(
             // and the quality MUST still run: this is a genuine dropout and it has to announce itself
             // (alert, estimate mark, give-up blank). Conflating it with the start line turned a
             // ten-minute GPS loss into a fully trusted reading.
+            flushPending()
             coastingSeconds += dt
             quality = qualityOf(coastingSeconds)
             return
@@ -255,6 +337,22 @@ class CoastingEstimator(
 
         // Frozen while moving — or speed unavailable. We NEVER blank; a prolonged loss is LONG_LOSS.
         coastingSeconds += dt
+        if (speedMs != null && coastSpentS == 0.0 &&
+            coastingSeconds > 0.0 && coastingSeconds <= pendingToleranceS &&
+            maxCoastS >= pendingToleranceS) {
+            // HOLD: the stream owes us a sample, not a guess. Record what we would have invented and
+            // apply nothing, so the settle tick carries the whole measured step exactly once.
+            // `coastingSeconds > 0.0` refuses an EMPTY hold: dt is 0 on a repeated ELAPSED_TIME (a
+            // pause, or a clamped backward correction), which would otherwise open a hold that
+            // consumed no time — and would make the tolerance-0 dark configuration not dark.
+            deferredM += speedMs.coerceAtMost(AGG_MAX_SPEED_MS) * dt
+            heldS += dt
+            pendingHold = true
+            pendingSample = true
+            quality = CoastQuality.LIVE
+            return
+        }
+        flushPending()   // eligibility ended: apply the deferred metres, then coast as before
         // Whatever the speed source, one loss may only buy maxCoastS of dead reckoning (see coastSpentS).
         val room = (maxCoastS - coastSpentS).coerceIn(0.0, dt)
         if (speedMs != null) {
@@ -306,5 +404,20 @@ class CoastingEstimator(
          * quality keep running, so the alert and the estimate mark stay honest.
          */
         const val MAX_COAST_S = 1_800.0
+
+        /**
+         * How long (s) a frozen raw distance with a REPORTED speed is treated as a PENDING SAMPLE —
+         * the stream owing us a value — rather than a dropout. Within it nothing is invented: the
+         * odometer holds and the metres that would have been dead-reckoned are recorded in
+         * `deferredM` and applied only if the interval outlives the tolerance.
+         *
+         * The 1 Hz tick samples a distance whose value changes more slowly, so two consecutive ticks
+         * routinely read the same value with the GPS perfectly healthy. On the 2026-09-20 field ride
+         * that produced 495 "gps-loss episodes" with `fixAge@tick` never above 1180 ms against a
+         * 5000 ms gate; 470 of them lasted exactly one second, 483 two or less.
+         */
+        // 2.0 s covers 483 of the 495 episodes measured on the 2026-09-20 ride; the 3-10 s tail is
+        // left to the existing, proven dead-reckoning path.
+        const val PENDING_TOLERANCE_S = 2.0
     }
 }
