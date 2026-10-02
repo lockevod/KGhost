@@ -1,18 +1,6 @@
 package com.enderthor.kghost.engine
 
 /**
- * Path-following ghost race engine (pure). Accrues the rider's HISTORICAL time per metre ACTUALLY ridden
- * (from a pace source; where there is no history the fill is NEUTRAL — the rider's own pace over that
- * tick, so novel ground moves the gap by 0), so the ghost rides the rider's own path — reroutes /
- * shortcuts / loops are irrelevant. A decimated breadcrumb places the map-ghost marker.
- *
- * gapTimeS = ghostTime − riderElapsed  (positive → rider faster than historical-self over ground covered)
- * gapDistM = riderDist − D_ghost       (D_ghost = path distance where cumGhostTime == riderElapsed)
- *
- * The gap is ANCHORED at the first tick (ghostTime := elapsedS) so the race starts at 0 regardless of the
- * first tick's distance/elapsed origin; a backward step (coast/GPS-recovery correction) just re-baselines.
- */
-/**
  * Last tier of the route pace lookup, after this-road history (PacePatch) and the gradient model (GradePace):
  * when the loaded route has NO ridden stretch at all and there is no gradient model either, nothing can ever
  * give a verdict, so the neutral fill would pin the gap at 0 for the whole ride — a first-time user's whole
@@ -26,6 +14,18 @@ package com.enderthor.kghost.engine
 fun noHistoryTargetPace(routeHasHistory: Boolean, hasGradeModel: Boolean, targetSpeedMs: Double): Double? =
     if (routeHasHistory || hasGradeModel) null else 1.0 / com.enderthor.kghost.data.sanitizeTargetMs(targetSpeedMs)
 
+/**
+ * Path-following ghost race engine (pure). Accrues the rider's HISTORICAL time per metre ACTUALLY ridden
+ * (from a pace source; where there is no history the fill is NEUTRAL — the rider's own pace over that
+ * tick, so novel ground moves the gap by 0), so the ghost rides the rider's own path — reroutes /
+ * shortcuts / loops are irrelevant. A decimated breadcrumb places the map-ghost marker.
+ *
+ * gapTimeS = ghostTime − riderElapsed  (positive → rider faster than historical-self over ground covered)
+ * gapDistM = riderDist − D_ghost       (D_ghost = path distance where cumGhostTime == riderElapsed)
+ *
+ * The gap is ANCHORED at the first tick (ghostTime := elapsedS) so the race starts at 0 regardless of the
+ * first tick's distance/elapsed origin; a backward step (coast/GPS-recovery correction) just re-baselines.
+ */
 class GhostIntegrator(
     @Suppress("unused") private val pick: GhostPick,
     private val vpTimePerM: Double,
