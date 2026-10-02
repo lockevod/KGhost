@@ -12,6 +12,20 @@ package com.enderthor.kghost.engine
  * The gap is ANCHORED at the first tick (ghostTime := elapsedS) so the race starts at 0 regardless of the
  * first tick's distance/elapsed origin; a backward step (coast/GPS-recovery correction) just re-baselines.
  */
+/**
+ * Last tier of the route pace lookup, after this-road history (PacePatch) and the gradient model (GradePace):
+ * when the loaded route has NO ridden stretch at all and there is no gradient model either, nothing can ever
+ * give a verdict, so the neutral fill would pin the gap at 0 for the whole ride — a first-time user's whole
+ * experience (field log 2026-10-02). Race the Ghost-Pace target there instead, per ridden metre on the route
+ * mode's moving-time clock (so close to — not identical with — the no-route race: a stop without auto-pause
+ * is not charged, and a mid-ride target change only affects metres ridden after it). The map marker's fill
+ * already runs at that target. Any history keeps the neutral fill — that is where a fixed target fabricated
+ * verdicts (see the fill comment in onTick). The caller must apply the same freshness gate as tiers 1-2.
+ * Returns s/m, or null to leave the tick to the neutral fill.
+ */
+fun noHistoryTargetPace(routeHasHistory: Boolean, hasGradeModel: Boolean, targetSpeedMs: Double): Double? =
+    if (routeHasHistory || hasGradeModel) null else 1.0 / com.enderthor.kghost.data.sanitizeTargetMs(targetSpeedMs)
+
 class GhostIntegrator(
     @Suppress("unused") private val pick: GhostPick,
     private val vpTimePerM: Double,

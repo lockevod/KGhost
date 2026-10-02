@@ -87,10 +87,7 @@ class Adv2CoastPipelineTest {
         val coast = CoastingEstimator()
         private val curve = GhostPaceSource(targetMs).curve()
         private var moveStart: Double? = null
-        private var gpsAlertFired = false
 
-        /** Every "GPS lost" InRideAlert this ride would have dispatched. */
-        var alertsFired = 0; private set
         /** Ticks where the field went `---` (give-up blank). */
         var blankedTicks = 0; private set
         /** Ticks where the number was rendered with the "estimate" mark. */
@@ -99,14 +96,9 @@ class Adv2CoastPipelineTest {
 
         val coastS get() = coast.coastingSeconds
 
-        private fun handleGpsLoss(coastingS: Double): Boolean {
-            if (coastingS >= 60.0) {
-                if (!gpsAlertFired) { gpsAlertFired = true; alertsFired++ }
-            } else if (coastingS < 30.0) {
-                gpsAlertFired = false
-            }
-            return coastingS >= 180.0
-        }
+        // Mirrors production's VP give-up only. The "GPS lost" alert left this function (it is keyed on
+        // the trusted-fix age now, mode-independent — see GpsHealth/GpsHealthTest), so it is not mirrored.
+        private fun handleGpsLoss(coastingS: Double): Boolean = coastingS >= 180.0
 
         fun tick(rawDistM: Double, elapsedS: Double, speedMs: Double?) {
             coast.update(rawDistM, speedMs, elapsedS)
@@ -152,7 +144,7 @@ class Adv2CoastPipelineTest {
         println(
             "A: null-SPEED stop -> phantom=${"%.0f".format(phantom)} m (was 720), reads " +
                 "${"%.0f".format(readAhead)}s AHEAD (was 177), truth ${"%.0f".format(truthAhead)}s; " +
-                "alerts=${r.alertsFired} estimatedTicks=${r.estimatedTicks} blanked=${r.blankedTicks}",
+                " estimatedTicks=${r.estimatedTicks} blanked=${r.blankedTicks}",
         )
         assertEquals("bounded at COAST_WINDOW_MS x 6 m/s, whatever the stop's length", 180.0, phantom, 0.01)
         assertEquals("the rider reads ~15 s ahead (was 177 s)", 15.0, readAhead, 1.0)
@@ -160,7 +152,6 @@ class Adv2CoastPipelineTest {
         assertTrue("the error is a quarter of what it was (54 s, was 216 s)", readAhead - truthAhead < 60.0)
         // The alert is the honest half of the trade — and the number is MARKED for the whole stop,
         // so the rider is never handed an unmarked estimate.
-        assertEquals("we cannot prove a stop, so we say so exactly once", 1, r.alertsFired)
         assertTrue("and every tick of it is rendered as an ESTIMATE", r.estimatedTicks >= 89)
     }
 
@@ -173,9 +164,8 @@ class Adv2CoastPipelineTest {
         repeat(100) { d += 6.0; t += 1.0; r.tick(d, t, 6.0) }
         val before = r.odoM
         repeat(120) { t += 1.0; r.tick(d, t, 0.5) } // exactly at MIN_MOVING_MS => NOT < => not a stop
-        println("A2: parked at a 0.5 m/s noise floor -> phantom=${"%.0f".format(r.odoM - before)} m (was 720), alerts=${r.alertsFired}")
+        println("A2: parked at a 0.5 m/s noise floor -> phantom=${"%.0f".format(r.odoM - before)} m (was 720)")
         assertEquals("120 s x the reported 0.5 m/s, not x the remembered 6 m/s", 60.0, r.odoM - before, 0.01)
-        assertEquals(1, r.alertsFired)
     }
 
     // =============================================================================================
@@ -197,11 +187,10 @@ class Adv2CoastPipelineTest {
             repeat(20) { t += 1.0; r.tick(frozenAt, t, 0.0) }
         }
         println(
-            "B: alerts=${r.alertsFired} (was 0) estimatedTicks=${r.estimatedTicks} (was 0) " +
+            "B: estimatedTicks=${r.estimatedTicks} (was 0) " +
                 "blanked=${r.blankedTicks} (was 0) odo=${"%.0f".format(r.odoM)} m (was 1200, truth 2700)",
         )
         // Truth: 1200 m + 10*25 s*6 m/s = 2700 m, and 250 s of blind-while-moving out of 450 s frozen.
-        assertEquals("the loss announces itself, once", 1, r.alertsFired)
         assertTrue("and the number is marked as an estimate throughout", r.estimatedTicks > 250)
         assertTrue("and past GPS_GIVEUP_S the field gives up and blanks", r.blankedTicks > 100)
         assertEquals("the odometer tracks the truth to the metre", 2700.0, r.odoM, 0.01)
@@ -343,9 +332,8 @@ class Adv2CoastPipelineTest {
         val base = d
         var acc = 0.0
         repeat(300) { t += 1.0; acc += 0.44; r.tick(base + kotlin.math.floor(acc), t, 0.44) }
-        println("crawl: odo=${"%.1f".format(r.odoM)} m raw=${"%.1f".format(base + kotlin.math.floor(acc))} m alerts=${r.alertsFired}")
+        println("crawl: odo=${"%.1f".format(r.odoM)} m raw=${"%.1f".format(base + kotlin.math.floor(acc))} m")
         assertEquals("odometer == raw, no dead reckoning at all", base + kotlin.math.floor(acc), r.odoM, 1e-9)
-        assertEquals("and no spurious GPS-lost alert on a wall", 0, r.alertsFired)
     }
 
     /** A track-stand: bolt upright, speed 0.00, DISTANCE frozen, ELAPSED running, for 3 minutes. The
@@ -356,9 +344,8 @@ class Adv2CoastPipelineTest {
         repeat(100) { d += 6.0; t += 1.0; r.tick(d, t, 6.0) }
         val before = r.aheadS
         repeat(180) { t += 1.0; r.tick(d, t, 0.0) }
-        println("track-stand: ahead ${"%.0f".format(before)}s -> ${"%.0f".format(r.aheadS)}s, alerts=${r.alertsFired}")
+        println("track-stand: ahead ${"%.0f".format(before)}s -> ${"%.0f".format(r.aheadS)}s")
         assertEquals("the odometer does not move", 600.0, r.odoM, 1e-9)
-        assertEquals("no alert, no blank, no estimate mark", 0, r.alertsFired)
         assertEquals(0, r.blankedTicks)
         assertEquals(0.0, r.coastS, 1e-9)
         assertEquals(CoastQuality.LIVE, r.coast.quality)
@@ -374,7 +361,6 @@ class Adv2CoastPipelineTest {
         repeat(100) { d += 6.0; t += 1.0; r.tick(d, t, 6.0) }
         repeat(300) { d += 1.2; t += 1.0; r.tick(d, t, 1.2) }
         assertEquals("odometer == raw throughout", d, r.odoM, 1e-9)
-        assertEquals(0, r.alertsFired)
     }
 
     /** A wheel sensor reporting exact zeros while GPS is fine and the odometer advances. The `changed`
@@ -385,7 +371,6 @@ class Adv2CoastPipelineTest {
         repeat(50) { d += 6.0; t += 1.0; r.tick(d, t, 6.0) }
         repeat(200) { d += 6.0; t += 1.0; r.tick(d, t, 0.0) } // GPS advancing, sensor lying
         assertEquals(d, r.odoM, 1e-9)
-        assertEquals(0, r.alertsFired)
     }
 
     /** GPS speed jittering across 0.5 m/s while GENUINELY parked, DISTANCE frozen — the worst case for
@@ -402,7 +387,7 @@ class Adv2CoastPipelineTest {
         val before = r.odoM
         // 300 s parked, speed alternating 0.7 / 0.2 (worst realistic GPS noise at a standstill).
         repeat(300) { i -> t += 1.0; r.tick(d, t, if (i % 2 == 0) 0.7 else 0.2) }
-        println("jitter: phantom=${"%.0f".format(r.odoM - before)} m over 300 s parked (6 m before, 1800 m pre-c672e99), alerts=${r.alertsFired}")
+        println("jitter: phantom=${"%.0f".format(r.odoM - before)} m over 300 s parked (6 m before, 1800 m pre-c672e99)")
         assertEquals("150 above-threshold samples x the 0.7 m/s they report", 105.0, r.odoM - before, 0.01)
         assertTrue("far below the cruising-speed fabrication it replaces", r.odoM - before < 200.0)
     }
@@ -440,7 +425,6 @@ class Adv2CoastPipelineTest {
         println("pause: phantom=${"%.1f".format(r.odoM - before)} m over a 30 min pause")
         assertEquals("elapsed-driven clock makes a pause a no-op", 0.0, r.odoM - before, 1e-9)
         assertEquals(0.0, r.coastS, 1e-9)
-        assertEquals(0, r.alertsFired)
     }
 
     /** The recorder. It is fed the RAW `distM` (KGhostExtension.kt:1866), never

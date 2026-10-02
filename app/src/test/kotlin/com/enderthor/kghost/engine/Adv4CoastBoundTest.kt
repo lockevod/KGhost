@@ -23,23 +23,16 @@ class Adv4CoastBoundTest {
         val coast = CoastingEstimator()
         private val curve = GhostPaceSource(targetMs).curve()
         private var moveStart: Double? = null
-        private var gpsAlertFired = false
 
-        var alertsFired = 0; private set
         var blankedTicks = 0; private set
         var estimatedTicks = 0; private set
         var gap: GapState? = null; private set
 
         val coastS get() = coast.coastingSeconds
 
-        private fun handleGpsLoss(coastingS: Double): Boolean {
-            if (coastingS >= 60.0) {
-                if (!gpsAlertFired) { gpsAlertFired = true; alertsFired++ }
-            } else if (coastingS < 30.0) {
-                gpsAlertFired = false
-            }
-            return coastingS >= 180.0
-        }
+        // Mirrors production's VP give-up only. The "GPS lost" alert left this function (it is keyed on
+        // the trusted-fix age now, mode-independent — see GpsHealth/GpsHealthTest), so it is not mirrored.
+        private fun handleGpsLoss(coastingS: Double): Boolean = coastingS >= 180.0
 
         fun tick(rawDistM: Double, elapsedS: Double, speedMs: Double?) {
             coast.update(rawDistM, speedMs, elapsedS)
@@ -234,8 +227,7 @@ class Adv4CoastBoundTest {
         repeat(60) { dr += 9.0; tr += 1.0; r.tick(dr, tr, 9.0 * 3.6) }
         val fr = dr
         repeat(600) { tr += 1.0; r.tick(fr, tr, 9.0 * 3.6) }
-        println("A3: consumer sees alerts=${r.alertsFired} estimated=${r.estimatedTicks} blanked=${r.blankedTicks} over a real 600 s loss (was 0/0/0)")
-        assertEquals("the 10-minute loss announces itself, once", 1, r.alertsFired)
+        println("A3: consumer sees estimated=${r.estimatedTicks} blanked=${r.blankedTicks} over a real 600 s loss (was 0/0/0)")
         assertTrue("the number is marked as an estimate", r.estimatedTicks > 100)
         assertTrue("and past GPS_GIVEUP_S the field blanks", r.blankedTicks > 400)
     }
@@ -254,7 +246,7 @@ class Adv4CoastBoundTest {
         println("A3c: no rate at all -> odo +${c.effectiveDistanceM - frozen} m, quality=${c.quality}, lossClock=${c.coastingSeconds}")
         assertEquals("no rate means no invented metres", 0.0, c.effectiveDistanceM - frozen, 1e-9)
         assertEquals("but the loss is flagged", CoastQuality.LONG_LOSS, c.quality)
-        assertEquals("and the clock the alert and the give-up run on keeps time", 600.0, c.coastingSeconds, 1e-6)
+        assertEquals("and the clock the VP give-up runs on keeps time", 600.0, c.coastingSeconds, 1e-6)
 
         // The standing start is still silent: nothing ever moved, so nothing is wrong.
         val n = CoastingEstimator()

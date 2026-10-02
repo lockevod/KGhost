@@ -21,7 +21,7 @@ package com.enderthor.kghost.engine
  *                      (within the coast window) and a legitimate stop both stay false.
  * @param active        False when there is nothing to show: ride not recording, no first data
  *                      yet, a sustained GPS loss (give-up), or a non-finite gap. NOT for "no
- *                      target" — the Ghost Pace target is always present (defaults to 12 km/h).
+ *                      target" — the Ghost Pace target is always present (defaults to 20 km/h).
  */
 data class GapState(
     val gapTimeS: Double,

@@ -39,6 +39,52 @@ class GhostIntegratorTest {
         assertEquals(0.0, g.gapDistM, 1.0)
     }
 
+    // Field log 2026-10-02: a first-time user on a brand-new route (no history, no gradient model) read 0 s
+    // for the whole ride. That case alone races the target — and must equal the no-route Ghost-Pace gap.
+    @Test fun `a route with no history and no gradient model races the target per ridden metre`() {
+        val target = 20.0 / 3.6
+        val tier = noHistoryTargetPace(routeHasHistory = false, hasGradeModel = false, targetSpeedMs = target)!!
+        val g = newInt(); val src: (Double, Double, Double) -> Double? = { _, _, _ -> tier }
+        val curve = GhostPaceSource(target).curve()
+        var d = 0.0; var t = 0.0
+        g.onTick(d, 0.0, d, 90.0, t, src)
+        for (i in 1..900) { // 30 min, speed swinging 4..9 m/s
+            d += 6.5 + 2.5 * kotlin.math.sin(i / 40.0); t += 2.0
+            g.onTick(d, 0.0, d, 90.0, t, src)
+        }
+        val vp = GapCalculator.compute(d, t, curve, fresh = true)
+        assertEquals(-vp.gapTimeS, g.gapTimeS, 1e-6) // opposite sign conventions, same verdict
+    }
+
+    // Why the caller gates tier 4 on a FRESH fix: the integrator keeps ghostTime across a backward odometer
+    // step, so dead-reckoned overshoot charged at the target is never refunded, while the stateless VP race
+    // refunds it on the snap-back. Charged → lead sticks; neutral (null, the gated path) → lead refunded.
+    @Test fun `coasted overshoot charged at the target is a ratchet, neutral is not`() {
+        val tier = noHistoryTargetPace(routeHasHistory = false, hasGradeModel = false, targetSpeedMs = 5.0)!!
+        fun ride(chargeCoast: Boolean): Double {
+            val g = newInt()
+            var coasting = false
+            val src: (Double, Double, Double) -> Double? = { _, _, _ -> if (coasting && !chargeCoast) null else tier }
+            g.onTick(0.0, 0.0, 0.0, 90.0, 0.0, src)
+            g.onTick(500.0, 0.0, 500.0, 90.0, 100.0, src)          // 5 m/s live: exactly on target, gap 0
+            coasting = true
+            g.onTick(1500.0, 0.0, 1500.0, 90.0, 200.0, src)        // coasts at 10 m/s, really rode 500 m
+            coasting = false
+            g.onTick(1000.0, 0.0, 1000.0, 90.0, 200.0, src)        // fix back: odometer snaps to 1000 m
+            return g.gapTimeS
+        }
+        val vp = -GapCalculator.compute(1000.0, 200.0, GhostPaceSource(5.0).curve(), fresh = true).gapTimeS
+        assertEquals(0.0, vp, 1e-6)
+        assertEquals("charged coast keeps phantom lead", 100.0, ride(chargeCoast = true), 1e-6)
+        assertTrue("neutral coast never exceeds the VP verdict", ride(chargeCoast = false) <= vp + 1e-6)
+    }
+
+    @Test fun `any history or a gradient model keeps the neutral fill`() {
+        assertEquals(null, noHistoryTargetPace(routeHasHistory = true, hasGradeModel = false, targetSpeedMs = 5.0))
+        assertEquals(null, noHistoryTargetPace(routeHasHistory = false, hasGradeModel = true, targetSpeedMs = 5.0))
+        assertEquals(0.2, noHistoryTargetPace(routeHasHistory = false, hasGradeModel = false, targetSpeedMs = 5.0)!!, 1e-12)
+    }
+
     // A repeated ELAPSED_TIME value against a fresh distance (the caller's combine+sample can emit one)
     // must accrue NOTHING on novel ground. Charging the VP pace there minted unearned lead on every such
     // tick, one-signed and never given back — a 4 h ride with one repeat a minute came out +10 min AHEAD.

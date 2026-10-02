@@ -254,7 +254,7 @@ class Adv5ConfigMirrorAttackTest {
         // …configForUpdate does, and loadConfigFlow has a trailing `.map { it.migrateToLatest() }`.
         val migrated = configForUpdate(null) { old }
         assertEquals(CONFIG_VERSION, migrated.version)
-        assertTrue("v2→v3 must lift a zeroed target to the 12 km/h default", migrated.targetSpeedMs > 0)
+        assertTrue("v2→v3 must lift a zeroed target to the default target", migrated.targetSpeedMs > 0)
     }
 
     // ───────────────────────────────────────────────────────────────────────────

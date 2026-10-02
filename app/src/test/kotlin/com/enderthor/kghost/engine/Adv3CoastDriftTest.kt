@@ -77,23 +77,16 @@ class Adv3CoastDriftTest {
         val coast = CoastingEstimator()
         private val curve = GhostPaceSource(targetMs).curve()
         private var moveStart: Double? = null
-        private var gpsAlertFired = false
 
-        var alertsFired = 0; private set
         var blankedTicks = 0; private set
         var estimatedTicks = 0; private set
         var gap: GapState? = null; private set
 
         val coastS get() = coast.coastingSeconds
 
-        private fun handleGpsLoss(coastingS: Double): Boolean {
-            if (coastingS >= 60.0) {
-                if (!gpsAlertFired) { gpsAlertFired = true; alertsFired++ }
-            } else if (coastingS < 30.0) {
-                gpsAlertFired = false
-            }
-            return coastingS >= 180.0
-        }
+        // Mirrors production's VP give-up only. The "GPS lost" alert left this function (it is keyed on
+        // the trusted-fix age now, mode-independent — see GpsHealth/GpsHealthTest), so it is not mirrored.
+        private fun handleGpsLoss(coastingS: Double): Boolean = coastingS >= 180.0
 
         fun tick(rawDistM: Double, elapsedS: Double, speedMs: Double?) {
             coast.update(rawDistM, speedMs, elapsedS)
@@ -292,10 +285,9 @@ class Adv3CoastDriftTest {
         repeat(600) { t += 1.0; r.tick(d, t, null) }        // 10 min parked, SPEED stream quiet
         println(
             "H3: 600 s parked with a perfect fix -> coastS=${"%.0f".format(r.coastS)} " +
-                "alerts=${r.alertsFired} blankedTicks=${r.blankedTicks} phantom=${"%.0f".format(r.odoM - beforeOdo)} m",
+                " blankedTicks=${r.blankedTicks} phantom=${"%.0f".format(r.odoM - beforeOdo)} m",
         )
         assertEquals("the loss clock runs the whole stop", 600.0, r.coastS, 1e-9)
-        assertEquals("a false GPS-lost alert", 1, r.alertsFired)
         assertEquals("and 7 of the 10 minutes show `---`", 421, r.blankedTicks)
         // It self-heals on the first metre ridden.
         t += 1.0; r.tick(d + 6.0, t, 6.0)
@@ -312,9 +304,8 @@ class Adv3CoastDriftTest {
         repeat(200) { d += 6.0; t += 1.0; r.tick(d, t, 6.0) }
         repeat(600) { t += 1.0; r.tick(d, t, 0.0) }
         assertEquals(0.0, r.coastS, 1e-9)
-        assertEquals(0, r.alertsFired)
         assertEquals(0, r.blankedTicks)
-        println("H3b: control -> coastS=0, alerts=0, blanked=0")
+        println("H3b: control -> coastS=0, blanked=0")
     }
 
     /** The estimate MARK (not the blank) survives a stop by design. A 40 s tunnel that ends with the
@@ -331,7 +322,7 @@ class Adv3CoastDriftTest {
         repeat(300) { t += 1.0; r.tick(frozen, t, 0.0) }     // 5 min at a light, GPS perfect
         println(
             "H3c: estimate-marked ticks ${markedAfterLoss} -> ${r.estimatedTicks} " +
-                "(+${r.estimatedTicks - markedAfterLoss} while parked with a good fix), alerts=${r.alertsFired}",
+                "(+${r.estimatedTicks - markedAfterLoss} while parked with a good fix)",
         )
         assertEquals(CoastQuality.LONG_LOSS, r.coast.quality)
         assertTrue("300 stopped ticks all marked as estimates", r.estimatedTicks - markedAfterLoss >= 299)
@@ -353,7 +344,7 @@ class Adv3CoastDriftTest {
         repeat(120) { t += 1.0; r.tick(d, t, null) }   // 120 s, under the give-up so the number is visible
         println(
             "H4: descent -> phantom=${"%.0f".format(r.odoM - before)} m, " +
-                "lead ${"%.0f".format(leadBefore)}s -> ${"%.0f".format(r.aheadS)}s, alerts=${r.alertsFired}",
+                "lead ${"%.0f".format(leadBefore)}s -> ${"%.0f".format(r.aheadS)}s",
         )
         assertEquals("30 s x the peak speed remembered", 660.0, r.odoM - before, 0.01)
         assertTrue("+78 s of invented lead from a stop", r.aheadS - leadBefore > 70.0)
