@@ -58,7 +58,9 @@ live on a data field and as a marker on the map.
    occasional **in-ride reminder** until you grant it.
 4. **Set your Ghost Pace** — pick a target speed/pace for the fixed-pace mode. In a route race,
    this target fills gaps in the map curve; unknown ground holds the time lead when neither
-   historical pace tier can answer.
+   historical pace tier can answer — except on a route you have **never** ridden any part of (and no
+   imported history to learn a pace-vs-gradient from), where the number races this target instead of
+   sitting at 0. The default is **20 km/h**.
 5. **Ride.** Load a route to race your past self on it, or just start riding to race the Ghost Pace.
 
 ## Data fields
@@ -113,12 +115,14 @@ up after a sustained loss:
 |---|---|---|
 | brief gap | gap continues as an estimate | keeps gliding |
 | ~30 s+ | gap shown in **amber** (estimate) | visible |
-| ~1 min+ | …plus a one-shot **"GPS lost"** alert (clears when the signal returns) | visible |
+| ~1 min+ | …plus a one-shot **"GPS lost"** alert (re-arms once the signal is back) | visible |
 | ~3 min+ | gives up → `---` | hidden |
 
-The last two rows apply in **Ghost Pace mode** (no route loaded). **On a route** the gap is never
-blanked and no "GPS lost" alert is raised: the race is measured over the ground under your wheels, so
-a dropout only shows up as the amber estimate colour and a held map marker, and the gap keeps running.
+The **"GPS lost"** alert works in both modes. It counts time without a usable position once you have
+started rolling, never while the ride is paused, and gives you a minute to reacquire after a resume.
+The last row applies in **Ghost Pace mode** (no route loaded) only. **On a route** the gap is never
+blanked: with no fresh position it stops judging (the number holds), shown in the amber estimate colour
+with a held map marker.
 
 When the signal returns, the gap catches up (the odometer dead-reckons through the gap, so the race
 keeps running). The map ghost holds its position and stays visible throughout a dropout — it isn't
@@ -157,11 +161,12 @@ ghost on the spot without restarting your race (your start anchor and progress a
 The Ghost Pace and "race your own" are two halves of one ghost, so they are configured together here.
 
 - **How you race** — pick one: **Fixed pace** (race the constant Ghost-Pace target) or **Your rides**
-  (race your recorded history; the Ghost Pace becomes the fill pace where you have none). Choosing
+  (race your recorded history; where you have none the time lead simply holds, and a route with no
+  history at all races the Ghost Pace). Choosing
   *Fixed pace* greys out the *Your rides* options below, so the choice is always clear.
 - **Ghost Pace** — the target pace/speed (entered as km/h or min/km). This is the pace you race in
-  *Fixed pace* mode, and the fill pace the whole-route ghost uses on stretches with no recorded history
-  in *Your rides* mode. This is the **global default**.
+  *Fixed pace* mode, and the fill pace the map ghost uses on stretches with no recorded history
+  in *Your rides* mode. This is the **global default** (20 km/h out of the box).
 - **Per profile** — below the global pace, each Karoo ride profile you have used appears as a card. A
   profile can **follow global**, or set its **own** mode, Ghost Pace base, past-ghost pick, map icon and
   on/off — so your road bike can race your past laps while your MTB just chases a fixed pace. A profile
@@ -171,7 +176,7 @@ The Ghost Pace and "race your own" are two halves of one ghost, so they are conf
   double-alert). **Average** races the recency-weighted mean of your recent laps of the loaded route
   (so a typical effort, not a one-off PR or single recent ride). It needs at least **2 laps** covering
   a stretch before it kicks in — whether or not you started from the beginning of the route. On
-  stretches without enough history you race the **Ghost Pace** fill instead. Long stops (a café, a photo) are compressed out so one stop never slows the average, and only
+  stretches without enough history the time lead holds (your own pace there moves it by 0). Long stops (a café, a photo) are compressed out so one stop never slows the average, and only
   the **first lap of each ride** counts toward it. The average is kept per route (under
   `/sdcard/KGhost/aggregates` when all-files access is granted) and survives the library auto-clean
   below.

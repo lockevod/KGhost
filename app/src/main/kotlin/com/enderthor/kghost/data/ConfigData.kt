@@ -6,8 +6,8 @@ import kotlinx.serialization.Serializable
 /** Current schema version. Bump this and add a branch in [migrateToLatest] when defaults change. */
 const val CONFIG_VERSION = 9
 
-/** Default Ghost Pace target speed (12 km/h) used when the user hasn't set one. */
-val DEFAULT_TARGET_SPEED_MS: Double = kmhToMs(12.0)
+/** Default Ghost Pace target speed (20 km/h — what real riders average moving; 12 km/h left them an hour ahead) used when the user hasn't set one. */
+val DEFAULT_TARGET_SPEED_MS: Double = kmhToMs(20.0)
 
 /** Physically-plausible cycling ceiling for the VP target (30 m/s ≈ 108 km/h). */
 const val MAX_TARGET_SPEED_MS: Double = 30.0
@@ -58,7 +58,7 @@ data class ProfileSetting(
  * Persisted configuration for the KGhost extension.
  *
  * Stored as a single JSON blob under the key `kghostconfig` in the DataStore.
- * [targetSpeedMs] defaults to 12 km/h ([DEFAULT_TARGET_SPEED_MS]) when the user hasn't set a
+ * [targetSpeedMs] defaults to 20 km/h ([DEFAULT_TARGET_SPEED_MS]) when the user hasn't set a
  * target. 0.0 means the target was explicitly cleared (Ghost Pace inactive).
  */
 @Serializable
@@ -74,7 +74,7 @@ data class KGhostConfig(
      */
     @kotlinx.serialization.EncodeDefault
     val version: Int = CONFIG_VERSION,
-    /** Target speed in m/s. Defaults to 12 km/h; 0.0 = target explicitly cleared (VP inactive). */
+    /** Target speed in m/s. Defaults to 20 km/h; 0.0 = target explicitly cleared (VP inactive). */
     val targetSpeedMs: Double = DEFAULT_TARGET_SPEED_MS,
     /** Which gap metric to display on the fields. */
     val gapDisplay: GapDisplay = GapDisplay.BOTH,
@@ -122,7 +122,7 @@ data class KGhostConfig(
      * deactivated: it is the fallback pace the ghost runs at on stretches with no recorded history and
      * the default mode when no route is loaded, so a target must always exist. Returns [targetSpeedMs]
      * when it is finite and > 0 (clamped to [MAX_TARGET_SPEED_MS]), otherwise [DEFAULT_TARGET_SPEED_MS]
-     * (12 km/h) — so a never-set, zeroed, or out-of-range blob still drives a sane 12 km/h partner.
+     * (20 km/h) — so a never-set, zeroed, or out-of-range blob still drives a sane 20 km/h partner.
      * This is the single source of truth the engine and the Partner field read.
      */
     fun targetMs(): Double = sanitizeTargetMs(targetSpeedMs)
@@ -167,7 +167,7 @@ fun KGhostConfig.migrateToLatest(): KGhostConfig {
     var c = this
     // v1 → v2: race fields added with defaults; just stamp the version.
     if (c.version < 2) c = c.copy(version = 2)
-    // v2 → v3: a never-set target (stored 0.0, the old default) becomes the new 12 km/h default.
+    // v2 → v3: a never-set target (stored 0.0, the old default) becomes the then-new 12 km/h default (now 20).
     if (c.version < 3) c = c.copy(
         targetSpeedMs = if (c.targetSpeedMs <= 0.0) DEFAULT_TARGET_SPEED_MS else c.targetSpeedMs,
         version = 3,

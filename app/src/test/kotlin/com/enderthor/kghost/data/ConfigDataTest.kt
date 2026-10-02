@@ -9,7 +9,7 @@ import org.junit.Test
 class ConfigDataTest {
     @Test fun `kmh to ms`() { assertEquals(5.0, kmhToMs(18.0), 1e-6) }
     @Test fun `pace minkm to ms`() { assertEquals(5.0, paceMinKmToMs(3.3333333), 1e-3) } // 3:20/km ≈ 5 m/s
-    @Test fun `targetMs defaults to 12 km per h when zeroed (VP cannot be deactivated)`() {
+    @Test fun `targetMs defaults when zeroed (VP cannot be deactivated)`() {
         assertEquals(DEFAULT_TARGET_SPEED_MS, KGhostConfig(targetSpeedMs = 0.0).targetMs(), 1e-9)
     }
     @Test fun `targetMs returns the configured value when set`() {
@@ -20,21 +20,35 @@ class ConfigDataTest {
         assertEquals(config, config.migrateToLatest())
     }
 
-    @Test fun `default target is 12 kmh and version is current`() {
+    @Test fun `default target is 20 kmh and version is current`() {
         val c = KGhostConfig()
         assertEquals(DEFAULT_TARGET_SPEED_MS, c.targetSpeedMs, 1e-9)
-        assertEquals(kmhToMs(12.0), c.targetSpeedMs, 1e-9)
-        assertEquals(3.333333, c.targetSpeedMs, 1e-3)
+        assertEquals(kmhToMs(20.0), c.targetSpeedMs, 1e-9)
         assertEquals(CONFIG_VERSION, c.version)
     }
 
-    @Test fun `v1 unset target migrates to 12 kmh default`() {
+    // The default is never persisted (storage Json omits defaults), so a rider who never touched the
+    // target picks up a changed default on the next read — while any other value survives it. Known
+    // exception: a target typed as EXACTLY the old default (12 km/h) was omitted too, and now reads 20.
+    @Test fun `an untouched target follows the default, an explicit one is kept`() {
+        val untouched = com.enderthor.kghost.extension.jsonForStorage.encodeToString(KGhostConfig.serializer(), KGhostConfig())
+        assertFalse(untouched.contains("targetSpeedMs"))
+        // A blob written by an older build with the target untouched carries no target key at all.
+        val oldBlob = com.enderthor.kghost.extension.jsonWithUnknownKeys.decodeFromString(KGhostConfig.serializer(), "{\"version\":9}")
+        assertEquals(kmhToMs(20.0), oldBlob.migrateToLatest().targetMs(), 1e-9)
+        val explicit = com.enderthor.kghost.extension.jsonForStorage
+            .encodeToString(KGhostConfig.serializer(), KGhostConfig(targetSpeedMs = kmhToMs(25.0)))
+        val back = com.enderthor.kghost.extension.jsonWithUnknownKeys.decodeFromString(KGhostConfig.serializer(), explicit)
+        assertEquals(kmhToMs(25.0), back.targetSpeedMs, 1e-9)
+    }
+
+    @Test fun `v1 unset target migrates to the default`() {
         val migrated = KGhostConfig(version = 1, targetSpeedMs = 0.0).migrateToLatest()
         assertEquals(DEFAULT_TARGET_SPEED_MS, migrated.targetSpeedMs, 1e-9)
         assertEquals(CONFIG_VERSION, migrated.version)
     }
 
-    @Test fun `v2 unset target migrates to 12 kmh default`() {
+    @Test fun `v2 unset target migrates to the default`() {
         val migrated = KGhostConfig(version = 2, targetSpeedMs = 0.0).migrateToLatest()
         assertEquals(DEFAULT_TARGET_SPEED_MS, migrated.targetSpeedMs, 1e-9)
         assertEquals(CONFIG_VERSION, migrated.version)

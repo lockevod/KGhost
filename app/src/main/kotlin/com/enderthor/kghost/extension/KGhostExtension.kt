@@ -12,6 +12,8 @@ import com.enderthor.kghost.engine.CadenceProbe
 import com.enderthor.kghost.engine.CoastQuality
 import com.enderthor.kghost.engine.CoastingEstimator
 import com.enderthor.kghost.engine.verdictAllowed
+import com.enderthor.kghost.engine.noHistoryTargetPace
+import com.enderthor.kghost.engine.GpsHealth
 import com.enderthor.kghost.engine.raceClockFreezes
 import com.enderthor.kghost.engine.GapCalculator
 import com.enderthor.kghost.engine.GapState
@@ -525,8 +527,22 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // The rider's last TRUSTWORTHY route distance (the monotone rail) + the odometer captured with it.
     @Volatile private var lastGoodRouteDistM: Double? = null
     @Volatile private var distMAtLastGoodM: Double? = null
-    // One-shot "GPS lost" alert guard (re-armed when GPS recovers).
-    @Volatile private var gpsAlertFired: Boolean = false
+    // The ONE "GPS lost" episode for both modes (one alert per loss, re-armed on recovery) — see GpsHealth.
+    private val gpsHealth = GpsHealth(GPS_ALERT_S)
+    private val gpsAlertFired: Boolean get() = gpsHealth.fired
+    // Pre-filter arrival diagnostics for the three GPS-dependent streams (see StreamArrivals).
+    private val locArrivals = StreamArrivals("LOCATION") { st ->
+        val v = st.dataPoint.values
+        val lat = v[DataType.Field.LOC_LATITUDE]; val lng = v[DataType.Field.LOC_LONGITUDE]
+        val acc = v[DataType.Field.LOC_ACCURACY]
+        when {
+            lat == null || lng == null || !lat.isFinite() || !lng.isFinite() -> "no-coords"
+            acc == null || !acc.isFinite() || acc > GPS_GOOD_ACCURACY_M -> "untrusted"
+            else -> "ok"
+        }
+    }
+    private val distArrivals = StreamArrivals("DISTANCE")
+    private val speedArrivals = StreamArrivals("SPEED")
     // Previous tick's moving state (route mode) — drives the stationary→moving re-stamp edge.
     @Volatile private var wasMoving: Boolean = false
     // First-fix D0 confirmation candidate (position + odometer at that position).
@@ -594,7 +610,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         emptyWindowTicks = 0
         lastGoodRouteDistM = null
         distMAtLastGoodM = null
-        gpsAlertFired = false
+        gpsHealth.reset()
+        // The previous ride's fix must not survive into the next one (field log: a new ride opened with a
+        // 1288 s-old fix). Safe here: every caller has already stopped the location collector.
+        lastFix = null
+        locArrivals.reset(); distArrivals.reset(); speedArrivals.reset()
         wasMoving = false
         d0CandPos = null
         d0CandOdo = null
@@ -693,6 +713,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          */
         val gradePace: GradePace?,
         val aggregate: PerRouteAggregate?,
+        /**
+         * Whether ANY recorded track overlaps the route's bbox — the same candidate set tier 1 (PacePatch) is
+         * built from, so "no history" here means tier 1 can never answer anywhere on or around this route.
+         * (The aggregate's segments are NOT that signal: short shared stretches, an unsnapped polyline or
+         * leaving the route can empty them while PacePatch still hits.)
+         */
+        val hasHistory: Boolean = true,
     ) {
         fun withPick(pick: GhostPick, fillSpeedMs: Double): RouteMode {
             val aggregate = aggregate ?: return this
@@ -979,6 +1006,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             Timber.d("KVP ride state=$state tickActive=${tickJob?.isActive} route=${routeMode != null}")
             when (state) {
                 is RideState.Recording -> {
+                    // A resume restarts the GPS-lost clock: a long pause indoors is not a loss to report
+                    // the instant the rider rolls again. A replayed Recording (reconnect) is not a resume.
+                    if (ridePaused) gpsHealth.onResume(SystemClock.elapsedRealtime())
                     ridePaused = false
                     wasRecording = true
                     // No map re-stamp needed on resume: the loop glides BETWEEN published ghost distances
@@ -1553,12 +1583,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     }
                     val matched = agg?.toLiveSegments(pick).orEmpty()
                     if (matched.isEmpty()) {
-                        Timber.i("KVP grid: no raceable $pick for '${state.name}' yet — Ghost-Pace until it warms up")
+                        Timber.i(
+                            "KVP grid: no raceable $pick for '${state.name}' yet — %s",
+                            if (tracks.isEmpty() && (gradePace?.coveredM ?: 0.0) <= 0.0) "racing the Ghost-Pace target" else "neutral fill",
+                        )
                     } else {
                         Timber.i("KVP grid: racing $pick on ${matched.size} stretch(es)${if (justSeeded) " (just seeded)" else ""}")
                     }
                     // Build the ONE continuous whole-route ghost (recorded stretches + VP-pace fills) that
-                    // places the MAP MARKER. Fill pace = the always-present VP target (default 12 km/h), so
+                    // places the MAP MARKER. Fill pace = the always-present VP target (default 20 km/h), so
                     // the marker always flows across gaps with no recorded history. This VP-fill pace is
                     // UNRELATED to GhostIntegrator's (dead) vpTimePerM constructor arg above — that one no
                     // longer affects anything; this one genuinely drives where the map ghost is drawn.
@@ -1574,7 +1607,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // built under the OLD settings over the replacement's.
                     currentCoroutineContext().ensureActive()
                     if (matchStillOwns(mine, lastMatchedPolyline, generation, matchGeneration)) {
-                        routeMode = RouteMode(path, mine, state.name, matched, routeGhost, state.routeDistance, pacePatch, gradePace, agg)
+                        routeMode = RouteMode(path, mine, state.name, matched, routeGhost, state.routeDistance, pacePatch, gradePace, agg, tracks.isNotEmpty())
                         // Diagnostic for the scale question: the Karoo's own routeDistance vs the
                         // decoded-polyline length (the scale segments + the ghost curve live on). A large
                         // delta means the host and our polyline disagree about how long the route is,
@@ -1810,6 +1843,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         var lastLocTrusted: Boolean? = null
         if (locationJob?.isActive != true) {
             locationJob = karooSystem.streamDataFlow(DataType.Type.LOCATION).onEach { state ->
+                locArrivals.on(state) // BEFORE any filter — see StreamArrivals
                 val dp = (state as? StreamState.Streaming)?.dataPoint ?: return@onEach
                 val lat = dp.values[DataType.Field.LOC_LATITUDE]
                 val lng = dp.values[DataType.Field.LOC_LONGITUDE]
@@ -1909,11 +1943,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             // timing, and it is the timing that decides whether a repeated sampled value is a genuine
             // freeze or just a stream slower than the tick.
             val distance = karooSystem.streamDataFlow(DataType.Type.DISTANCE)
-                .onEach { distProbe.mark(SystemClock.elapsedRealtime()) }
+                .onEach { distProbe.mark(SystemClock.elapsedRealtime()); distArrivals.on(it) }
             val elapsed = karooSystem.streamDataFlow(DataType.Type.ELAPSED_TIME)
             // SPEED (m/s) is streamed to distinguish "stopped at a light" (frozen distance is
             // legitimate) from "GPS lost while moving" (frozen distance is wrong → blank to `---`).
-            val speed = karooSystem.streamDataFlow(DataType.Type.SPEED)
+            val speed = karooSystem.streamDataFlow(DataType.Type.SPEED).onEach { speedArrivals.on(it) }
             combine(distance, elapsed, speed) { d, e, sp -> Triple(d, e, sp) }
                 .sample(REFRESH_MS) // rate-limit BEFORE conflate so we tick at most once per REFRESH_MS
                 .conflate()
@@ -1929,6 +1963,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 .drop(1)
                 .onEach { (d, e, sp) ->
                     runCatching {
+                    // "GPS lost" alert — BOTH modes (GpsHealth). FIRST in the tick: the DISTANCE/ELAPSED guards
+                    // below return early when those streams go non-Streaming, which is exactly when a GPS loss
+                    // may be happening. Hopped to Main so decision + dispatch serialize with pause/resume.
+                    scope.launch { evaluateGpsLostAlert() }
                     // DISTANCE is in metres. Drop non-finite values (NaN/±Inf) so they never reach
                     // the gap engine.
                     val distM = (d as? StreamState.Streaming)?.dataPoint?.singleValue
@@ -2032,8 +2070,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         if (!ridePaused) lossTicks++
                         if (cq > lossWorst) lossWorst = cq
                         if (speedMs == null) lossNullSpeedTicks++
-                        // handleGpsLoss() runs LATER in this tick, so a fire is observed on the next one
-                        // — and on the recovery tick directly, before it re-arms.
+                        // The GPS-lost alert (GpsHealth, top of this tick) keys on the trusted-fix age, not on
+                        // this odometer episode: with a wheel sensor an alert can fire with no episode here.
                         if (gpsAlertFired) lossAlerted = true
                         lossClockS = coast.coastingSeconds // survives the reset on the recovery tick
                     }
@@ -2062,44 +2100,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val fix = lastFix?.takeIf { SystemClock.elapsedRealtime() - it.ms <= GPS_FIX_FRESH_MS }
                         recorder.onSample(fix?.lat, fix?.lng, distM, elapsedS)
                     }
-                    // GPS-loss handling, fed the whole-ride odometer coast. Only ① VP mode calls it (the
-                    // sole call site is the VP branch below); ② route mode signals a dropout through the
-                    // estimate mark and the marker hold instead of an alert.
-                    // Fires the one-shot "GPS lost" alert at GPS_ALERT_S, re-arms when the signal
-                    // recovers (coastingS back to 0), and RETURNS true once the loss is so long
-                    // (>= GPS_GIVEUP_S) that we give up and blank. coast.update already ran above so ①'s
-                    // machinery stays warm as the fallback.
-                    fun handleGpsLoss(coastingS: Double): Boolean {
-                        if (coastingS >= GPS_ALERT_S) {
-                            if (!gpsAlertFired) {
-                                gpsAlertFired = true
-                                karooSystem.dispatch(
-                                    InRideAlert(
-                                        id = "kghost-gps-lost-${System.currentTimeMillis()}",
-                                        icon = R.drawable.ic_gps_lost,
-                                        title = applicationContext.getString(R.string.gps_lost_title),
-                                        detail = applicationContext.getString(R.string.gps_lost_detail),
-                                        autoDismissMs = 10_000L,
-                                        backgroundColor = R.color.gps_alert_bg,
-                                        textColor = R.color.gps_alert_text,
-                                    ),
-                                )
-                                Timber.w("KVP GPS lost > ${GPS_ALERT_S}s — alert dispatched")
-                            }
-                        } else if (coastingS < GPS_ALERT_S * 0.5) {
-                            // Re-arm with HYSTERESIS once the loss is comfortably over — NOT on an exact
-                            // `coastingS == 0.0`. CoastingEstimator zeroes coastingSeconds only on a clean
-                            // LIVE tick, and a rider who recovers while still moving can sit at a small
-                            // non-zero value instead. With the old `== 0.0` the alert re-armed only on
-                            // exactly that zero, so a second GPS loss later in the same ride could never
-                            // alert. Half the fire threshold gives a clean gap (fire ≥60 s, re-arm <30 s)
-                            // with no flapping at the boundary.
-                            // (The previous wording justified this via route mode's time-since-last-dest-
-                            // change; that state, and route mode's path into this function, are both gone.)
-                            gpsAlertFired = false
-                        }
-                        return coastingS >= GPS_GIVEUP_S
-                    }
+                    // ① VP give-up, fed the whole-ride odometer coast: true once the loss is so long
+                    // (>= GPS_GIVEUP_S) that the stateless VP number would be a wild extrapolation, so it
+                    // blanks. The "GPS lost" ALERT is no longer here — it is mode-independent (GpsHealth,
+                    // above). Route mode never blanks: a stale fix leaves its number on the neutral fill.
+                    fun handleGpsLoss(coastingS: Double): Boolean = coastingS >= GPS_GIVEUP_S
                     // Dispatches a segment ENTRY/EXIT in-ride alert. Entry/exit differ only in strings; both
                     // use the blue "info" alert colours. There is NO time throttle — abutting double-pops are
                     // prevented structurally (publishSegment suppresses the EXIT when the next stretch is
@@ -2172,7 +2177,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Computes the ① VP gap (ridden distance vs race-elapsed at the fixed target pace).
                     // [raceElapsedS] is elapsed since FIRST MOVEMENT, not ride-start, so the ghost-pace
                     // race begins when the rider actually rolls (fair start) — the caller only reaches
-                    // here once firstMove is set. The VP target is ALWAYS present (defaults to 12 km/h —
+                    // here once firstMove is set. The VP target is ALWAYS present (defaults to 20 km/h —
                     // it can't be deactivated, it's the fallback), so this always returns a gap. The gap
                     // is shown even while dead-reckoning; only a prolonged loss (LONG_LOSS) marks it as an
                     // estimate (fresh = false) — it never blanks for GPS loss.
@@ -2217,6 +2222,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // The VP race clock is set ONCE per ride and never re-nulled (see its declaration).
                     if (vpFirstMoveElapsedS == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS) {
                         vpFirstMoveElapsedS = elapsedS
+                        gpsHealth.onRaceStart(SystemClock.elapsedRealtime())
                     }
 
                     // --- mode select: ② route mode vs ① Ghost Pace ---------------------
@@ -2407,7 +2413,16 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         } else {
                             null
                         }
-                        val paceNow = paceHere ?: paceGrade
+                        // Tier 4: no history anywhere near the route and no usable gradient model → race the
+                        // target. Same freshness/coast gate as tiers 1-2: a dead-reckoned metre charged at the
+                        // target would be refunded by the stateless VP race on the snap-back, but NOT by the
+                        // integrator (its backward step keeps ghostTime) — a one-way lead ratchet.
+                        val paceTarget = if (fixFresh) {
+                            noHistoryTargetPace(rm.hasHistory, (rm.gradePace?.coveredM ?: 0.0) > 0.0, eff.targetSpeedMs)
+                        } else {
+                            null
+                        }
+                        val paceNow = paceHere ?: paceGrade ?: paceTarget
                         // Guard (b): keyed on pendingHold (NOT pendingSample) so it survives a genuine stop
                         // inside a pending interval — that tick must still be skipped, not just held.
                         // integInitialised forces the very first call through regardless of coast's state:
@@ -2619,7 +2634,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     "KVP tick route(B2): riderDist=${"%.0f".format(riderDist)} " +
                                         "gapT=${"%.0f".format(gap.gapTimeS)}s gapD=${"%.0f".format(gap.gapDistanceM)}m " +
                                         "${if (gap.ahead) "AHEAD" else "BEHIND"} ghostTime=${"%.0f".format(integ.ghostTime)} " +
-                                        "seg=${if (paceHere != null) "SEG" else if (paceGrade != null) "GRADE" else "GP"} " +
+                                        "seg=${if (paceHere != null) "SEG" else if (paceGrade != null) "GRADE" else if (paceTarget != null) "VP" else "GP"} " +
                                         "grade=${lastGradePct?.let { "%.1f".format(it) } ?: "--"} " +
                                         "cov=${"%.0f".format(100.0 * integ.matchedM / (integ.matchedM + integ.filledM).coerceAtLeast(1.0))}% " +
                                         "riderR=${lastGoodRouteDistM?.let { "%.0f".format(it) } ?: "--"} " +
@@ -2673,6 +2688,39 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // Now that we're recording, run the match for any route that was previewed on standby (the
         // match was deferred to avoid burning battery on a race that might never start).
         pendingNavState?.let { onNavigationState(it) }
+    }
+
+    /** Runs on Main (the ride-state handler's thread), so a pause can't land between decision and dispatch.
+     *  A dispatch the host does not accept leaves the episode eligible, so the next tick retries. */
+    private var gpsAlertFailLogMs = 0L
+    private fun evaluateGpsLostAlert() {
+        if (!resolveProfile(activeConfig.value, activeProfileId).active) return
+        val nowMs = SystemClock.elapsedRealtime()
+        if (!gpsHealth.update(nowMs, lastFix?.ms, ridePaused)) return
+        val sent = runCatching {
+            karooSystem.dispatch(
+                InRideAlert(
+                    id = "kghost-gps-lost-${System.currentTimeMillis()}",
+                    icon = R.drawable.ic_gps_lost,
+                    title = applicationContext.getString(R.string.gps_lost_title),
+                    detail = applicationContext.getString(R.string.gps_lost_detail),
+                    autoDismissMs = 10_000L,
+                    backgroundColor = R.color.gps_alert_bg,
+                    textColor = R.color.gps_alert_text,
+                ),
+            )
+        }.getOrDefault(false)
+        if (!sent) {
+            gpsHealth.undoFire()
+            if (nowMs - gpsAlertFailLogMs < 60_000L) return
+            gpsAlertFailLogMs = nowMs
+        }
+        Timber.w(
+            "KVP GPS lost > %.0fs (no trusted fix) — alert %s mode=%s %s %s %s",
+            GPS_ALERT_S, if (sent) "dispatched" else "NOT accepted by host, retrying",
+            if (routeMode != null) "route" else "no-route",
+            locArrivals.snapshot(), distArrivals.snapshot(), speedArrivals.snapshot(),
+        )
     }
 
     /** One line carrying the whole shape of every stream the freshness/coasting gates depend on.

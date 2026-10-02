@@ -27,7 +27,7 @@ class B2Sergi1ReplayTest {
         // Historical pace = the ride itself (the ghost rides the rider's own path at their own pace);
         // the point of this test is that the SHORTCUT can't teleport the gap regardless of the source.
         val patch = PacePatch.build(listOf(track))
-        // VP fill at 12 km/h (the product default) for any novel ground.
+        // VP fill at 12 km/h (the product default when this replay was written) for any novel ground.
         val g = GhostIntegrator(GhostPick.AVERAGE, vpTimePerM = 1.0 / (12_000.0 / 3600.0), decimateM = 20.0)
 
         var prevGapD = 0.0

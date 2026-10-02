@@ -57,7 +57,7 @@ private enum class TargetMode { SPEED, PACE }
  * The toggle picks the entry mode; the value is converted to m/s via [kmhToMs] or [paceMinKmToMs] and
  * AUTO-SAVED (debounced) to [KGhostConfig.targetSpeedMs] — consistent with every other setting,
  * which also auto-saves, rather than a separate Save button. The VP can't be deactivated (it's the
- * fallback pace), so an empty/invalid entry is rejected and the stored target — 12 km/h by default —
+ * fallback pace), so an empty/invalid entry is rejected and the stored target — 20 km/h by default —
  * always remains; the field always shows a value.
  *
  * Emitted as direct children of the caller's scrolling Column (no wrapper here), so it stacks with
@@ -77,7 +77,7 @@ fun PartnerSection(
     // seeding (initial load + unit-toggle re-format) and only commits real edits.
     var userEdited by remember { mutableStateOf(false) }
 
-    // The VP target is ALWAYS present (default 12 km/h; it can't be deactivated — it's the fallback),
+    // The VP target is ALWAYS present (default 20 km/h; it can't be deactivated — it's the fallback),
     // so currentMs is always > 0 and the field always shows a value.
     val currentMs = config.targetMs()
     val currentLabel = if (imperial) {
@@ -88,7 +88,7 @@ fun PartnerSection(
 
     // Seed the input from the stored target in the CURRENTLY selected unit, and re-seed whenever the
     // unit flips or the stored value changes (after a save). This (a) prefills the field so the rider
-    // sees what's actually stored (default 12) instead of a blank box, and (b) reinterprets the value
+    // sees what's actually stored (default 20) instead of a blank box, and (b) reinterprets the value
     // into the new unit on a SPEED⇄PACE toggle — without this, a "25" typed as km/h would be read as
     // 25 min/km on the next save and persist a ~2.4 km/h pace. Keyed on (mode, currentMs) only, so it
     // does NOT clobber the rider's in-progress typing on unrelated config emissions.
@@ -110,7 +110,7 @@ fun PartnerSection(
     // other setting. Keyed on (targetText, mode) so each keystroke restarts the debounce. Guards:
     // [userEdited] skips the programmatic seeds above; the `!= currentMs` check skips the no-op re-save
     // the seed triggers after a save. The VP can't be deactivated, so an empty/invalid/out-of-range
-    // entry is REJECTED (the stored target — 12 km/h by default — stays); only a finite, positive,
+    // entry is REJECTED (the stored target — 20 km/h by default — stays); only a finite, positive,
     // in-range value (MAX_TARGET_SPEED_MS ≈ 108 km/h) is persisted.
     LaunchedEffect(targetText, mode, imperial) {
         if (!userEdited) return@LaunchedEffect

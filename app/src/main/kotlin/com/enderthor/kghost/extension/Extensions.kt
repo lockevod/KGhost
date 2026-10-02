@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
+import timber.log.Timber
 
 /**
  * Tolerant Json instance used everywhere we decode persisted config from DataStore.
@@ -42,10 +43,19 @@ val jsonForStorage = Json {
 /**
  * Wraps [KarooSystemService.addConsumer] for a data-type stream into a [Flow].
  * Emits every [StreamState] update for the given [dataTypeId].
+ *
+ * A host-side terminal (error/complete) makes karoo-ext REMOVE the consumer whether or not we pass a
+ * callback, so without these the flow stayed parked forever looking alive while delivering nothing. Now it
+ * is logged with the stream's id and the flow completes normally (never with an exception: the tick's
+ * combine keeps running on its other inputs, holding the dead one's last value). Diagnostic only — nothing
+ * re-subscribes mid-ride (startTick returns early while the tick is active). Logged only when close()
+ * succeeds, so a terminal echoed for our OWN unsubscribe (awaitClose already ran) stays silent.
  */
 fun KarooSystemService.streamDataFlow(dataTypeId: String): Flow<StreamState> = callbackFlow {
     val listenerId = addConsumer<OnStreamState>(
         params = OnStreamState.StartStreaming(dataTypeId),
+        onError = { msg -> if (close()) Timber.w("KVP stream %s terminal ERROR: %s", dataTypeId, msg) },
+        onComplete = { if (close()) Timber.w("KVP stream %s terminal COMPLETE", dataTypeId) },
         onEvent = { trySend(it.state) },
     )
     awaitClose { removeConsumer(listenerId) }
