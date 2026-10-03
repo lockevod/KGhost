@@ -116,6 +116,10 @@ data class KGhostConfig(
     val permAlertFiredCount: Int = 0,
     /** Wall-clock epoch millis the missing-permission alert last fired. 0 = never. */
     val permAlertLastFiredEpoch: Long = 0L,
+    /** Notify (outside a ride) when a newer KGhost is published. Default on. */
+    val updateCheckEnabled: Boolean = true,
+    /** UTC epoch-day the update notice last fired. 0 = never. */
+    val updateNoticeEpochDay: Long = 0L,
 ) {
     /**
      * The Ghost Pace target speed (m/s) — ALWAYS valid and present. The VP can never be

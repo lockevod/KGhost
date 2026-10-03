@@ -55,6 +55,7 @@ import com.enderthor.kghost.managers.ConfigurationManager
 import com.enderthor.kghost.managers.PermAlertState
 import com.enderthor.kghost.managers.PermissionAlertSchedule
 import com.enderthor.kghost.managers.StoragePermission
+import com.enderthor.kghost.managers.UpdateChecker
 import com.enderthor.kghost.map.GhostMapPresenter
 import com.enderthor.kghost.map.MapGlide
 import com.enderthor.kghost.map.GhostMarker
@@ -78,6 +79,7 @@ import io.hammerhead.karooext.models.RideState
 import io.hammerhead.karooext.models.ShowSymbols
 import io.hammerhead.karooext.models.StreamState
 import io.hammerhead.karooext.models.Symbol
+import io.hammerhead.karooext.models.SystemNotification
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -89,6 +91,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -142,6 +145,19 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         @Volatile
         var instance: KGhostExtension? = null
             private set
+
+        /** Update notice (ported from KSafe). Wait after boot for the Karoo/phone link to come up,
+         *  then retry a few times on no-internet before giving up until the next boot. */
+        private const val UPDATE_CHECK_STARTUP_DELAY_MS = 45_000L
+        private const val UPDATE_CHECK_MAX_RETRIES = 4
+        private const val UPDATE_CHECK_RETRY_DELAY_MS = 5 * 60_000L
+        private const val UPDATE_CHECK_HTTP_TIMEOUT_MS = 15_000L
+        /** Show the notice at most once every this many days. */
+        private const val UPDATE_NOTICE_MIN_DAYS = 3L
+        /** Must be raw.githubusercontent.com, NOT a releases/latest/download URL: that one answers with
+         *  a 302, which the Karoo httpRequest treats as a failure. */
+        private const val UPDATE_MANIFEST_URL =
+            "https://raw.githubusercontent.com/lockevod/KGhost/main/app/manifest.json"
 
         /** Tick cadence. The ride app advances its record timer at ~1 Hz. */
         private const val REFRESH_MS = 1000L
@@ -279,10 +295,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          *  and minted a fresh recordingStartedEpoch (a genuinely new ride starts near 0 → rejected). */
         private const val GHOST_CHECKPOINT_FILE = "ghost-checkpoint.json"
         private const val CHECKPOINT_INTERVAL_MS = 5_000L
-        // Odometer proximity that lets a power-off resume (fresh epoch, continuous distance) restore. Tight
-        // (~a few ticks of riding between the last checkpoint and the cut) so a genuinely NEW ride that
-        // happens to start near an old interrupted ride's position does NOT inherit its lead.
-        private const val CHECKPOINT_RESUME_MARGIN_M = 300.0
         // A checkpoint older than this (wall-clock) is not a resume candidate — bounds cross-ride false hits.
         private const val CHECKPOINT_MAX_AGE_MS = 6 * 60 * 60 * 1000L
         // Heading tolerance for the marker anchor's pass-disambiguation (loop bootstrap + shortcut recovery).
@@ -964,6 +976,84 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             }
         }
         karooSystem.connect { connected -> if (connected) onConnected() }
+        scheduleUpdateCheck()
+    }
+
+    /** Once per process: after boot, fetch the published manifest and, if a newer build exists, show a
+     *  SystemNotification — never mid-ride (it waits for Idle). Gates (toggle, 3-day spacing) run once;
+     *  only the network attempt retries. */
+    private fun scheduleUpdateCheck() {
+        scope.launch {
+            delay(UPDATE_CHECK_STARTUP_DELAY_MS)
+            val cfg = activeConfig.value
+            if (!cfg.updateCheckEnabled) {
+                Timber.i("Update check: skipped — toggle off")
+                return@launch
+            }
+            // UTC epoch-day: no java.time needed.
+            val today = System.currentTimeMillis() / 86_400_000L
+            // DEBUG builds skip the spacing so the flow can be tested on every boot.
+            val daysSince = today - cfg.updateNoticeEpochDay
+            if (!BuildConfig.DEBUG && daysSince < UPDATE_NOTICE_MIN_DAYS) {
+                Timber.i("Update check: skipped — notice shown ${daysSince}d ago (min ${UPDATE_NOTICE_MIN_DAYS}d)")
+                return@launch
+            }
+            for (attempt in 1..UPDATE_CHECK_MAX_RETRIES) {
+                if (tryFetchAndNotify(today)) return@launch
+                if (attempt < UPDATE_CHECK_MAX_RETRIES) delay(UPDATE_CHECK_RETRY_DELAY_MS)
+            }
+            Timber.w("Update check: giving up after $UPDATE_CHECK_MAX_RETRIES attempts until next boot")
+        }
+    }
+
+    /** true = done (shown, up to date, or a permanent error); false = transient failure, retry. */
+    private suspend fun tryFetchAndNotify(today: Long): Boolean = try {
+        val response = withTimeoutOrNull(UPDATE_CHECK_HTTP_TIMEOUT_MS) {
+            karooSystem.httpRequest("GET", UPDATE_MANIFEST_URL)
+        }
+        when {
+            response == null -> {
+                Timber.i("Update check: HTTP timeout (no internet yet?)")
+                false
+            }
+            response.statusCode in 500..599 -> {
+                Timber.i("Update check: HTTP ${response.statusCode}, will retry")
+                false
+            }
+            response.statusCode !in 200..299 -> {
+                Timber.w("Update check: HTTP ${response.statusCode}, giving up until next boot")
+                true
+            }
+            else -> {
+                val manifest = UpdateChecker.parseManifest(response.body?.toString(Charsets.UTF_8).orEmpty())
+                val newer = manifest != null && UpdateChecker.isNewer(manifest.latestVersionCode, BuildConfig.VERSION_CODE)
+                Timber.i(
+                    "Update check: latest=${manifest?.latestVersion}(${manifest?.latestVersionCode}) " +
+                        "current=${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE}) isNewer=$newer",
+                )
+                if (newer && manifest != null) {
+                    // streamRide replays the current state, so this returns at once when no ride is on.
+                    // ponytail: suspends on the binding current at the time; a host rebind mid-wait
+                    // leaves it hanging until the next boot, which simply checks again.
+                    karooSystem.streamRide().first { it is RideState.Idle }
+                    configManager.updateConfig { it.copy(updateNoticeEpochDay = today) }
+                    karooSystem.dispatch(
+                        SystemNotification(
+                            id = "kghost-update-${manifest.latestVersionCode}",
+                            message = getString(R.string.update_available_message, manifest.latestVersion),
+                            header = getString(R.string.update_available_title),
+                        ),
+                    )
+                    Timber.i("Update notice shown: v${manifest.latestVersion} (${manifest.latestVersionCode} > ${BuildConfig.VERSION_CODE})")
+                }
+                true
+            }
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Timber.w(e, "Update check: unexpected error, will retry")
+        false
     }
 
     private fun onConnected() {
@@ -1028,6 +1118,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     scope.launch(Dispatchers.IO) { flushGhostCheckpoint() }
                 }
                 is RideState.Idle -> {
+                    // Did THIS process see the ride active? A fresh process (ride-app restart, reboot, OOM)
+                    // receives Idle FIRST while the host restores the ride (Idle → Paused → Recording with
+                    // ELAPSED_TIME carrying on), so that Idle is not a ride end.
+                    val sawActiveRide = wasRecording || ridePaused
                     ridePaused = false
                     // Order matters: fully stop+join the tick FIRST so the recorder is quiescent
                     // (no onSample racing build/reset) before finishAndSaveRecording() touches it.
@@ -1043,7 +1137,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     resetRideAnchor()
                     // Clean ride end → drop the checkpoint so the NEXT ride starts fresh (a file present on
                     // start means the previous ride was interrupted, never reached Idle → a resume candidate).
-                    deleteGhostCheckpoint()
+                    // Only for a ride this process saw: deleting on a fresh process's first Idle threw away
+                    // the lead of the very ride the host was about to resume (field log e7fef4, 2026-10-03).
+                    // A checkpoint left by a ride that really ended while we were dead stays behind; the
+                    // restore gates (6 h age, routeKey, pick, GhostCheckpoint.continuesRide's odometer + ride
+                    // clock continuity) keep a new ride from taking it.
+                    if (sawActiveRide) deleteGhostCheckpoint()
+                    else Timber.i("KVP Idle before any active ride in this process — checkpoint kept for a resume")
                     GapStateHolder.clear()
                     SegmentInfoHolder.clear()
                     publishGhostMarker(null)
@@ -2327,10 +2427,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             integVpTpm = vpTpm
                             lastCheckpointMs = 0L
                             // Resume an interrupted ride WITH the accrued lead: restore the persisted checkpoint
-                            // iff same pick, RECENT enough, AND either the SAME recordingStartedEpoch
-                            // (in-process tick relaunch / host reconnect) OR a CONTINUOUS odometer within a TIGHT
-                            // margin (a power-off resume mints a fresh epoch but the ride's distance carries on;
-                            // a genuinely new ride starts near 0, far from a stale checkpoint's lastRiderDist).
+                            // iff same pick, RECENT enough, AND the same ride ([GhostCheckpoint.continuesRide]:
+                            // the SAME recordingStartedEpoch, or — a power-off / ride-app restart mints a fresh
+                            // epoch — odometer AND ride clock both carrying on from the checkpoint).
                             // restore() takes the LEAD, re-anchored on the next tick (no whole-ride inflation).
                             val cp = loadGhostCheckpoint()
                             val riderDistNow = coast.effectiveDistanceM
@@ -2345,8 +2444,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 // it no longer influences the accrued gap, so gating resume on it only cost riders
                                 // their lead whenever they changed the Ghost-Pace target mid-ride-lifecycle.
                                 val paramMatch = cp.pick == eff.ghostPick
-                                val continuous = cp.rideEpoch == recordingStartedEpoch ||
-                                    kotlin.math.abs(riderDistNow - cp.lastRiderDist) <= CHECKPOINT_RESUME_MARGIN_M
+                                val continuous = cp.continuesRide(recordingStartedEpoch, riderDistNow, elapsedS)
                                 if (recent && keyMatch && paramMatch && continuous) {
                                     integ.restore(cp.leadS, cp.lastRiderDist)
                                     integLastRiderDist = cp.lastRiderDist
@@ -2361,7 +2459,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     Timber.i(
                                         "KVP B2 checkpoint REJECTED: recent=$recent keyMatch=$keyMatch " +
                                             "paramMatch=$paramMatch continuous=$continuous " +
-                                            "(cpKey=${cp.routeKey} curKey=$curKey ΔdistM=${"%.0f".format(riderDistNow - cp.lastRiderDist)})",
+                                            "(cpKey=${cp.routeKey} curKey=$curKey ΔdistM=${"%.0f".format(riderDistNow - cp.lastRiderDist)} " +
+                                            "cpElapsed=${"%.0f".format(cp.rideElapsedS)}s elapsedNow=${"%.0f".format(elapsedS)}s)",
                                     )
                                 }
                             }
@@ -2453,6 +2552,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     vpTimePerM = integVpTpm,
                                     savedAtEpoch = System.currentTimeMillis(),
                                     routeKey = routeKeyOf(rm.routeName, rm.path.totalM),
+                                    rideElapsedS = elapsedS,
                                 )
                                 scope.launch(Dispatchers.IO) { flushGhostCheckpoint() }
                             }

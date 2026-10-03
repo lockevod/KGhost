@@ -95,6 +95,17 @@ fun AppSettingsScreen(
 
         HorizontalDivider()
 
+        SwitchRow(
+            label = stringResource(R.string.update_check_label),
+            description = stringResource(R.string.update_check_description),
+            checked = config.updateCheckEnabled,
+            onCheckedChange = { on ->
+                scope.launch { saveFailed = !configManager.updateConfig { it.copy(updateCheckEnabled = on) } }
+            },
+        )
+
+        HorizontalDivider()
+
         // ── Diagnostics: file logging ─────────────────────────────────────────
         SwitchRow(
             label = stringResource(R.string.race_filelog_label),

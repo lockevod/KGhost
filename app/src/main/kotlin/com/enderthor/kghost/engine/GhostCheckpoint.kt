@@ -1,6 +1,17 @@
 package com.enderthor.kghost.engine
 
 import kotlinx.serialization.Serializable
+import kotlin.math.abs
+
+/** Odometer proximity that lets a resume across a FRESH process (power-off, ride-app restart: new epoch,
+ *  continuous distance) restore. Also the floor below which such a resume is refused: a checkpoint cut in
+ *  the first [CHECKPOINT_RESUME_MARGIN_M] is indistinguishable by odometer from a new ride's start. */
+const val CHECKPOINT_RESUME_MARGIN_M = 300.0
+
+/** How far the ride clock may read BELOW the checkpoint's on a fresh-process resume. The host restores the
+ *  ride with ELAPSED_TIME carrying on (field log e7fef4: 3030 s → 3277 s, 4449 s → 4587 s); a new ride
+ *  restarts it from 0. Small slack for a host that restores from a slightly older save of its own. */
+const val CHECKPOINT_ELAPSED_SLACK_S = 30.0
 
 /** Tiny scalar resume state, persisted periodically so a mid-ride power-off resumes with the lead intact.
  *  Keyed by [rideEpoch] (recordingStartedEpoch); a foreign/absent epoch → fresh start.
@@ -27,4 +38,23 @@ data class GhostCheckpoint(
     // route change). Uses the SAME key the aggregate store uses, so it survives a host polyline re-encode
     // between sessions (a raw-polyline hash would not, silently killing every resume).
     val routeKey: String,
-)
+    // Ride ELAPSED_TIME (s) when written: the ride-clock evidence that a fresh process is resuming THIS ride
+    // and not starting a new one. -1 = written before this field existed → no evidence, no fresh-process resume.
+    val rideElapsedS: Double = -1.0,
+) {
+    /** Is the ride now being raced the one this checkpoint was written in? Same epoch → same process, yes.
+     *  Otherwise (fresh process) BOTH clocks must carry on: the cut AND the current ride past the margin
+     *  (inside it, a new ride's start can't be told from a resume by odometer: 310 m/35 s vs 15 m/10 s
+     *  passed every other check), odometer within the margin, and the ride clock not behind the
+     *  checkpoint's. Odometer proximity alone let a new ride adopt the lead of a ride that ended while
+     *  KGhost was dead. Residual: a new ride on the same route, within 6 h, whose route loads near the old
+     *  cut at a later clock — then the lead is from the same stretch. */
+    fun continuesRide(rideEpoch: Long, riderDistNow: Double, elapsedNowS: Double): Boolean =
+        this.rideEpoch == rideEpoch || (
+            rideElapsedS >= 0.0 &&
+                lastRiderDist > CHECKPOINT_RESUME_MARGIN_M &&
+                riderDistNow > CHECKPOINT_RESUME_MARGIN_M &&
+                abs(riderDistNow - lastRiderDist) <= CHECKPOINT_RESUME_MARGIN_M &&
+                elapsedNowS >= rideElapsedS - CHECKPOINT_ELAPSED_SLACK_S
+            )
+}
