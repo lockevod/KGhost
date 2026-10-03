@@ -295,10 +295,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          *  and minted a fresh recordingStartedEpoch (a genuinely new ride starts near 0 → rejected). */
         private const val GHOST_CHECKPOINT_FILE = "ghost-checkpoint.json"
         private const val CHECKPOINT_INTERVAL_MS = 5_000L
-        // Odometer proximity that lets a power-off resume (fresh epoch, continuous distance) restore. Tight
-        // (~a few ticks of riding between the last checkpoint and the cut) so a genuinely NEW ride that
-        // happens to start near an old interrupted ride's position does NOT inherit its lead.
-        private const val CHECKPOINT_RESUME_MARGIN_M = 300.0
         // A checkpoint older than this (wall-clock) is not a resume candidate — bounds cross-ride false hits.
         private const val CHECKPOINT_MAX_AGE_MS = 6 * 60 * 60 * 1000L
         // Heading tolerance for the marker anchor's pass-disambiguation (loop bootstrap + shortcut recovery).
@@ -2430,10 +2426,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             integVpTpm = vpTpm
                             lastCheckpointMs = 0L
                             // Resume an interrupted ride WITH the accrued lead: restore the persisted checkpoint
-                            // iff same pick, RECENT enough, AND either the SAME recordingStartedEpoch
-                            // (in-process tick relaunch / host reconnect) OR a CONTINUOUS odometer within a TIGHT
-                            // margin (a power-off resume mints a fresh epoch but the ride's distance carries on;
-                            // a genuinely new ride starts near 0, far from a stale checkpoint's lastRiderDist).
+                            // iff same pick, RECENT enough, AND the same ride ([GhostCheckpoint.continuesRide]:
+                            // the SAME recordingStartedEpoch, or — a power-off / ride-app restart mints a fresh
+                            // epoch — odometer AND ride clock both carrying on from the checkpoint).
                             // restore() takes the LEAD, re-anchored on the next tick (no whole-ride inflation).
                             val cp = loadGhostCheckpoint()
                             val riderDistNow = coast.effectiveDistanceM
@@ -2448,8 +2443,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 // it no longer influences the accrued gap, so gating resume on it only cost riders
                                 // their lead whenever they changed the Ghost-Pace target mid-ride-lifecycle.
                                 val paramMatch = cp.pick == eff.ghostPick
-                                val continuous = cp.rideEpoch == recordingStartedEpoch ||
-                                    kotlin.math.abs(riderDistNow - cp.lastRiderDist) <= CHECKPOINT_RESUME_MARGIN_M
+                                val continuous = cp.continuesRide(recordingStartedEpoch, riderDistNow, elapsedS)
                                 if (recent && keyMatch && paramMatch && continuous) {
                                     integ.restore(cp.leadS, cp.lastRiderDist)
                                     integLastRiderDist = cp.lastRiderDist
@@ -2464,7 +2458,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     Timber.i(
                                         "KVP B2 checkpoint REJECTED: recent=$recent keyMatch=$keyMatch " +
                                             "paramMatch=$paramMatch continuous=$continuous " +
-                                            "(cpKey=${cp.routeKey} curKey=$curKey ΔdistM=${"%.0f".format(riderDistNow - cp.lastRiderDist)})",
+                                            "(cpKey=${cp.routeKey} curKey=$curKey ΔdistM=${"%.0f".format(riderDistNow - cp.lastRiderDist)} " +
+                                            "cpElapsed=${"%.0f".format(cp.rideElapsedS)}s elapsedNow=${"%.0f".format(elapsedS)}s)",
                                     )
                                 }
                             }
@@ -2556,6 +2551,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     vpTimePerM = integVpTpm,
                                     savedAtEpoch = System.currentTimeMillis(),
                                     routeKey = routeKeyOf(rm.routeName, rm.path.totalM),
+                                    rideElapsedS = elapsedS,
                                 )
                                 scope.launch(Dispatchers.IO) { flushGhostCheckpoint() }
                             }

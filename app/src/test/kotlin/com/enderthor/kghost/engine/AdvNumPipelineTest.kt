@@ -358,12 +358,14 @@ class AdvNumPipelineTest {
     // so the residual exposure is back to the small bounded thing the 300 m margin was designed for.
     // =============================================================================================
     @Test fun `LOCK 6 - an aborted ride can no longer stuff minutes into the 300 m resume window`() {
-        // The production gate, verbatim (KGhostExtension.kt:2136-2139).
+        // The production gate. Since the ride-clock check, a cut inside the first 300 m is never resumed
+        // across a fresh process, so the aborted-ride adoption below is closed, not just bounded.
         fun continuous(cpLastRiderDist: Double, riderDistNow: Double, sameEpoch: Boolean) =
-            sameEpoch || kotlin.math.abs(riderDistNow - cpLastRiderDist) <= 300.0
-        assertTrue("a fresh ride 40 m in adopts an aborted ride's 180 m checkpoint",
-            continuous(cpLastRiderDist = 180.0, riderDistNow = 40.0, sameEpoch = false))
-        assertTrue("only distance separates them — the fresh ride's epoch differs, which the OR ignores",
+            GhostCheckpoint(1L, 30.0, cpLastRiderDist, GhostPick.BEST, 0.3, 0L, "r", rideElapsedS = 40.0)
+                .continuesRide(if (sameEpoch) 1L else 2L, riderDistNow, elapsedNowS = 60.0)
+        assertTrue("a fresh ride 40 m in no longer adopts an aborted ride's 180 m checkpoint",
+            !continuous(cpLastRiderDist = 180.0, riderDistNow = 40.0, sameEpoch = false))
+        assertTrue("nor one far up the road",
             !continuous(cpLastRiderDist = 40_000.0, riderDistNow = 40.0, sameEpoch = false))
         // The lead that could get adopted used to be large, because FINDING #1 minted it inside 300 m:
         val r = Rig(); var d = 0.0; var t = 0.0
