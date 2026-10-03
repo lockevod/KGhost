@@ -990,11 +990,18 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         scope.launch {
             delay(UPDATE_CHECK_STARTUP_DELAY_MS)
             val cfg = activeConfig.value
-            if (!cfg.updateCheckEnabled) return@launch
+            if (!cfg.updateCheckEnabled) {
+                Timber.i("Update check: skipped — toggle off")
+                return@launch
+            }
             // UTC epoch-day: no java.time needed.
             val today = System.currentTimeMillis() / 86_400_000L
             // DEBUG builds skip the spacing so the flow can be tested on every boot.
-            if (!BuildConfig.DEBUG && today - cfg.updateNoticeEpochDay < UPDATE_NOTICE_MIN_DAYS) return@launch
+            val daysSince = today - cfg.updateNoticeEpochDay
+            if (!BuildConfig.DEBUG && daysSince < UPDATE_NOTICE_MIN_DAYS) {
+                Timber.i("Update check: skipped — notice shown ${daysSince}d ago (min ${UPDATE_NOTICE_MIN_DAYS}d)")
+                return@launch
+            }
             for (attempt in 1..UPDATE_CHECK_MAX_RETRIES) {
                 if (tryFetchAndNotify(today)) return@launch
                 if (attempt < UPDATE_CHECK_MAX_RETRIES) delay(UPDATE_CHECK_RETRY_DELAY_MS)
@@ -1009,15 +1016,26 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             karooSystem.httpRequest("GET", UPDATE_MANIFEST_URL)
         }
         when {
-            response == null -> false // no internet yet
-            response.statusCode in 500..599 -> false
+            response == null -> {
+                Timber.i("Update check: HTTP timeout (no internet yet?)")
+                false
+            }
+            response.statusCode in 500..599 -> {
+                Timber.i("Update check: HTTP ${response.statusCode}, will retry")
+                false
+            }
             response.statusCode !in 200..299 -> {
                 Timber.w("Update check: HTTP ${response.statusCode}, giving up until next boot")
                 true
             }
             else -> {
                 val manifest = UpdateChecker.parseManifest(response.body?.toString(Charsets.UTF_8).orEmpty())
-                if (manifest != null && UpdateChecker.isNewer(manifest.latestVersionCode, BuildConfig.VERSION_CODE)) {
+                val newer = manifest != null && UpdateChecker.isNewer(manifest.latestVersionCode, BuildConfig.VERSION_CODE)
+                Timber.i(
+                    "Update check: latest=${manifest?.latestVersion}(${manifest?.latestVersionCode}) " +
+                        "current=${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE}) isNewer=$newer",
+                )
+                if (newer && manifest != null) {
                     // streamRide replays the current state, so this returns at once when no ride is on.
                     // ponytail: suspends on the binding current at the time; a host rebind mid-wait
                     // leaves it hanging until the next boot, which simply checks again.
@@ -1104,6 +1122,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     scope.launch(Dispatchers.IO) { flushGhostCheckpoint() }
                 }
                 is RideState.Idle -> {
+                    // Did THIS process see the ride active? A fresh process (ride-app restart, reboot, OOM)
+                    // receives Idle FIRST while the host restores the ride (Idle → Paused → Recording with
+                    // ELAPSED_TIME carrying on), so that Idle is not a ride end.
+                    val sawActiveRide = wasRecording || ridePaused
                     ridePaused = false
                     // Order matters: fully stop+join the tick FIRST so the recorder is quiescent
                     // (no onSample racing build/reset) before finishAndSaveRecording() touches it.
@@ -1119,7 +1141,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     resetRideAnchor()
                     // Clean ride end → drop the checkpoint so the NEXT ride starts fresh (a file present on
                     // start means the previous ride was interrupted, never reached Idle → a resume candidate).
-                    deleteGhostCheckpoint()
+                    // Only for a ride this process saw: deleting on a fresh process's first Idle threw away
+                    // the lead of the very ride the host was about to resume (field log e7fef4, 2026-10-03).
+                    // A checkpoint left by a ride that really ended while we were dead stays behind; the
+                    // restore gates (6 h age, routeKey, odometer within 300 m) keep a new ride from taking it.
+                    if (sawActiveRide) deleteGhostCheckpoint()
+                    else Timber.i("KVP Idle before any active ride in this process — checkpoint kept for a resume")
                     GapStateHolder.clear()
                     SegmentInfoHolder.clear()
                     publishGhostMarker(null)
