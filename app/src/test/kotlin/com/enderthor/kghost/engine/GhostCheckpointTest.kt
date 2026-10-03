@@ -34,6 +34,14 @@ class GhostCheckpointResumeTest {
         assertFalse(cp(200.0, 50.0).continuesRide(freshEpoch, riderDistNow = 40.0, elapsedNowS = 60.0))
         // Route loaded mid-new-ride near the old cut, but the new ride's clock is behind the old one.
         assertFalse(cp(5000.0, 1000.0).continuesRide(freshEpoch, riderDistNow = 5100.0, elapsedNowS = 700.0))
+        // Codex's boundary case: a cut just past the margin vs a new ride's first metres, clock within slack.
+        assertFalse(cp(310.0, 35.0).continuesRide(freshEpoch, riderDistNow = 15.0, elapsedNowS = 10.0))
+    }
+
+    @Test fun `the ride clock may come back at most the slack behind`() {
+        val c = cp(5000.0, 1000.0)
+        assertTrue(c.continuesRide(freshEpoch, riderDistNow = 4900.0, elapsedNowS = 1000.0 - CHECKPOINT_ELAPSED_SLACK_S))
+        assertFalse(c.continuesRide(freshEpoch, riderDistNow = 4900.0, elapsedNowS = 1000.0 - CHECKPOINT_ELAPSED_SLACK_S - 1.0))
     }
 
     @Test fun `a checkpoint without a ride clock only resumes in its own process`() {

@@ -1140,7 +1140,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Only for a ride this process saw: deleting on a fresh process's first Idle threw away
                     // the lead of the very ride the host was about to resume (field log e7fef4, 2026-10-03).
                     // A checkpoint left by a ride that really ended while we were dead stays behind; the
-                    // restore gates (6 h age, routeKey, odometer within 300 m) keep a new ride from taking it.
+                    // restore gates (6 h age, routeKey, pick, GhostCheckpoint.continuesRide's odometer + ride
+                    // clock continuity) keep a new ride from taking it.
                     if (sawActiveRide) deleteGhostCheckpoint()
                     else Timber.i("KVP Idle before any active ride in this process — checkpoint kept for a resume")
                     GapStateHolder.clear()

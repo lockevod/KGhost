@@ -43,14 +43,17 @@ data class GhostCheckpoint(
     val rideElapsedS: Double = -1.0,
 ) {
     /** Is the ride now being raced the one this checkpoint was written in? Same epoch → same process, yes.
-     *  Otherwise (fresh process) BOTH clocks must carry on: odometer within the margin of a cut past the
-     *  margin, AND the ride clock not behind the checkpoint's. Odometer proximity alone let a new ride adopt
-     *  the lead of a ride that ended while KGhost was dead. Residual: a new ride on the same route, within
-     *  6 h, whose route loads near the old cut at a later clock — then the lead is from the same stretch. */
+     *  Otherwise (fresh process) BOTH clocks must carry on: the cut AND the current ride past the margin
+     *  (inside it, a new ride's start can't be told from a resume by odometer: 310 m/35 s vs 15 m/10 s
+     *  passed every other check), odometer within the margin, and the ride clock not behind the
+     *  checkpoint's. Odometer proximity alone let a new ride adopt the lead of a ride that ended while
+     *  KGhost was dead. Residual: a new ride on the same route, within 6 h, whose route loads near the old
+     *  cut at a later clock — then the lead is from the same stretch. */
     fun continuesRide(rideEpoch: Long, riderDistNow: Double, elapsedNowS: Double): Boolean =
         this.rideEpoch == rideEpoch || (
             rideElapsedS >= 0.0 &&
                 lastRiderDist > CHECKPOINT_RESUME_MARGIN_M &&
+                riderDistNow > CHECKPOINT_RESUME_MARGIN_M &&
                 abs(riderDistNow - lastRiderDist) <= CHECKPOINT_RESUME_MARGIN_M &&
                 elapsedNowS >= rideElapsedS - CHECKPOINT_ELAPSED_SLACK_S
             )
