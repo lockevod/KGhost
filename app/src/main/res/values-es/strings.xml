@@ -97,6 +97,10 @@
     <string name="race_segment_alert_description">Muestra un aviso al entrar en un tramo con un fantasma grabado.</string>
     <string name="race_segment_exit_label">Aviso al salir de un tramo</string>
     <string name="race_segment_exit_description">Muestra un aviso al salir de un tramo con un fantasma grabado. Si el siguiente tramo está cerca, se omite la salida para que los tramos próximos no avisen dos veces.</string>
+    <string name="update_check_label">Avisarme de actualizaciones</string>
+    <string name="update_check_description">Al arrancar el Karoo (nunca durante una salida), avisa cuando haya una versión nueva de KGhost. Como mucho una vez cada 3 días.</string>
+    <string name="update_available_title">Actualización de KGhost disponible</string>
+    <string name="update_available_message">v%1$s disponible — actualiza desde la tienda de extensiones de Hammerhead</string>
     <string name="race_filelog_label">Guardar un registro de diagnóstico</string>
     <string name="race_filelog_description">Guarda los diagnósticos de KGhost en un fichero para poder estudiar una salida después sin ordenador. Cada salida genera su propio fichero (kghost-AAAA-MM-dd-HHmmss.log); los más antiguos se purgan automáticamente cuando hay más de 6. Déjalo apagado para el uso normal.</string>
     <string name="race_filelog_path">Fichero de log: %1$s</string>

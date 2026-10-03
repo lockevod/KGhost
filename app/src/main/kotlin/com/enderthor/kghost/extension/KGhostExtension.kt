@@ -55,6 +55,7 @@ import com.enderthor.kghost.managers.ConfigurationManager
 import com.enderthor.kghost.managers.PermAlertState
 import com.enderthor.kghost.managers.PermissionAlertSchedule
 import com.enderthor.kghost.managers.StoragePermission
+import com.enderthor.kghost.managers.UpdateChecker
 import com.enderthor.kghost.map.GhostMapPresenter
 import com.enderthor.kghost.map.MapGlide
 import com.enderthor.kghost.map.GhostMarker
@@ -78,6 +79,7 @@ import io.hammerhead.karooext.models.RideState
 import io.hammerhead.karooext.models.ShowSymbols
 import io.hammerhead.karooext.models.StreamState
 import io.hammerhead.karooext.models.Symbol
+import io.hammerhead.karooext.models.SystemNotification
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -89,6 +91,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -142,6 +145,19 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         @Volatile
         var instance: KGhostExtension? = null
             private set
+
+        /** Update notice (ported from KSafe). Wait after boot for the Karoo/phone link to come up,
+         *  then retry a few times on no-internet before giving up until the next boot. */
+        private const val UPDATE_CHECK_STARTUP_DELAY_MS = 45_000L
+        private const val UPDATE_CHECK_MAX_RETRIES = 4
+        private const val UPDATE_CHECK_RETRY_DELAY_MS = 5 * 60_000L
+        private const val UPDATE_CHECK_HTTP_TIMEOUT_MS = 15_000L
+        /** Show the notice at most once every this many days. */
+        private const val UPDATE_NOTICE_MIN_DAYS = 3L
+        /** Must be raw.githubusercontent.com, NOT a releases/latest/download URL: that one answers with
+         *  a 302, which the Karoo httpRequest treats as a failure. */
+        private const val UPDATE_MANIFEST_URL =
+            "https://raw.githubusercontent.com/lockevod/KGhost/main/app/manifest.json"
 
         /** Tick cadence. The ride app advances its record timer at ~1 Hz. */
         private const val REFRESH_MS = 1000L
@@ -964,6 +980,66 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             }
         }
         karooSystem.connect { connected -> if (connected) onConnected() }
+        scheduleUpdateCheck()
+    }
+
+    /** Once per process: after boot, fetch the published manifest and, if a newer build exists, show a
+     *  SystemNotification — never mid-ride (it waits for Idle). Gates (toggle, 3-day spacing) run once;
+     *  only the network attempt retries. */
+    private fun scheduleUpdateCheck() {
+        scope.launch {
+            delay(UPDATE_CHECK_STARTUP_DELAY_MS)
+            val cfg = activeConfig.value
+            if (!cfg.updateCheckEnabled) return@launch
+            // UTC epoch-day: no java.time needed.
+            val today = System.currentTimeMillis() / 86_400_000L
+            // DEBUG builds skip the spacing so the flow can be tested on every boot.
+            if (!BuildConfig.DEBUG && today - cfg.updateNoticeEpochDay < UPDATE_NOTICE_MIN_DAYS) return@launch
+            for (attempt in 1..UPDATE_CHECK_MAX_RETRIES) {
+                if (tryFetchAndNotify(today)) return@launch
+                if (attempt < UPDATE_CHECK_MAX_RETRIES) delay(UPDATE_CHECK_RETRY_DELAY_MS)
+            }
+            Timber.w("Update check: giving up after $UPDATE_CHECK_MAX_RETRIES attempts until next boot")
+        }
+    }
+
+    /** true = done (shown, up to date, or a permanent error); false = transient failure, retry. */
+    private suspend fun tryFetchAndNotify(today: Long): Boolean = try {
+        val response = withTimeoutOrNull(UPDATE_CHECK_HTTP_TIMEOUT_MS) {
+            karooSystem.httpRequest("GET", UPDATE_MANIFEST_URL)
+        }
+        when {
+            response == null -> false // no internet yet
+            response.statusCode in 500..599 -> false
+            response.statusCode !in 200..299 -> {
+                Timber.w("Update check: HTTP ${response.statusCode}, giving up until next boot")
+                true
+            }
+            else -> {
+                val manifest = UpdateChecker.parseManifest(response.body?.toString(Charsets.UTF_8).orEmpty())
+                if (manifest != null && UpdateChecker.isNewer(manifest.latestVersionCode, BuildConfig.VERSION_CODE)) {
+                    // streamRide replays the current state, so this returns at once when no ride is on.
+                    // ponytail: suspends on the binding current at the time; a host rebind mid-wait
+                    // leaves it hanging until the next boot, which simply checks again.
+                    karooSystem.streamRide().first { it is RideState.Idle }
+                    configManager.updateConfig { it.copy(updateNoticeEpochDay = today) }
+                    karooSystem.dispatch(
+                        SystemNotification(
+                            id = "kghost-update-${manifest.latestVersionCode}",
+                            message = getString(R.string.update_available_message, manifest.latestVersion),
+                            header = getString(R.string.update_available_title),
+                        ),
+                    )
+                    Timber.i("Update notice shown: v${manifest.latestVersion} (${manifest.latestVersionCode} > ${BuildConfig.VERSION_CODE})")
+                }
+                true
+            }
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Timber.w(e, "Update check: unexpected error, will retry")
+        false
     }
 
     private fun onConnected() {

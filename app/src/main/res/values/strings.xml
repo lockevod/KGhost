@@ -96,6 +96,10 @@
     <string name="race_segment_alert_description">Show an alert when entering a stretch with a recorded ghost.</string>
     <string name="race_segment_exit_label">Segment exit alert</string>
     <string name="race_segment_exit_description">Show an alert when leaving a stretch with a recorded ghost. When the next stretch is close, the exit is skipped so nearby stretches don\'t double-alert.</string>
+    <string name="update_check_label">Notify me about updates</string>
+    <string name="update_check_description">After the Karoo starts (never during a ride), tell me when a new KGhost version is available. At most once every 3 days.</string>
+    <string name="update_available_title">KGhost update available</string>
+    <string name="update_available_message">v%1$s available — update from the Hammerhead extensions store</string>
     <string name="race_filelog_label">Write a diagnostic log</string>
     <string name="race_filelog_description">Save KGhost\'s diagnostics to a file so a ride can be studied afterwards without a computer. Each ride gets its own file (kghost-YYYY-MM-dd-HHmmss.log); older files are purged automatically once there are more than 6. Leave off for normal use, debug increase battery usage and general performance.</string>
     <string name="race_filelog_path">Log file: %1$s</string>
