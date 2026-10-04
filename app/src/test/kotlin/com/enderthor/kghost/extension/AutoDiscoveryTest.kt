@@ -20,6 +20,7 @@ class AutoDiscoveryTest {
         val state = MutableStateFlow(initial)
         val runActive = MutableStateFlow(active)
         var access = access
+        var master = true
         val admits = mutableListOf<suspend () -> Boolean>()
         var cancels = 0
         val discovery = AutoDiscovery(
@@ -27,6 +28,7 @@ class AutoDiscoveryTest {
             rideState = state,
             runActive = runActive,
             hasAccess = { this.access },
+            masterEnabled = { master },
             start = { admit -> admits += admit; true },
             cancelAuto = { cancels++ },
         )
@@ -118,12 +120,12 @@ class AutoDiscoveryTest {
         val runActive = MutableStateFlow(false)
         var accept = false
         var accepted = 0
-        AutoDiscovery(backgroundScope, state, runActive, { true }, { _ -> if (accept) accepted++; accept }, {})
+        // A refusal means the previous run has not completed, so the runner's flag is still true.
+        val start = { _: suspend () -> Boolean -> if (accept) accepted++ else runActive.value = true; accept }
+        AutoDiscovery(backgroundScope, state, runActive, { true }, { true }, start, {})
         runCurrent()
         assertEquals(0, accepted) // the Idle request, refused by single flight
         accept = true
-        runActive.value = true
-        runCurrent()
         runActive.value = false
         runCurrent()
         assertEquals(1, accepted)
@@ -142,14 +144,53 @@ class AutoDiscoveryTest {
     fun `found rides are only shown after the clear persisted`() = runTest {
         var stored = KGhostConfig(pendingFoundRides = 4)
         // The transform runs (it reads N) but the write fails, like a DataStore IO error.
-        assertNull(consumeFoundRides({ stored.pendingFoundRides }) { t -> t(stored); false })
+        assertNull(consumeFoundRides({ stored }) { t -> t(stored); false })
         assertEquals(4, stored.pendingFoundRides)
 
-        assertEquals(4, consumeFoundRides({ stored.pendingFoundRides }) { t -> stored = t(stored); true })
+        assertEquals(4, consumeFoundRides({ stored }) { t -> stored = t(stored); true })
         assertEquals(0, stored.pendingFoundRides)
 
         var writes = 0
-        assertNull(consumeFoundRides({ stored.pendingFoundRides }) { t -> writes++; stored = t(stored); true })
+        assertNull(consumeFoundRides({ stored }) { t -> writes++; stored = t(stored); true })
         assertEquals(0, writes)
+    }
+
+    @Test
+    fun `the master switch off admits nothing`() = runTest {
+        val f = Fixture(this, RideState.Idle)
+        runCurrent()
+        f.master = false
+        assertFalse(f.admits.last()())
+    }
+
+    @Test
+    fun `found rides wait while the master switch is off`() = runTest {
+        var stored = KGhostConfig(pendingFoundRides = 2, masterEnabled = false)
+        var writes = 0
+        assertNull(consumeFoundRides({ stored }) { t -> writes++; stored = t(stored); true })
+        assertEquals(0, writes)
+        assertEquals(2, stored.pendingFoundRides)
+    }
+
+    @Test
+    fun `a deferral survives a run that ends before the collector sees it`() = runTest {
+        val f = Fixture(this, null)
+        runCurrent()
+        // The whole run happens between two dispatches: a collector that only reacts to a true→false
+        // emission never sees one, because the flag is back to the value it last observed.
+        f.runActive.value = true
+        f.discovery.request("app-resume")
+        f.runActive.value = false
+        runCurrent()
+        assertEquals(1, f.admits.size)
+    }
+
+    @Test
+    fun `found rides are announced only on a fresh ride start`() {
+        assertTrue(isFreshRideStart(null, RideState.Recording))
+        assertTrue(isFreshRideStart(RideState.Idle, RideState.Recording))
+        assertFalse(isFreshRideStart(RideState.Paused(false), RideState.Recording))
+        assertFalse(isFreshRideStart(RideState.Recording, RideState.Recording))
+        assertFalse(isFreshRideStart(RideState.Idle, RideState.Paused(false)))
     }
 }

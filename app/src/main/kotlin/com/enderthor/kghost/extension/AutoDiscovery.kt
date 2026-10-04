@@ -4,10 +4,14 @@ import com.enderthor.kghost.data.KGhostConfig
 import io.hammerhead.karooext.models.RideState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
-/** Automatic library work runs only on an OBSERVED Idle (null = not yet known) with all-files access. */
+/**
+ * Automatic library work runs only on an OBSERVED Idle (null = not yet known) with all-files access. The
+ * master switch is checked separately, in the admit, because it is read from the store.
+ */
 fun shouldAutoImport(rideState: RideState?, hasAccess: Boolean): Boolean =
     rideState is RideState.Idle && hasAccess
 
@@ -19,18 +23,19 @@ fun shouldAutoImport(rideState: RideState?, hasAccess: Boolean): Boolean =
  * a running automatic import; a manual one is never touched ([cancelAuto]).
  *
  * [runActive] is the runner's in-flight flag: a request made while a run is active would be refused by
- * the runner's single flight and lost, so ONE pending request is kept and re-issued when it turns false.
+ * the runner's single flight and lost, so ONE pending request is kept and re-issued once it is false.
  */
 class AutoDiscovery(
-    scope: CoroutineScope,
+    private val scope: CoroutineScope,
     private val rideState: StateFlow<RideState?>,
     private val runActive: StateFlow<Boolean>,
     private val hasAccess: () -> Boolean,
+    private val masterEnabled: suspend () -> Boolean,
     private val start: (admit: suspend () -> Boolean) -> Boolean,
     private val cancelAuto: () -> Unit,
 ) {
-    // Guards [pending] together with the check-then-start in [request]: the re-issue collector takes it
-    // under the same monitor, so a refused start can't park a request after the collector already ran.
+    // Guards [pending] together with the check-then-start in [request]: the re-issue waiter takes it
+    // under the same monitor, so a refused start can't park a request after the waiter already ran.
     private val lock = Any()
     private var pending: String? = null
 
@@ -44,34 +49,41 @@ class AutoDiscovery(
                 }
             }
         }
-        scope.launch {
-            runActive.collect { active ->
-                if (active) return@collect
-                val reason = synchronized(lock) { pending.also { pending = null } } ?: return@collect
-                request(reason)
-            }
-        }
     }
 
     /** Callable from any thread. */
     fun request(reason: String) {
         val outcome = synchronized(lock) {
             when {
-                runActive.value -> { pending = reason; "deferred" }
+                runActive.value -> { defer(reason); "deferred" }
                 start(admitFor(reason)) -> "started"
                 // Refused by single flight: the previous run hasn't completed yet, so [runActive] is still
-                // (or about to be seen) true and its fall re-issues this.
-                else -> { pending = reason; "refused" }
+                // true until its completion, and the waiter re-issues this once it is false.
+                else -> { defer(reason); "refused" }
             }
         }
         Timber.i("KVP discovery: request $reason → $outcome")
     }
 
+    /** Under [lock]. Waits on the CURRENT value, not on a true→false emission: a StateFlow conflates, so
+     *  a run that starts and ends between two dispatches leaves no emission for a collector to see. */
+    private fun defer(reason: String) {
+        val waiting = pending != null
+        pending = reason
+        if (waiting) return
+        scope.launch {
+            runActive.first { !it }
+            val r = synchronized(lock) { pending.also { pending = null } } ?: return@launch
+            request(r)
+        }
+    }
+
     private fun admitFor(reason: String): suspend () -> Boolean = {
         val state = rideState.value
         val access = hasAccess()
-        shouldAutoImport(state, access).also {
-            if (!it) Timber.i("KVP discovery: request $reason → dropped (state=$state access=$access)")
+        val master = masterEnabled()
+        (master && shouldAutoImport(state, access)).also {
+            if (!it) Timber.i("KVP discovery: request $reason → dropped (state=$state access=$access master=$master)")
         }
     }
 }
@@ -86,14 +98,23 @@ object AutoDiscoveryHub {
  * Takes the "N past rides found" count for the alert at ride start: null unless N > 0 AND the clear
  * persisted — at most once, may be lost on a crash before the dispatch (preferred to a duplicate). The
  * clear reads N inside the write itself, so two near-simultaneous Recording emissions can't both claim
- * it, and rides an automatic run stores meanwhile are announced next time.
+ * it, and rides an automatic run stores meanwhile are announced next time. With the master switch off
+ * nothing is taken: the count waits for a ride with KGhost on.
  */
 suspend fun consumeFoundRides(
-    load: suspend () -> Int,
+    load: suspend () -> KGhostConfig,
     update: suspend ((KGhostConfig) -> KGhostConfig) -> Boolean,
 ): Int? {
-    if (load() <= 0) return null
+    val cfg = load()
+    if (!cfg.masterEnabled || cfg.pendingFoundRides <= 0) return null
     var n = 0
     val ok = update { n = it.pendingFoundRides; it.copy(pendingFoundRides = 0) }
     return n.takeIf { ok && it > 0 }
 }
+
+/**
+ * A Recording that follows Idle or an unknown state (fresh process) is a ride START; one that follows
+ * Paused is a resume, and one that follows Recording is a reconnect replay — neither re-announces.
+ */
+fun isFreshRideStart(prev: RideState?, state: RideState): Boolean =
+    state is RideState.Recording && (prev == null || prev is RideState.Idle)

@@ -1037,6 +1037,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             rideState = rideState,
             runActive = HistoryImportRunner.running,
             hasAccess = { StoragePermission.hasAllFilesAccess(applicationContext) },
+            // Fresh from the store: admit runs on the runner's IO scope, after the lock wait.
+            masterEnabled = { configManager.loadConfigFlow().first().masterEnabled },
             start = { admit ->
                 // onlyNew=false: the ledger skips unchanged files. lastScanEpoch read NOW (the runner's
                 // watermark sync starts from it), not captured at service start.
@@ -1168,6 +1170,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             Timber.d("KVP ride state=$state tickActive=${tickJob?.isActive} route=${routeMode != null}")
             // Published first: a ride start cancels an automatic import before anything else runs, and
             // every transition into Idle (startup included, ride end included) requests one.
+            val prevState = rideState.value
             rideState.value = state
             when (state) {
                 is RideState.Recording -> {
@@ -1181,7 +1184,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // marker forward — the first post-resume tick simply glides it to the new value.
                     startTick()
                     maybeAlertMissingPermission()
-                    maybeAlertFoundRides()
+                    if (isFreshRideStart(prevState, state)) maybeAlertFoundRides()
                 }
                 is RideState.Paused -> {
                     // The clock is tied to ELAPSED_TIME, which the ride app already pauses, so the tick
@@ -1995,7 +1998,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun maybeAlertFoundRides() {
         scope.launch(Dispatchers.IO) {
             val n = consumeFoundRides(
-                load = { configManager.loadConfigFlow().first().pendingFoundRides },
+                load = { configManager.loadConfigFlow().first() },
                 update = configManager::updateConfig,
             ) ?: return@launch
             val now = System.currentTimeMillis()
@@ -2003,7 +2006,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 InRideAlert(
                     id = "kghost-found-$now",
                     icon = R.drawable.ic_ghost,
-                    title = applicationContext.getString(R.string.discovery_found_rides, n),
+                    title = applicationContext.resources.getQuantityString(R.plurals.discovery_found_rides, n, n),
                     detail = null,
                     autoDismissMs = 10_000L,
                     backgroundColor = R.color.segment_alert_bg,
@@ -3202,6 +3205,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
 
     override fun onDestroy() {
         if (AutoDiscoveryHub.instance === autoDiscovery) AutoDiscoveryHub.instance = null
+        // The runner's scope outlives the service: an automatic run must not keep scanning without it.
+        HistoryImportRunner.cancelAuto()
         stopTick()
         scope.coroutineContext[Job]?.cancel()
         if (::karooSystem.isInitialized) karooSystem.disconnect()

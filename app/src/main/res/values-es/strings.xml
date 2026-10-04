@@ -19,7 +19,7 @@
     <!-- Aviso en marcha (con calendario decreciente) cuando falta el acceso a todos los archivos, por
          lo que KGhost pasa a funcionar solo como virtual partner. -->
     <string name="perm_alert_title">Sin acceso a archivos</string>
-    <string name="perm_alert_detail">KGhost irá solo como virtual partner · concede acceso en Ajustes</string>
+    <string name="perm_alert_detail">KGhost irá solo como virtual partner · abre la app KGhost para dar acceso</string>
 
     <string name="gap_numeric_name">Diferencia Ghost Pace</string>
     <string name="gap_numeric_description">Diferencia de tiempo/distancia con el Ghost Pace.</string>
@@ -136,6 +136,9 @@
     <string name="import_canceled">Importación cancelada.</string>
     <string name="import_canceled_rebuild">Reconstrucción cancelada. Tus rutas antiguas están archivadas: pulsa \"Todos\" para recuperarlas.</string>
     <string name="import_error">La importación falló. Revisa el acceso al almacenamiento e inténtalo de nuevo.</string>
-    <string name="discovery_found_rides">KGhost: %1$d salidas encontradas</string>
+    <plurals name="discovery_found_rides">
+        <item quantity="one">KGhost: %d salida encontrada</item>
+        <item quantity="other">KGhost: %d salidas encontradas</item>
+    </plurals>
     <string name="field_permission_notice">Toca: permiso</string>
 </resources>

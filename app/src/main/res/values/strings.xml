@@ -18,7 +18,7 @@
     <!-- In-ride alert shown (decaying schedule) when all-files access is missing so KGhost falls
          back to virtual-partner-only mode. -->
     <string name="perm_alert_title">No file access</string>
-    <string name="perm_alert_detail">KGhost runs virtual-partner only · grant access in Settings</string>
+    <string name="perm_alert_detail">KGhost runs virtual-partner only · open the KGhost app to grant access</string>
 
     <string name="gap_numeric_name">Ghost Pace Gap</string>
     <string name="gap_numeric_description">Time/distance gap to the Ghost Pace.</string>
@@ -135,6 +135,9 @@
     <string name="import_canceled">Import canceled.</string>
     <string name="import_canceled_rebuild">Rebuild canceled. Your old rides are archived — tap \"All\" to bring them back.</string>
     <string name="import_error">Import failed. Check storage access and try again.</string>
-    <string name="discovery_found_rides">KGhost: %1$d past rides found</string>
+    <plurals name="discovery_found_rides">
+        <item quantity="one">KGhost: %d past ride found</item>
+        <item quantity="other">KGhost: %d past rides found</item>
+    </plurals>
     <string name="field_permission_notice">Tap: permission</string>
 </resources>
