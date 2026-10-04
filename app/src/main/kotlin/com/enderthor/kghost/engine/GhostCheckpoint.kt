@@ -48,10 +48,12 @@ data class GhostCheckpoint(
     // even at lead 0, instead of "---" until the next history metre.
     val historyVerdictSeen: Boolean = false,
 ) {
-    /** May this lead enter a race measured with [current]? Only when it was earned with the same one.
-     *  Legacy blobs (null) are REJECTED: a 1.2.x lead may be target-earned (1.2.0 tier 4) and must not
-     *  enter a history race. A mismatch either way is rejected too — a target lead is not a history lead. */
-    fun restorableFor(current: RaceComparator): Boolean = comparator != null && comparator == current
+    /** The comparator a resumed race takes, or null → no resume (fresh race on the route's comparator).
+     *  A same-ride checkpoint ([otherGatesPass]: recent, same route key, pick, continuous ride) resumes with
+     *  the comparator that EARNED its lead, NOT the current route's: the race latched it, and a reroute onto a
+     *  differently classified route keeps it, so a restart must too. A lead never changes comparator — it
+     *  brings its own. Legacy blobs (null) are rejected: a 1.2.x lead may be target-earned (1.2.0 tier 4). */
+    fun resumeComparator(otherGatesPass: Boolean): RaceComparator? = if (otherGatesPass) comparator else null
 
     /** Is the ride now being raced the one this checkpoint was written in? Same epoch → same process, yes.
      *  Otherwise (fresh process) BOTH clocks must carry on: the cut AND the current ride past the margin

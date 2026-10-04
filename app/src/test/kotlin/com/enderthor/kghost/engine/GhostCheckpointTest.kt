@@ -68,8 +68,8 @@ class GhostCheckpointComparatorTest {
         val cp = jsonForStorage.decodeFromString(GhostCheckpoint.serializer(), legacy)
         assertEquals(null, cp.comparator)
         assertFalse(cp.historyVerdictSeen)
-        assertFalse(cp.restorableFor(RaceComparator.HISTORY))
-        assertFalse(cp.restorableFor(RaceComparator.TARGET))
+        // A legacy lead can't prove which comparator earned it: no resume even with every other gate passing.
+        assertEquals(null, cp.resumeComparator(otherGatesPass = true))
     }
 
     @Test fun `comparator and verdict latch round-trip`() {
@@ -77,7 +77,7 @@ class GhostCheckpointComparatorTest {
         val back = jsonForStorage.decodeFromString(GhostCheckpoint.serializer(),
             jsonForStorage.encodeToString(GhostCheckpoint.serializer(), cp))
         assertEquals(cp, back)
-        assertTrue(back.restorableFor(RaceComparator.TARGET))
+        assertEquals(RaceComparator.TARGET, back.resumeComparator(otherGatesPass = true))
     }
 
     // The tick's builder must carry the race's comparator and latch, or every resume is rejected.
@@ -87,13 +87,19 @@ class GhostCheckpointComparatorTest {
             comparator = RaceComparator.HISTORY, historyVerdictSeen = true)
         val back = jsonForStorage.decodeFromString(GhostCheckpoint.serializer(),
             jsonForStorage.encodeToString(GhostCheckpoint.serializer(), built))
-        assertTrue(back.restorableFor(RaceComparator.HISTORY))
+        assertEquals(RaceComparator.HISTORY, back.resumeComparator(otherGatesPass = true))
         assertTrue(back.historyVerdictSeen)
     }
 
-    @Test fun `a lead never crosses comparators`() {
-        assertFalse(cp(RaceComparator.TARGET).restorableFor(RaceComparator.HISTORY))
-        assertFalse(cp(RaceComparator.HISTORY).restorableFor(RaceComparator.TARGET))
-        assertTrue(cp(RaceComparator.HISTORY).restorableFor(RaceComparator.HISTORY))
+    // The resumed race keeps the comparator that EARNED the lead, whatever the current route is classified
+    // as: a TARGET race rerouted onto a HISTORY route, then restarted, resumes as TARGET with its lead.
+    @Test fun `a same-ride checkpoint resumes with its own comparator`() {
+        assertEquals(RaceComparator.TARGET, cp(RaceComparator.TARGET).resumeComparator(otherGatesPass = true))
+        assertEquals(RaceComparator.HISTORY, cp(RaceComparator.HISTORY).resumeComparator(otherGatesPass = true))
+    }
+
+    @Test fun `a checkpoint failing any other gate does not resume`() {
+        assertEquals(null, cp(RaceComparator.TARGET).resumeComparator(otherGatesPass = false))
+        assertEquals(null, cp(RaceComparator.HISTORY).resumeComparator(otherGatesPass = false))
     }
 }

@@ -28,6 +28,8 @@ the Ghost Pace target on every verdict-eligible metre and never consults history
 all target fill. Every loaded route carries both marker curves (history and all-target-fill) and the
 marker / behind-distance read the one for the race's latched comparator (`RouteMode.ghostFor`), so
 after a reroute onto a differently classified route they keep racing what the number races. A
+same-ride checkpoint resume restores the comparator that earned the lead
+(`GhostCheckpoint.resumeComparator`), not the reloaded route's classification. A
 HISTORY race uses the tiers below:
 
 1. `PacePatch`: pace on this road, selected by location cell and heading.

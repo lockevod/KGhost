@@ -2487,8 +2487,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             integInitialised = false
                             integPick = eff.ghostPick
                             integVpTpm = vpTpm
-                            val raceComparator = rm.comparator
-                            integComparator = raceComparator
+                            // A fresh race races the route's comparator; a resumed one (below) its checkpoint's.
+                            integComparator = rm.comparator
                             historyVerdictSeen = false
                             integPublished = false
                             integAfterVp = false
@@ -2512,10 +2512,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 // their lead whenever they changed the Ghost-Pace target mid-ride-lifecycle.
                                 val paramMatch = cp.pick == eff.ghostPick
                                 val continuous = cp.continuesRide(recordingStartedEpoch, riderDistNow, elapsedS)
-                                // A lead earned against the target must never enter a history race (or vice
-                                // versa); a legacy checkpoint (no comparator) can't prove which → rejected.
-                                val comparatorMatch = cp.restorableFor(raceComparator)
-                                if (recent && keyMatch && paramMatch && continuous && comparatorMatch) {
+                                // The lead resumes WITH the comparator that earned it (the race's latch survives a
+                                // restart as it survives a reroute) — never re-judged against this route's
+                                // classification. A legacy checkpoint (no comparator) can't prove which → rejected.
+                                val resumed = cp.resumeComparator(recent && keyMatch && paramMatch && continuous)
+                                if (resumed != null) {
+                                    integComparator = resumed
                                     integ.restore(cp.leadS, cp.lastRiderDist)
                                     integLastRiderDist = cp.lastRiderDist
                                     // Honoured even at lead 0: a history race that had already compared keeps
@@ -2525,14 +2527,16 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                         "KVP B2 checkpoint RESTORED: lead=${"%.0f".format(cp.leadS)}s " +
                                             "lastRiderDist=${"%.0f".format(cp.lastRiderDist)}m " +
                                             "riderNow=${"%.0f".format(riderDistNow)}m " +
-                                            "epochMatch=${cp.rideEpoch == recordingStartedEpoch} — lead resumed",
+                                            "epochMatch=${cp.rideEpoch == recordingStartedEpoch} cmp=$resumed" +
+                                            (if (resumed != rm.comparator) " (route classified ${rm.comparator}: race keeps its own)" else "") +
+                                            " — lead resumed",
                                     )
                                 } else {
                                     // Rejected — log WHY so a silently-dead resume in the field is diagnosable.
                                     Timber.i(
                                         "KVP B2 checkpoint REJECTED: recent=$recent keyMatch=$keyMatch " +
                                             "paramMatch=$paramMatch continuous=$continuous " +
-                                            "comparatorMatch=$comparatorMatch (cp=${cp.comparator} cur=$raceComparator) " +
+                                            "cp=${cp.comparator} route=${rm.comparator} " +
                                             "(cpKey=${cp.routeKey} curKey=$curKey ΔdistM=${"%.0f".format(riderDistNow - cp.lastRiderDist)} " +
                                             "cpElapsed=${"%.0f".format(cp.rideElapsedS)}s elapsedNow=${"%.0f".format(elapsedS)}s)",
                                     )
