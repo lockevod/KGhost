@@ -41,7 +41,18 @@ data class GhostCheckpoint(
     // Ride ELAPSED_TIME (s) when written: the ride-clock evidence that a fresh process is resuming THIS ride
     // and not starting a new one. -1 = written before this field existed → no evidence, no fresh-process resume.
     val rideElapsedS: Double = -1.0,
+    // The comparator of the race that earned [leadS] (the integrator's latch, not the route's current
+    // classification). Null = written before comparators existed.
+    val comparator: RaceComparator? = null,
+    // The HISTORY race had consumed history before this cut → the resumed race shows its gap at once,
+    // even at lead 0, instead of "---" until the next history metre.
+    val historyVerdictSeen: Boolean = false,
 ) {
+    /** May this lead enter a race measured with [current]? Only when it was earned with the same one.
+     *  Legacy blobs (null) are REJECTED: a 1.2.x lead may be target-earned (1.2.0 tier 4) and must not
+     *  enter a history race. A mismatch either way is rejected too — a target lead is not a history lead. */
+    fun restorableFor(current: RaceComparator): Boolean = comparator != null && comparator == current
+
     /** Is the ride now being raced the one this checkpoint was written in? Same epoch → same process, yes.
      *  Otherwise (fresh process) BOTH clocks must carry on: the cut AND the current ride past the margin
      *  (inside it, a new ride's start can't be told from a resume by odometer: 310 m/35 s vs 15 m/10 s

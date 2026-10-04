@@ -54,3 +54,35 @@ class GhostCheckpointResumeTest {
         assertEquals(-1.0, jsonForStorage.decodeFromString(GhostCheckpoint.serializer(), legacy).rideElapsedS, 0.0)
     }
 }
+
+class GhostCheckpointComparatorTest {
+    private fun cp(comparator: RaceComparator?, seen: Boolean = false) =
+        GhostCheckpoint(rideEpoch = 1L, leadS = 30.0, lastRiderDist = 5000.0, pick = GhostPick.LAST,
+            vpTimePerM = 0.3, savedAtEpoch = 0L, routeKey = "r", rideElapsedS = 900.0,
+            comparator = comparator, historyVerdictSeen = seen)
+
+    @Test fun `a legacy blob decodes but is not restorable into either race`() {
+        // Written by 1.2.x: no comparator fields. Its lead may be target-earned (1.2.0 tier 4).
+        val legacy = """{"rideEpoch":1,"leadS":30.0,"lastRiderDist":5000.0,"pick":"LAST","vpTimePerM":0.3,""" +
+            """"savedAtEpoch":0,"routeKey":"r","rideElapsedS":900.0}"""
+        val cp = jsonForStorage.decodeFromString(GhostCheckpoint.serializer(), legacy)
+        assertEquals(null, cp.comparator)
+        assertFalse(cp.historyVerdictSeen)
+        assertFalse(cp.restorableFor(RaceComparator.HISTORY))
+        assertFalse(cp.restorableFor(RaceComparator.TARGET))
+    }
+
+    @Test fun `comparator and verdict latch round-trip`() {
+        val cp = cp(RaceComparator.TARGET, seen = true)
+        val back = jsonForStorage.decodeFromString(GhostCheckpoint.serializer(),
+            jsonForStorage.encodeToString(GhostCheckpoint.serializer(), cp))
+        assertEquals(cp, back)
+        assertTrue(back.restorableFor(RaceComparator.TARGET))
+    }
+
+    @Test fun `a lead never crosses comparators`() {
+        assertFalse(cp(RaceComparator.TARGET).restorableFor(RaceComparator.HISTORY))
+        assertFalse(cp(RaceComparator.HISTORY).restorableFor(RaceComparator.TARGET))
+        assertTrue(cp(RaceComparator.HISTORY).restorableFor(RaceComparator.HISTORY))
+    }
+}

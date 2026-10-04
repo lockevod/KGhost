@@ -63,6 +63,10 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
     /** Total metres of history folded into the table (0 when no track carried altitude). */
     val coveredM: Double = bins.values.sumOf { it.metres }
 
+    /** Can [pace] answer ANY gradient? `coveredM > 0` is not enough: a model of sub-[GRADE_MIN_BIN_M]
+     *  slivers answers nothing, yet would keep a sparse route off the target race. */
+    val hasUsableBin: Boolean = bins.values.any { it.metres >= GRADE_MIN_BIN_M }
+
     /**
      * Historical time-per-metre at [gradePct] for [pick], or null when that gradient holds less than
      * [GRADE_MIN_BIN_M] of history. Null is the signal for the caller to fall through to the neutral fill —
