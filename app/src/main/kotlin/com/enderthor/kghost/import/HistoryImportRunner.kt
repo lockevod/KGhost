@@ -263,7 +263,12 @@ object HistoryImportRunner {
             // the re-import that restores it.
             LibraryLock.mutex.withLock {
                 val deps = depsFor(appContext, configManager, lastScanEpoch)
-                val prepared = try {
+                // Owe the model BEFORE archiving: prepareRebuild strands the pace of every archived ride in
+                // gradepace.json, and the job's no-op hand-back must see that debt as pre-existing. If it
+                // cannot be recorded, archive NOTHING and fall back to an ordinary import.
+                val debtOwed = deps.updateConfig { it.copy(gradeModelDirty = true) }
+                if (!debtOwed) Timber.w("rebuild: could not persist the model debt; not archiving, running an ordinary import")
+                val prepared = if (!debtOwed) 0 else try {
                     _preparing.value = true
                     runCatching {
                         prepareRebuild(

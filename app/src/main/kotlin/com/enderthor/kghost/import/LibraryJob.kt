@@ -36,7 +36,14 @@ data class LibraryDeps(
  * The debts are set BEFORE any decode (a crash or cancel after a flush must still owe the model rebuild
  * and the twin reconciliation) and cleared only after their work verifiably succeeded. Automatic runs
  * count what they stored into `pendingFoundRides` even when cancelled, from the importer's own per-flush
- * report — UI progress lags a flush and would undercount. Only tracks that started before
+ * report — UI progress lags a flush and would undercount.
+ *
+ * A scan that finds files but changes nothing (every file a duplicate without new altitude, or invalid) must
+ * not trigger a whole-library model rebuild and twin sweep after every ride (Copilot finding). So a run that
+ * COMPLETES normally with zero stored tracks and zero enriched hands back the debts IT set: the model flag
+ * only if it was clear before, the reconcile debt only by acking the gen this run wrote (gen/ack semantics:
+ * a recorder save that bumped the gen meanwhile stays owed). Debts owed from before are kept and paid as
+ * usual. Cancelled or failed runs never clear anything. Only tracks that started before
  * [KGhostConfig.discoveryEpoch] count: a later ride was recorded live, so its FIT is a twin, not a find.
  */
 suspend fun runLibraryJob(
@@ -47,21 +54,47 @@ suspend fun runLibraryJob(
 ): Int {
     val stored = AtomicInteger(0)
     val found = AtomicInteger(0)
+    val mutated = AtomicInteger(0)
+    var debtsSet = false
+    var modelOwedBefore = true
+    var reconcileOwedBefore = true
+    var bumpedGen = 0L
     // 0 (not stamped yet) counts nothing: no ride starts before the epoch 0.
     val cutoff = if (auto) deps.config().discoveryEpoch else 0L
     try {
-        deps.newImporter { added, _ ->
+        deps.newImporter { added, enriched ->
             stored.addAndGet(added.size)
+            mutated.addAndGet(added.size + enriched)
             found.addAndGet(added.count { it.startedAtEpoch < cutoff })
         }.import(onlyNew).collect { p ->
             // The importer suspends on this emission, so the debts are durable before its first decode.
             if (p.phase == ImportProgress.Phase.SCANNING && p.total > 0) {
                 val ok = withContext(NonCancellable) {
-                    deps.updateConfig { it.copy(gradeModelDirty = true, reconcileGen = it.reconcileGen + 1) }
+                    deps.updateConfig {
+                        // Only the FIRST write sees the pre-run state; later SCANNING emissions see our own debt.
+                        if (!debtsSet) {
+                            modelOwedBefore = it.gradeModelDirty
+                            reconcileOwedBefore = it.reconcileOwed()
+                        }
+                        bumpedGen = it.reconcileGen + 1 // the LAST value written, so the ack covers every bump of ours
+                        it.copy(gradeModelDirty = true, reconcileGen = it.reconcileGen + 1)
+                    }
                 }
+                debtsSet = debtsSet || ok
                 check(ok) { "could not persist the library debts; import aborted before decoding" }
             }
             onProgress(p)
+        }
+        if (debtsSet && mutated.get() == 0) {
+            val ok = withContext(NonCancellable) {
+                deps.updateConfig {
+                    it.copy(
+                        gradeModelDirty = it.gradeModelDirty && modelOwedBefore,
+                        reconcileAckGen = if (reconcileOwedBefore) it.reconcileAckGen else maxOf(it.reconcileAckGen, bumpedGen),
+                    )
+                }
+            }
+            if (!ok) Timber.w("no-op scan could not hand its debts back; they stay owed")
         }
         dischargeDebts(deps)
         return stored.get()
