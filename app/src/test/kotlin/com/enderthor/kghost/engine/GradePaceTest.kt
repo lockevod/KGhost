@@ -3,6 +3,7 @@ package com.enderthor.kghost.engine
 import com.enderthor.kghost.geo.RecordedTrack
 import com.enderthor.kghost.geo.TrackPointDto
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -64,6 +65,14 @@ class GradePaceTest {
         assertEquals(0.2, g.pace(4.0, GhostPick.AVERAGE)!!, 1e-6)
         // One track = one sample per bin (the PacePatch rule): count is RIDES, not 20 m steps.
         assertEquals(1, g.toDto().bins.single { it.bin == 4 }.count)
+    }
+
+    @Test fun `a model of slivers has coverage but nothing usable`() {
+        // coveredM > 0 alone would pick HISTORY for a model that answers no gradient at all.
+        val sliver = GradePace.build(listOf(track("sliver", n = 16, stepM = 20.0, gradePct = 4.0, speedMs = 5.0)))
+        assertTrue(sliver.coveredM > 0.0)
+        assertFalse(sliver.hasUsableBin)
+        assertTrue(GradePace.build(listOf(track("enough", n = 26, stepM = 20.0, gradePct = 4.0, speedMs = 5.0))).hasUsableBin)
     }
 
     @Test fun `tracks with no elevation contribute nothing`() {

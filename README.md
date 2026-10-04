@@ -35,7 +35,9 @@ live on a data field and as a marker on the map.
 - **Judges every stretch it can** — the gap checks your history two ways: first for **this exact road**
   (if you've ridden it before), and if you haven't, for **your typical pace at the current gradient**
   elsewhere (so a climb you've never done still gets judged against how you climb). Only when neither
-  applies does the gap simply **hold** rather than guess — see the SEG/GP tag below.
+  applies does the gap simply **hold** rather than guess. A route your history covers less than 10% of
+  (and no imported history to learn a pace-vs-gradient from) races your **Ghost Pace target** for the
+  whole ride instead — see the SEG/GP tag below.
 - **Per ride profile** — each Karoo ride profile can have its own setup: how you race (**fixed pace**
   vs **your rides**), its own Ghost Pace base (e.g. faster on the road bike, slower on the MTB), which
   past ghost to use (**best / last / average**), the map icon, and whether KGhost is on at all. So your
@@ -58,9 +60,9 @@ live on a data field and as a marker on the map.
    occasional **in-ride reminder** until you grant it.
 4. **Set your Ghost Pace** — pick a target speed/pace for the fixed-pace mode. In a route race,
    this target fills gaps in the map curve; unknown ground holds the time lead when neither
-   historical pace tier can answer — except on a route you have **never** ridden any part of (and no
-   imported history to learn a pace-vs-gradient from), where the number races this target instead of
-   sitting at 0. The default is **20 km/h**.
+   historical pace tier can answer — except on a route your history covers less than 10% of (and no
+   imported history to learn a pace-vs-gradient from), where the whole race is against this target
+   instead of sitting at 0. The default is **20 km/h**.
 5. **Ride.** Load a route to race your past self on it, or just start riding to race the Ghost Pace.
 
 ## Data fields
@@ -69,7 +71,7 @@ Add these from the Karoo's data-field picker (Extensions):
 
 | Field | Type id | What it shows |
 |---|---|---|
-| Gap (graphic) | `kghost-gap` | Two-dot track: you vs the ghost, with the gap (time/distance) below, tagged SEG (this stretch is being judged against your history) or GP (no verdict here — nothing recorded to compare against, so the gap just holds) |
+| Gap (graphic) | `kghost-gap` | Two-dot track: you vs the ghost, with the gap (time/distance) below, tagged with what this race measures you against: SEG (your past self) or GP (the Ghost Pace target) |
 | Gap (numeric) | `kghost-gap-num` | Numeric gap (time / distance, per your preference) |
 | Ghost Gap (s) | `kghost-gap-time` | Plain number: gap in seconds, positive = ahead (Karoo-native rendering) |
 | Ghost Gap (m) | `kghost-gap-dist` | Plain number: gap in metres, positive = ahead (Karoo-native rendering) |
@@ -96,8 +98,10 @@ karooSystem.streamDataFlow("TYPE_EXT::kghost::kghost-gap-time").collect { state 
 Ahead is green, behind is red, on-pace is neutral. During a **GPS dropout** the value is shown in
 **amber** as an estimate (dead-reckoned) rather than blanking; leaving the **route** does *not* make it
 an estimate — the number races your actual path and stays solid off-route. `---` appears only when
-there is nothing to show — no target set, not recording, you haven't started riding yet, or after a
-sustained GPS loss (see below). Fields are designed for sunlight
+there is nothing to show — no target set, not recording, you haven't started riding yet, a route race
+against your past self that hasn't yet compared any ridden metres with your road or gradient history
+(a resumed ride keeps a comparison it had already made), or after a sustained GPS
+loss (see below). Fields are designed for sunlight
 readability and respect the Karoo's day/night theme.
 
 ### Stops and GPS dropouts

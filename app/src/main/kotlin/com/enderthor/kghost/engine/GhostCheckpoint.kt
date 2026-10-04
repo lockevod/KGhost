@@ -41,7 +41,20 @@ data class GhostCheckpoint(
     // Ride ELAPSED_TIME (s) when written: the ride-clock evidence that a fresh process is resuming THIS ride
     // and not starting a new one. -1 = written before this field existed → no evidence, no fresh-process resume.
     val rideElapsedS: Double = -1.0,
+    // The comparator of the race that earned [leadS] (the integrator's latch, not the route's current
+    // classification). Null = written before comparators existed.
+    val comparator: RaceComparator? = null,
+    // The HISTORY race had consumed history before this cut → the resumed race shows its gap at once,
+    // even at lead 0, instead of "---" until the next history metre.
+    val historyVerdictSeen: Boolean = false,
 ) {
+    /** The comparator a resumed race takes, or null → no resume (fresh race on the route's comparator).
+     *  A same-ride checkpoint ([otherGatesPass]: recent, same route key, pick, continuous ride) resumes with
+     *  the comparator that EARNED its lead, NOT the current route's: the race latched it, and a reroute onto a
+     *  differently classified route keeps it, so a restart must too. A lead never changes comparator — it
+     *  brings its own. Legacy blobs (null) are rejected: a 1.2.x lead may be target-earned (1.2.0 tier 4). */
+    fun resumeComparator(otherGatesPass: Boolean): RaceComparator? = if (otherGatesPass) comparator else null
+
     /** Is the ride now being raced the one this checkpoint was written in? Same epoch → same process, yes.
      *  Otherwise (fresh process) BOTH clocks must carry on: the cut AND the current ride past the margin
      *  (inside it, a new ride's start can't be told from a resume by odometer: 310 m/35 s vs 15 m/10 s
@@ -58,3 +71,30 @@ data class GhostCheckpoint(
                 elapsedNowS >= rideElapsedS - CHECKPOINT_ELAPSED_SLACK_S
             )
 }
+
+/** The ONE way the race tick builds a checkpoint. [comparator] and [historyVerdictSeen] are REQUIRED here
+ *  (the class defaults them only so legacy blobs decode): a checkpoint written without its comparator is
+ *  rejected on every resume, which would silently kill the mid-ride resume with no test failing. */
+fun raceCheckpoint(
+    rideEpoch: Long,
+    leadS: Double,
+    lastRiderDist: Double,
+    pick: GhostPick,
+    vpTimePerM: Double,
+    savedAtEpoch: Long,
+    routeKey: String,
+    rideElapsedS: Double,
+    comparator: RaceComparator,
+    historyVerdictSeen: Boolean,
+): GhostCheckpoint = GhostCheckpoint(
+    rideEpoch = rideEpoch,
+    leadS = leadS,
+    lastRiderDist = lastRiderDist,
+    pick = pick,
+    vpTimePerM = vpTimePerM,
+    savedAtEpoch = savedAtEpoch,
+    routeKey = routeKey,
+    rideElapsedS = rideElapsedS,
+    comparator = comparator,
+    historyVerdictSeen = historyVerdictSeen,
+)

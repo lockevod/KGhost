@@ -12,7 +12,14 @@ import com.enderthor.kghost.engine.CadenceProbe
 import com.enderthor.kghost.engine.CoastQuality
 import com.enderthor.kghost.engine.CoastingEstimator
 import com.enderthor.kghost.engine.verdictAllowed
-import com.enderthor.kghost.engine.noHistoryTargetPace
+import com.enderthor.kghost.engine.RaceComparator
+import com.enderthor.kghost.engine.RouteGapPublication
+import com.enderthor.kghost.engine.chooseComparator
+import com.enderthor.kghost.engine.consumedHistory
+import com.enderthor.kghost.engine.historyCoverage
+import com.enderthor.kghost.engine.paceAfterInterstitial
+import com.enderthor.kghost.engine.routeGapPublication
+import com.enderthor.kghost.engine.selectRacePace
 import com.enderthor.kghost.engine.GpsHealth
 import com.enderthor.kghost.engine.raceClockFreezes
 import com.enderthor.kghost.engine.GapCalculator
@@ -33,6 +40,7 @@ import com.enderthor.kghost.engine.toInfo
 import com.enderthor.kghost.engine.AGG_MIN_LAPS
 import com.enderthor.kghost.engine.CorridorSeeder
 import com.enderthor.kghost.engine.GhostCheckpoint
+import com.enderthor.kghost.engine.raceCheckpoint
 import com.enderthor.kghost.engine.GhostIntegrator
 import com.enderthor.kghost.engine.GradePace
 import com.enderthor.kghost.engine.PacePatch
@@ -285,9 +293,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         private const val ROUTE_PROJ_FWD_MAX_M = 400.0
         private const val ROUTE_PROJ_MAX_PERP_M = 40.0
 
-        /** Stable SegmentInfo published while the B2 ghost is racing recorded history (SEG tag). The gap
-         *  field only reads whether [SegmentInfoHolder] is non-null (SEG vs GP) — the label/bounds are
-         *  unused — so one shared instance avoids per-tick churn (the holder dedups on its fields). */
+        /** Stable SegmentInfo published for the whole of a HISTORY-comparator route race (SEG tag; a
+         *  TARGET race clears it → GP). The gap field only reads whether [SegmentInfoHolder] is non-null
+         *  (SEG vs GP) — the label/bounds are unused — so one shared instance avoids per-tick churn (the
+         *  holder dedups on its fields). */
         private val B2_ON_HISTORY = SegmentInfo(0.0, 0.0, "SEG")
 
         /** B2 ghost checkpoint filename (under filesDir) + how often to persist it + the odometer
@@ -593,6 +602,20 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // VP-fill pace (eff.targetSpeedMs), which IS still live — see the comment where RouteGhost.build is called.
     @Volatile private var integPick: GhostPick? = null
     @Volatile private var integVpTpm: Double = 0.0
+    // The comparator [integrator] races, latched from RouteMode.comparator when it is created and reset
+    // only with it: a reroute / rematch / repick that keeps the integrator keeps its comparator, so one race
+    // never mixes history-earned and target-earned seconds. Accrual, tag, publication and checkpoint all
+    // read THIS, never the current route's classification.
+    @Volatile private var integComparator: RaceComparator? = null
+    // HISTORY race only: whether a tick has actually consumed a history metre (matchedM rose). Until then
+    // the number is "---", not a 0 that only means "nothing to compare yet". Persisted in the checkpoint.
+    @Volatile private var historyVerdictSeen: Boolean = false
+    // Whether this race has published a live gap. The pendingHold freeze only holds a number THIS race
+    // published — otherwise a restored lead (or the previous mode's stale value) would sit behind it.
+    @Volatile private var integPublished: Boolean = false
+    // The VP branch raced while this integrator existed → its next onTick spans the interstitial (see
+    // paceAfterInterstitial). Cleared once an onTick has actually run.
+    @Volatile private var integAfterVp: Boolean = false
     // Monotonic (elapsedRealtime ms) of the last checkpoint write — throttles the ~5 s periodic persist.
     @Volatile private var lastCheckpointMs: Long = 0L
     // Latest checkpoint SNAPSHOT, built on the Main tick (so the IO writer never reads the integrator's
@@ -639,6 +662,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         integInitialised = false
         integPick = null
         integVpTpm = 0.0
+        integComparator = null
+        historyVerdictSeen = false
+        integPublished = false
+        integAfterVp = false
         lastCheckpointMs = 0L
         pendingCheckpoint = null
         lastReliableGhostRouteDist = null
@@ -698,11 +725,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         val routeName: String,
         val segments: List<LiveSegment>,
         /**
-         * The continuous whole-route ghost — recorded stretches stitched with VP-pace fills (see
-         * [RouteGhost]). Distance axis is ROUTE distance `[0, path.totalM]`. Null only when it could
-         * not be built (no fill pace and gaps present); the tick then falls back to ① VP.
+         * The continuous whole-route ghost a HISTORY race draws — the aggregate's recorded stretches for the
+         * current pick stitched with VP-pace fills (see [RouteGhost]). Distance axis is ROUTE distance
+         * `[0, path.totalM]`. Null only when it could not be built; the marker then hides. Built whatever
+         * [comparator] says: a HISTORY race rerouted onto a TARGET-classified route still needs it.
          */
-        val routeGhost: GhostCurve?,
+        val historyGhost: GhostCurve?,
+        /** The same axis, all target fill (no recorded stretch) — what a TARGET race draws. */
+        val targetGhost: GhostCurve?,
         /**
          * Total route length (m) as reported by the Karoo's NavigatingRoute — the scale that
          * DISTANCE_TO_DESTINATION's remaining distance is measured against, so route position =
@@ -713,8 +743,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         /**
          * B2 path-following pace map for this route's area (2D `(cell,bearing)→pace`), built from the
          * overlapping history at match time and published ATOMICALLY with the route so the tick never
-         * pairs a new route with a stale patch. Null when no history overlaps → the integrator neutral-fills
-         * the whole route. Not persisted; rebuilt on every route load.
+         * pairs a new route with a stale patch. Null when no history overlaps (tier 1 never answers; see
+         * [comparator]). Not persisted; rebuilt on every route load.
          */
         val pacePatch: PacePatch?,
         /**
@@ -726,18 +756,31 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         val gradePace: GradePace?,
         val aggregate: PerRouteAggregate?,
         /**
-         * Whether ANY recorded track overlaps the route's bbox — the same candidate set tier 1 (PacePatch) is
-         * built from, so "no history" here means tier 1 can never answer anywhere on or around this route.
-         * (The aggregate's segments are NOT that signal: short shared stretches, an unsnapped polyline or
-         * leaving the route can empty them while PacePatch still hits.)
+         * What a race STARTED on this route measures against, chosen once at load from the planned path's
+         * tier-1 coverage (PacePatch hits) and whether the gradient model has a usable bin — see
+         * [chooseComparator]. The tick never reads it per tick: the integrator latches it at creation, so a
+         * reroute onto a differently classified route keeps the race's comparator. In TARGET, [segments] is
+         * empty. The marker / behind-distance never read this: they take [ghostFor] the race's LATCHED
+         * comparator, so they always race what the number races, across any reroute.
          */
-        val hasHistory: Boolean = true,
+        val comparator: RaceComparator,
     ) {
         fun withPick(pick: GhostPick, fillSpeedMs: Double): RouteMode {
             val aggregate = aggregate ?: return this
-            val segments = aggregate.toLiveSegments(pick)
-            return copy(segments = segments, routeGhost = RouteGhost.build(path.totalM, segments, fillSpeedMs))
+            val history = aggregate.toLiveSegments(pick)
+            // TARGET stays segment-free across a repick: the pick only changes history, which this race ignores.
+            // BOTH curves are refilled at [fillSpeedMs] — the current Ghost-Pace target — so the target curve
+            // never lags a target edited since load, and the two curves on one mode share one fill speed.
+            return copy(
+                segments = if (comparator == RaceComparator.TARGET) emptyList() else history,
+                historyGhost = RouteGhost.build(path.totalM, history, fillSpeedMs),
+                targetGhost = RouteGhost.build(path.totalM, emptyList(), fillSpeedMs),
+            )
         }
+
+        /** The curve a race latched to [raceComparator] draws its marker / behind-distance on. */
+        fun ghostFor(raceComparator: RaceComparator): GhostCurve? =
+            if (raceComparator == RaceComparator.TARGET) targetGhost else historyGhost
     }
 
     /**
@@ -1661,6 +1704,22 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Global gradient model: route-independent, so it is LOADED (not rebuilt) here.
                     val gradePace = GradePaceStore(TrackStorage.tracksDir(applicationContext)).load()
                     Timber.i("KVP route load: gradePace=%s", gradePace?.let { "coveredM=%.0f".format(it.coveredM) } ?: "absent")
+                    // The race's comparator, from how much of the PLANNED path tier 1 can answer (the same
+                    // PacePatch predicate the tick uses; LAST because the pick never changes hit/miss). Field
+                    // logs 9fe84d/0cbb96: one track brushing ~3% of a route used to count as "has history" and
+                    // pinned the gap at 0 for hours. Runs here on the matcher's Default dispatcher (8000 lookups
+                    // for 200 km — never Main); the lambda isn't suspend, so cancellation goes through the Job.
+                    val job = currentCoroutineContext()[Job]
+                    val coverage = historyCoverage(
+                        path,
+                        { la, ln, b -> pacePatch.pace(la, ln, b, GhostPick.LAST) != null },
+                        checkCancel = { job?.ensureActive() },
+                    )
+                    val comparator = chooseComparator(coverage, gradePace?.hasUsableBin == true)
+                    Timber.i(
+                        "KVP route comparator: coverage=%.1f%% gradeUsable=%s → %s",
+                        100.0 * coverage, gradePace?.hasUsableBin == true, comparator,
+                    )
                     if (needsSeed) {
                         val seedStartMs = SystemClock.elapsedRealtime()
                         // Store the no-parse id SET so the next load can diff against it.
@@ -1681,16 +1740,20 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             )
                         }
                     }
-                    val matched = agg?.toLiveSegments(pick).orEmpty()
-                    if (matched.isEmpty()) {
-                        Timber.i(
-                            "KVP grid: no raceable $pick for '${state.name}' yet — %s",
-                            if (tracks.isEmpty() && (gradePace?.coveredM ?: 0.0) <= 0.0) "racing the Ghost-Pace target" else "neutral fill",
+                    // A TARGET route publishes no recorded segments (the number never races them); the marker
+                    // curves are built for both comparators below and picked by the race's latch.
+                    val aggSegments = agg?.toLiveSegments(pick).orEmpty()
+                    val matched = if (comparator == RaceComparator.TARGET) emptyList() else aggSegments
+                    when {
+                        comparator == RaceComparator.TARGET -> Timber.i(
+                            "KVP grid: '${state.name}' races the Ghost-Pace target (${aggSegments.size} recorded stretch(es) ignored)",
                         )
-                    } else {
-                        Timber.i("KVP grid: racing $pick on ${matched.size} stretch(es)${if (justSeeded) " (just seeded)" else ""}")
+                        matched.isEmpty() -> Timber.i(
+                            "KVP grid: no raceable $pick for '${state.name}' yet — past self where history answers, neutral fill elsewhere",
+                        )
+                        else -> Timber.i("KVP grid: racing $pick on ${matched.size} stretch(es)${if (justSeeded) " (just seeded)" else ""}")
                     }
-                    // Build the ONE continuous whole-route ghost (recorded stretches + VP-pace fills) that
+                    // Build the continuous whole-route ghosts (recorded stretches + VP-pace fills) that
                     // places the MAP MARKER. Fill pace = the always-present VP target (default 20 km/h), so
                     // the marker always flows across gaps with no recorded history. This VP-fill pace is
                     // UNRELATED to GhostIntegrator's (dead) vpTimePerM constructor arg above — that one no
@@ -1698,7 +1761,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // NOTE: the per-profile target is snapshotted at match time; a mid-route profile
                     // change takes effect only after a re-match (nav state change). The live per-tick gap
                     // still uses the current target via eff.targetSpeedMs — only the VP-fill pace is snapshotted.
-                    val routeGhost = RouteGhost.build(path.totalM, matched, eff.targetSpeedMs)
+                    // BOTH curves are built: the race draws the one for its LATCHED comparator (RouteMode.ghostFor),
+                    // which after a reroute may differ from this route's classification.
+                    val historyGhost = RouteGhost.build(path.totalM, aggSegments, eff.targetSpeedMs)
+                    val targetGhost = RouteGhost.build(path.totalM, emptyList(), eff.targetSpeedMs)
                     // Single atomic publish: path + segments + ghost together so the tick never sees a
                     // NEW path paired with OLD segments. Guarded: only publish if a newer route has not
                     // superseded us (lastMatchedPolyline still ours). The `mine` claim is the polyline
@@ -1707,13 +1773,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // built under the OLD settings over the replacement's.
                     currentCoroutineContext().ensureActive()
                     if (matchStillOwns(mine, lastMatchedPolyline, generation, matchGeneration)) {
-                        routeMode = RouteMode(path, mine, state.name, matched, routeGhost, state.routeDistance, pacePatch, gradePace, agg, tracks.isNotEmpty())
+                        routeMode = RouteMode(path, mine, state.name, matched, historyGhost, targetGhost, state.routeDistance, pacePatch, gradePace, agg, comparator)
                         // Diagnostic for the scale question: the Karoo's own routeDistance vs the
                         // decoded-polyline length (the scale segments + the ghost curve live on). A large
                         // delta means the host and our polyline disagree about how long the route is,
                         // which would shift every segment bound and the ghost curve against each other.
                         Timber.d(
-                            "route mode ON: ${matched.size} segment(s), routeGhost=${routeGhost != null} " +
+                            "route mode ON: ${matched.size} segment(s), historyGhost=${historyGhost != null} targetGhost=${targetGhost != null} " +
                                 "on '${state.name}' karooLen=${"%.0f".format(state.routeDistance)} " +
                                 "polyLen=${"%.0f".format(path.totalM)} delta=${"%.0f".format(state.routeDistance - path.totalM)} " +
                                 "matchMs=${SystemClock.elapsedRealtime() - matchStartMs}",
@@ -1754,7 +1820,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
      * the current target every tick), and including it would clear + fully re-match the route on
      * every keystroke while the rider edits the Ghost Pace mid-navigation — the stale fill pace until
      * the next route load is the long-standing, documented trade (see the match NOTE above).
-     * ONE exception: a pick-only repick rebuilds the ghost curve, and it does so from the CURRENT
+     * ONE exception: a pick-only repick rebuilds BOTH ghost curves, and it does so from the CURRENT
      * target — so a pending Ghost-Pace edit also lands the next time the rider changes pick.
      */
     internal data class MatchSig(val active: Boolean, val raceEnabled: Boolean, val pick: GhostPick)
@@ -2353,7 +2419,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 // so a new polyline does NOT restart the race. KEEP the integrator, its accrued lead,
                                 // and the race clock (firstMoveElapsedS); only the route-SPECIFIC marker anchor +
                                 // finish state re-bootstrap on the new line (the pace lookup/neutral-fill and the route-
-                                // ghost curve follow rm.pacePatch / rm.routeGhost automatically from the next tick).
+                                // ghost curve follow rm.pacePatch / rm.ghostFor(latched comparator) automatically from the next tick).
                                 // On the FIRST load these are all already null/fresh, so this is a normal cold start.
                                 lastGoodRouteDistM = null // the held rider route position that anchors the marker
                                 distMAtLastGoodM = null
@@ -2367,7 +2433,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 // + the carried lead, so a power-off on the new route resumes correctly.
                             }
                         }
-                        val rg = rm.routeGhost
                         val patch = rm.pacePatch
                         // Fair start: hold --- until the rider first rolls (a stationary wait for a lock is
                         // never a growing deficit). firstMoveElapsedS is stamped above every tick.
@@ -2425,6 +2490,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             integInitialised = false
                             integPick = eff.ghostPick
                             integVpTpm = vpTpm
+                            // A fresh race races the route's comparator; a resumed one (below) its checkpoint's.
+                            integComparator = rm.comparator
+                            historyVerdictSeen = false
+                            integPublished = false
+                            integAfterVp = false
                             lastCheckpointMs = 0L
                             // Resume an interrupted ride WITH the accrued lead: restore the persisted checkpoint
                             // iff same pick, RECENT enough, AND the same ride ([GhostCheckpoint.continuesRide]:
@@ -2445,20 +2515,31 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 // their lead whenever they changed the Ghost-Pace target mid-ride-lifecycle.
                                 val paramMatch = cp.pick == eff.ghostPick
                                 val continuous = cp.continuesRide(recordingStartedEpoch, riderDistNow, elapsedS)
-                                if (recent && keyMatch && paramMatch && continuous) {
+                                // The lead resumes WITH the comparator that earned it (the race's latch survives a
+                                // restart as it survives a reroute) — never re-judged against this route's
+                                // classification. A legacy checkpoint (no comparator) can't prove which → rejected.
+                                val resumed = cp.resumeComparator(recent && keyMatch && paramMatch && continuous)
+                                if (resumed != null) {
+                                    integComparator = resumed
                                     integ.restore(cp.leadS, cp.lastRiderDist)
                                     integLastRiderDist = cp.lastRiderDist
+                                    // Honoured even at lead 0: a history race that had already compared keeps
+                                    // showing its number instead of dropping back to "---".
+                                    historyVerdictSeen = cp.historyVerdictSeen
                                     Timber.i(
                                         "KVP B2 checkpoint RESTORED: lead=${"%.0f".format(cp.leadS)}s " +
                                             "lastRiderDist=${"%.0f".format(cp.lastRiderDist)}m " +
                                             "riderNow=${"%.0f".format(riderDistNow)}m " +
-                                            "epochMatch=${cp.rideEpoch == recordingStartedEpoch} — lead resumed",
+                                            "epochMatch=${cp.rideEpoch == recordingStartedEpoch} cmp=$resumed" +
+                                            (if (resumed != rm.comparator) " (route classified ${rm.comparator}: race keeps its own)" else "") +
+                                            " — lead resumed",
                                     )
                                 } else {
                                     // Rejected — log WHY so a silently-dead resume in the field is diagnosable.
                                     Timber.i(
                                         "KVP B2 checkpoint REJECTED: recent=$recent keyMatch=$keyMatch " +
                                             "paramMatch=$paramMatch continuous=$continuous " +
+                                            "cp=${cp.comparator} route=${rm.comparator} " +
                                             "(cpKey=${cp.routeKey} curKey=$curKey ΔdistM=${"%.0f".format(riderDistNow - cp.lastRiderDist)} " +
                                             "cpElapsed=${"%.0f".format(cp.rideElapsedS)}s elapsedNow=${"%.0f".format(elapsedS)}s)",
                                     )
@@ -2471,10 +2552,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val gLat = fix?.lat ?: Double.NaN
                         val gLng = fix?.lng ?: Double.NaN
                         val gHdg = fix?.headingDeg ?: Double.NaN
-                        // Historical pace at THIS tick's fix — computed ONCE and reused for both the integrator
-                        // accrual and the SEG/GP tag below (the integrator's paceAt is called with the same
-                        // lat/lng/heading, so the neighbourhood scan need not run twice per second). Null → neutral-fill
-                        // (and GP tag). PacePatch.pace already returns null for a non-finite heading.
+                        // This tick's pace at THIS fix — computed ONCE and handed to the integrator (its paceAt is
+                        // called with the same lat/lng/heading, so the neighbourhood scan need not run twice per
+                        // second). Null → neutral fill. PacePatch.pace already returns null for a non-finite heading.
                         // FRESHNESS GATE: only a RECENT fix may decide the pace, for EVERY tier below.
                         // `lastFix` is overwritten on a trusted fix but never nulled on staleness, so a dropout
                         // otherwise looks up the history of the position where the fix FROZE and applies it to
@@ -2500,28 +2580,36 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // this line — see its KDoc for the false green that motivated extracting it.
                         val fixAgeOk = fix != null && SystemClock.elapsedRealtime() - fix.ms <= GPS_FIX_FRESH_MS
                         val fixFresh = verdictAllowed(fixAgeOk, coast.quality)
-                        // Tier 1: this exact road, ridden before (PacePatch). Tier 2: my historical pace at THIS
-                        // gradient on a road I have never ridden (GradePace). Tier 3 lives in the integrator: a
-                        // neutral fill that contributes 0. Both tier 1 and tier 2 require fixFresh (the GPS fix
-                        // itself, not just the gradient sample, must be recent); tier 2 additionally requires a
-                        // FRESH gradient — a stale gradient describes a hill the rider left minutes ago.
-                        val paceHere = if (fixFresh) patch?.pace(gLat, gLng, gHdg, eff.ghostPick) else null
+                        // The race's LATCHED comparator (set with the integrator, reset only with it) — never the
+                        // current route's, so a reroute onto a differently classified route can't mix comparators.
+                        val raceCmp = checkNotNull(integComparator) { "integrator without a latched comparator" }
+                        // The marker / behind-distance curve follows the SAME latch (never rm.comparator).
+                        val rg = rm.ghostFor(raceCmp)
+                        // HISTORY: tier 1 = this exact road, ridden before (PacePatch); tier 2 = my historical pace
+                        // at THIS gradient on a road I have never ridden (GradePace); else the integrator's neutral
+                        // fill, which contributes 0. TARGET: the Ghost-Pace target on every metre, never consulting
+                        // history. Every source needs fixFresh (the GPS fix itself, not just the gradient sample,
+                        // must be recent — a dead-reckoned metre charged at ANY pace is a one-way lead ratchet, since
+                        // the integrator's backward step keeps ghostTime); tier 2 additionally needs a FRESH
+                        // gradient — a stale gradient describes a hill the rider left minutes ago.
                         val gradeFresh = SystemClock.elapsedRealtime() - lastGradeMs <= GPS_FIX_FRESH_MS
-                        val paceGrade = if (paceHere == null && fixFresh && gradeFresh) {
-                            lastGradePct?.let { rm.gradePace?.pace(it, eff.ghostPick) }
-                        } else {
-                            null
-                        }
-                        // Tier 4: no history anywhere near the route and no usable gradient model → race the
-                        // target. Same freshness/coast gate as tiers 1-2: a dead-reckoned metre charged at the
-                        // target would be refunded by the stateless VP race on the snap-back, but NOT by the
-                        // integrator (its backward step keeps ghostTime) — a one-way lead ratchet.
-                        val paceTarget = if (fixFresh) {
-                            noHistoryTargetPace(rm.hasHistory, (rm.gradePace?.coveredM ?: 0.0) > 0.0, eff.targetSpeedMs)
-                        } else {
-                            null
-                        }
-                        val paceNow = paceHere ?: paceGrade ?: paceTarget
+                        var paceSource = "GP" // diag only: which source answered (GP = none → neutral fill)
+                        val paceNow = selectRacePace(
+                            comparator = raceCmp,
+                            verdictAllowed = fixFresh,
+                            targetSpeedMs = eff.targetSpeedMs,
+                            historyPace = {
+                                patch?.pace(gLat, gLng, gHdg, eff.ghostPick)?.also { paceSource = "SEG" }
+                            },
+                            gradePace = {
+                                if (gradeFresh) {
+                                    lastGradePct?.let { rm.gradePace?.pace(it, eff.ghostPick) }?.also { paceSource = "GRADE" }
+                                } else {
+                                    null
+                                }
+                            },
+                        )
+                        if (raceCmp == RaceComparator.TARGET && paceNow != null) paceSource = "TGT"
                         // Guard (b): keyed on pendingHold (NOT pendingSample) so it survives a genuine stop
                         // inside a pending interval — that tick must still be skipped, not just held.
                         // integInitialised forces the very first call through regardless of coast's state:
@@ -2529,7 +2617,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // lead happens INSIDE this call, so it must never be skipped or a checkpoint resume
                         // publishes (and re-persists) a default ZERO gap.
                         if (!coast.pendingHold || !integInitialised) {
-                            integ.onTick(riderDist, gLat, gLng, gHdg, elapsedS - moveStart) { _, _, _ -> paceNow }
+                            val matchedBefore = integ.matchedM
+                            val tickPace = paceAfterInterstitial(raceCmp, integAfterVp, paceNow)
+                            integ.onTick(riderDist, gLat, gLng, gHdg, elapsedS - moveStart) { _, _, _ -> tickPace }
+                            integAfterVp = false
+                            // Latch on metres actually CONSUMED, not on a returned pace: a first anchor, a restore
+                            // anchor or a dd<=0 tick can carry a pace and still compare nothing.
+                            if (raceCmp == RaceComparator.HISTORY && consumedHistory(matchedBefore, integ.matchedM)) {
+                                historyVerdictSeen = true
+                            }
                             integInitialised = true
                             integLastRiderDist = riderDist
                         }
@@ -2544,7 +2640,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             integPick = eff.ghostPick
                             if (nowCp - lastCheckpointMs >= CHECKPOINT_INTERVAL_MS && integPick != null) {
                                 lastCheckpointMs = nowCp
-                                pendingCheckpoint = GhostCheckpoint(
+                                pendingCheckpoint = raceCheckpoint(
                                     rideEpoch = recordingStartedEpoch,
                                     leadS = integ.gapTimeS,
                                     lastRiderDist = integLastRiderDist,
@@ -2553,6 +2649,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     savedAtEpoch = System.currentTimeMillis(),
                                     routeKey = routeKeyOf(rm.routeName, rm.path.totalM),
                                     rideElapsedS = elapsedS,
+                                    comparator = raceCmp,
+                                    historyVerdictSeen = historyVerdictSeen,
                                 )
                                 scope.launch(Dispatchers.IO) { flushGhostCheckpoint() }
                             }
@@ -2705,18 +2803,27 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             markerReliable -> ghostRouteDist
                             else -> lastReliableGhostRouteDist // off-route: hold the last reliable position
                         }
-                        // Freeze the WHOLE published number while a hold is unresolved. Freezing
-                        // gapTimeS alone is not enough: while BEHIND, gapDistM is recomputed from
-                        // rg.distanceAt(rg.timeAt(riderR) - gapTimeS), and a fresh fix moves riderR,
-                        // so the distance field would drift mid-hold. The marker is deliberately NOT
+                        // A HISTORY race that has not consumed a single history metre shows "---", not a 0 that
+                        // only means "nothing to compare" — ahead of the hold, else the previous mode's stale
+                        // number survives a VP → route switch. Otherwise freeze the WHOLE published number while
+                        // a hold is unresolved, once this race has published (so a restored lead still shows on
+                        // the first tick). Freezing gapTimeS alone is not enough: while BEHIND, gapDistM is
+                        // recomputed from rg.distanceAt(rg.timeAt(riderR) - gapTimeS), and a fresh fix moves
+                        // riderR, so the distance field would drift mid-hold. The marker is deliberately NOT
                         // frozen — it keeps tracking the rider.
-                        if (!coast.pendingHold) GapStateHolder.update(gap)
-                        // SEG/GP tag: SEG when the number got a verdict this tick (PacePatch or GradePace, either
-                        // tier), GP on neutral-fill where the number measures nothing. The field reads only
-                        // non-null (SEG) — the label is unused, so a stable instance (deduped by the holder)
-                        // avoids per-tick churn.
-                        val onHistory = paceNow != null
-                        if (onHistory) SegmentInfoHolder.set(B2_ON_HISTORY) else SegmentInfoHolder.clear()
+                        when (routeGapPublication(raceCmp, historyVerdictSeen, coast.pendingHold, integPublished)) {
+                            RouteGapPublication.INACTIVE -> GapStateHolder.clear()
+                            RouteGapPublication.HOLD -> Unit
+                            RouteGapPublication.PUBLISH -> {
+                                GapStateHolder.update(gap)
+                                integPublished = true
+                            }
+                        }
+                        // SEG/GP tag names the race's COMPARATOR (SEG = racing your past self, GP = racing the
+                        // Ghost-Pace target), not this tick's source: stable, no per-tick flicker, and it fixes
+                        // 1.2.0 tagging target-paced ticks SEG. The field reads only non-null (SEG) — the label is
+                        // unused, so a stable instance (deduped by the holder) avoids per-tick churn.
+                        if (raceCmp == RaceComparator.HISTORY) SegmentInfoHolder.set(B2_ON_HISTORY) else SegmentInfoHolder.clear()
                         // Marker (BOTH cases, ROUTE frame) — [markerDist] is the live ghostRouteDist, the FROZEN
                         // finish position, or (off-route) the frozen last-reliable position. Shown whenever we have
                         // ANY of those, so while a route is loaded the icon never disappears — it only pauses.
@@ -2734,7 +2841,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                     "KVP tick route(B2): riderDist=${"%.0f".format(riderDist)} " +
                                         "gapT=${"%.0f".format(gap.gapTimeS)}s gapD=${"%.0f".format(gap.gapDistanceM)}m " +
                                         "${if (gap.ahead) "AHEAD" else "BEHIND"} ghostTime=${"%.0f".format(integ.ghostTime)} " +
-                                        "seg=${if (paceHere != null) "SEG" else if (paceGrade != null) "GRADE" else if (paceTarget != null) "VP" else "GP"} " +
+                                        "seg=$paceSource cmp=$raceCmp verdictSeen=$historyVerdictSeen " +
                                         "grade=${lastGradePct?.let { "%.1f".format(it) } ?: "--"} " +
                                         "cov=${"%.0f".format(100.0 * integ.matchedM / (integ.matchedM + integ.filledM).coerceAtLeast(1.0))}% " +
                                         "riderR=${lastGoodRouteDistM?.let { "%.0f".format(it) } ?: "--"} " +
@@ -2753,11 +2860,17 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // missing target blanks — EXCEPT after a sustained (~3 min) loss, where
                         // handleGpsLoss() gives up and we blank rather than show a wild extrapolation.
                         publishSegment(null, fireExit = false)
+                        // The VP branch now owns the holder: a route that loads next (the integrator survives
+                        // the interstitial) must publish before its hold may freeze anything, else this VP
+                        // number stays on screen for a whole stop (pendingHold persists while stationary).
+                        integPublished = false
+                        if (integrator != null) integAfterVp = true
                         mapGhostState = null // VP mode: no map ghost (the loop hides it)
                         // ① is reached ONLY with no route: this is the `else` of `if (rm != null)`, so the
                         // compiler proved the old `if (rm != null)` here always false. Under the path-
                         // following model a route with NO matching stretches still takes the route branch
-                        // (the integrator races on neutral fill and the map curve is all VP-fill), so the
+                        // (the integrator races the target or neutral fill per [RouteMode.comparator], and the map curve is all
+                        // VP-fill), so the
                         // "route loaded, no recorded stretches" VP case this once distinguished is gone.
                         val vpReason = "no route"
                         // Ride-once VP clock (never re-nulled on a route change) — see vpFirstMoveElapsedS.

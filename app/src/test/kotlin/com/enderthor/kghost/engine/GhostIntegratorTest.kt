@@ -40,10 +40,11 @@ class GhostIntegratorTest {
     }
 
     // Field log 2026-10-02: a first-time user on a brand-new route (no history, no gradient model) read 0 s
-    // for the whole ride. That case alone races the target — and must equal the no-route Ghost-Pace gap.
-    @Test fun `a route with no history and no gradient model races the target per ridden metre`() {
+    // for the whole ride. A TARGET race charges the target per ridden metre — and must equal the no-route
+    // Ghost-Pace gap.
+    @Test fun `a TARGET race charges the target per ridden metre like Ghost-Pace`() {
         val target = 20.0 / 3.6
-        val tier = noHistoryTargetPace(routeHasHistory = false, hasGradeModel = false, targetSpeedMs = target)!!
+        val tier = selectRacePace(RaceComparator.TARGET, true, target, { null }, { null })!!
         val g = newInt(); val src: (Double, Double, Double) -> Double? = { _, _, _ -> tier }
         val curve = GhostPaceSource(target).curve()
         var d = 0.0; var t = 0.0
@@ -56,11 +57,11 @@ class GhostIntegratorTest {
         assertEquals(-vp.gapTimeS, g.gapTimeS, 1e-6) // opposite sign conventions, same verdict
     }
 
-    // Why the caller gates tier 4 on a FRESH fix: the integrator keeps ghostTime across a backward odometer
+    // Why the caller gates the target on a FRESH fix: the integrator keeps ghostTime across a backward odometer
     // step, so dead-reckoned overshoot charged at the target is never refunded, while the stateless VP race
     // refunds it on the snap-back. Charged → lead sticks; neutral (null, the gated path) → lead refunded.
     @Test fun `coasted overshoot charged at the target is a ratchet, neutral is not`() {
-        val tier = noHistoryTargetPace(routeHasHistory = false, hasGradeModel = false, targetSpeedMs = 5.0)!!
+        val tier = selectRacePace(RaceComparator.TARGET, true, 5.0, { null }, { null })!!
         fun ride(chargeCoast: Boolean): Double {
             val g = newInt()
             var coasting = false
@@ -77,12 +78,6 @@ class GhostIntegratorTest {
         assertEquals(0.0, vp, 1e-6)
         assertEquals("charged coast keeps phantom lead", 100.0, ride(chargeCoast = true), 1e-6)
         assertTrue("neutral coast never exceeds the VP verdict", ride(chargeCoast = false) <= vp + 1e-6)
-    }
-
-    @Test fun `any history or a gradient model keeps the neutral fill`() {
-        assertEquals(null, noHistoryTargetPace(routeHasHistory = true, hasGradeModel = false, targetSpeedMs = 5.0))
-        assertEquals(null, noHistoryTargetPace(routeHasHistory = false, hasGradeModel = true, targetSpeedMs = 5.0))
-        assertEquals(0.2, noHistoryTargetPace(routeHasHistory = false, hasGradeModel = false, targetSpeedMs = 5.0)!!, 1e-12)
     }
 
     // A repeated ELAPSED_TIME value against a fresh distance (the caller's combine+sample can emit one)

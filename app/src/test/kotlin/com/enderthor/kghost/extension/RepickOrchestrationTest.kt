@@ -2,6 +2,7 @@ package com.enderthor.kghost.extension
 
 import com.enderthor.kghost.engine.GhostPick
 import com.enderthor.kghost.engine.PacePatch
+import com.enderthor.kghost.engine.RaceComparator
 import com.enderthor.kghost.geo.LatLng
 import com.enderthor.kghost.geo.PolylinePath
 import org.junit.Assert.assertEquals
@@ -24,11 +25,13 @@ class RepickOrchestrationTest {
         polyline = polyline,
         routeName = "R",
         segments = emptyList(),
-        routeGhost = null,
+        historyGhost = null,
+        targetGhost = null,
         routeDistanceM = 400.0,
         pacePatch = PacePatch.build(emptyList()),
         gradePace = null,
         aggregate = null,
+        comparator = RaceComparator.HISTORY,
     )
 
     // --- which branch (the cancels hang off these) ---------------------------------------------
