@@ -725,11 +725,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         val routeName: String,
         val segments: List<LiveSegment>,
         /**
-         * The continuous whole-route ghost — recorded stretches stitched with VP-pace fills (see
-         * [RouteGhost]). Distance axis is ROUTE distance `[0, path.totalM]`. Null only when it could
-         * not be built (no fill pace and gaps present); the tick then falls back to ① VP.
+         * The continuous whole-route ghost a HISTORY race draws — the aggregate's recorded stretches for the
+         * current pick stitched with VP-pace fills (see [RouteGhost]). Distance axis is ROUTE distance
+         * `[0, path.totalM]`. Null only when it could not be built; the marker then hides. Built whatever
+         * [comparator] says: a HISTORY race rerouted onto a TARGET-classified route still needs it.
          */
-        val routeGhost: GhostCurve?,
+        val historyGhost: GhostCurve?,
+        /** The same axis, all target fill (no recorded stretch) — what a TARGET race draws. */
+        val targetGhost: GhostCurve?,
         /**
          * Total route length (m) as reported by the Karoo's NavigatingRoute — the scale that
          * DISTANCE_TO_DESTINATION's remaining distance is measured against, so route position =
@@ -757,8 +760,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          * tier-1 coverage (PacePatch hits) and whether the gradient model has a usable bin — see
          * [chooseComparator]. The tick never reads it per tick: the integrator latches it at creation, so a
          * reroute onto a differently classified route keeps the race's comparator. In TARGET, [segments] is
-         * empty and [routeGhost] is all target fill, so the marker / behind-distance race the same target the
-         * number does instead of a few recorded stretches the number ignores.
+         * empty. The marker / behind-distance never read this: they take [ghostFor] the race's LATCHED
+         * comparator, so they always race what the number races, across any reroute.
          */
         val comparator: RaceComparator,
     ) {
@@ -766,8 +769,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             val aggregate = aggregate ?: return this
             // TARGET stays segment-free across a repick: the pick only changes history, which this race ignores.
             val segments = if (comparator == RaceComparator.TARGET) emptyList() else aggregate.toLiveSegments(pick)
-            return copy(segments = segments, routeGhost = RouteGhost.build(path.totalM, segments, fillSpeedMs))
+            return copy(
+                segments = segments,
+                historyGhost = RouteGhost.build(path.totalM, aggregate.toLiveSegments(pick), fillSpeedMs),
+            )
         }
+
+        /** The curve a race latched to [raceComparator] draws its marker / behind-distance on. */
+        fun ghostFor(raceComparator: RaceComparator): GhostCurve? =
+            if (raceComparator == RaceComparator.TARGET) targetGhost else historyGhost
     }
 
     /**
@@ -1727,8 +1737,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             )
                         }
                     }
-                    // TARGET builds the route ghost with NO recorded stretches (all target fill) so the marker
-                    // and behind-distance measure the same comparator as the number.
+                    // A TARGET route publishes no recorded segments (the number never races them); the marker
+                    // curves are built for both comparators below and picked by the race's latch.
                     val aggSegments = agg?.toLiveSegments(pick).orEmpty()
                     val matched = if (comparator == RaceComparator.TARGET) emptyList() else aggSegments
                     when {
@@ -1740,7 +1750,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         )
                         else -> Timber.i("KVP grid: racing $pick on ${matched.size} stretch(es)${if (justSeeded) " (just seeded)" else ""}")
                     }
-                    // Build the ONE continuous whole-route ghost (recorded stretches + VP-pace fills) that
+                    // Build the continuous whole-route ghosts (recorded stretches + VP-pace fills) that
                     // places the MAP MARKER. Fill pace = the always-present VP target (default 20 km/h), so
                     // the marker always flows across gaps with no recorded history. This VP-fill pace is
                     // UNRELATED to GhostIntegrator's (dead) vpTimePerM constructor arg above — that one no
@@ -1748,7 +1758,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // NOTE: the per-profile target is snapshotted at match time; a mid-route profile
                     // change takes effect only after a re-match (nav state change). The live per-tick gap
                     // still uses the current target via eff.targetSpeedMs — only the VP-fill pace is snapshotted.
-                    val routeGhost = RouteGhost.build(path.totalM, matched, eff.targetSpeedMs)
+                    // BOTH curves are built: the race draws the one for its LATCHED comparator (RouteMode.ghostFor),
+                    // which after a reroute may differ from this route's classification.
+                    val historyGhost = RouteGhost.build(path.totalM, aggSegments, eff.targetSpeedMs)
+                    val targetGhost = RouteGhost.build(path.totalM, emptyList(), eff.targetSpeedMs)
                     // Single atomic publish: path + segments + ghost together so the tick never sees a
                     // NEW path paired with OLD segments. Guarded: only publish if a newer route has not
                     // superseded us (lastMatchedPolyline still ours). The `mine` claim is the polyline
@@ -1757,13 +1770,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // built under the OLD settings over the replacement's.
                     currentCoroutineContext().ensureActive()
                     if (matchStillOwns(mine, lastMatchedPolyline, generation, matchGeneration)) {
-                        routeMode = RouteMode(path, mine, state.name, matched, routeGhost, state.routeDistance, pacePatch, gradePace, agg, comparator)
+                        routeMode = RouteMode(path, mine, state.name, matched, historyGhost, targetGhost, state.routeDistance, pacePatch, gradePace, agg, comparator)
                         // Diagnostic for the scale question: the Karoo's own routeDistance vs the
                         // decoded-polyline length (the scale segments + the ghost curve live on). A large
                         // delta means the host and our polyline disagree about how long the route is,
                         // which would shift every segment bound and the ghost curve against each other.
                         Timber.d(
-                            "route mode ON: ${matched.size} segment(s), routeGhost=${routeGhost != null} " +
+                            "route mode ON: ${matched.size} segment(s), historyGhost=${historyGhost != null} targetGhost=${targetGhost != null} " +
                                 "on '${state.name}' karooLen=${"%.0f".format(state.routeDistance)} " +
                                 "polyLen=${"%.0f".format(path.totalM)} delta=${"%.0f".format(state.routeDistance - path.totalM)} " +
                                 "matchMs=${SystemClock.elapsedRealtime() - matchStartMs}",
@@ -2403,7 +2416,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 // so a new polyline does NOT restart the race. KEEP the integrator, its accrued lead,
                                 // and the race clock (firstMoveElapsedS); only the route-SPECIFIC marker anchor +
                                 // finish state re-bootstrap on the new line (the pace lookup/neutral-fill and the route-
-                                // ghost curve follow rm.pacePatch / rm.routeGhost automatically from the next tick).
+                                // ghost curve follow rm.pacePatch / rm.ghostFor(latched comparator) automatically from the next tick).
                                 // On the FIRST load these are all already null/fresh, so this is a normal cold start.
                                 lastGoodRouteDistM = null // the held rider route position that anchors the marker
                                 distMAtLastGoodM = null
@@ -2417,7 +2430,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 // + the carried lead, so a power-off on the new route resumes correctly.
                             }
                         }
-                        val rg = rm.routeGhost
                         val patch = rm.pacePatch
                         // Fair start: hold --- until the rider first rolls (a stationary wait for a lock is
                         // never a growing deficit). firstMoveElapsedS is stamped above every tick.
@@ -2564,6 +2576,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // The race's LATCHED comparator (set with the integrator, reset only with it) — never the
                         // current route's, so a reroute onto a differently classified route can't mix comparators.
                         val raceCmp = checkNotNull(integComparator) { "integrator without a latched comparator" }
+                        // The marker / behind-distance curve follows the SAME latch (never rm.comparator).
+                        val rg = rm.ghostFor(raceCmp)
                         // HISTORY: tier 1 = this exact road, ridden before (PacePatch); tier 2 = my historical pace
                         // at THIS gradient on a road I have never ridden (GradePace); else the integrator's neutral
                         // fill, which contributes 0. TARGET: the Ghost-Pace target on every metre, never consulting
