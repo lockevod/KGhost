@@ -94,8 +94,17 @@ class RouteModeTest {
         assertEquals(switched.path.totalM / 4.0, switched.ghostFor(RaceComparator.TARGET)!!.totalTimeS, 1e-6)
     }
 
-    private fun historyTotal(mode: KGhostExtension.RouteMode, pick: GhostPick): Double =
-        RouteGhost.build(mode.path.totalM, mode.aggregate!!.toLiveSegments(pick), fillSpeedM = 4.0)!!.totalTimeS
+    // A repick carries the CURRENT Ghost-Pace target: both curves must be refilled at it, or the TARGET marker
+    // stays at the old target while the number charges the new one.
+    @Test fun `repick refills both curves at the current target`() {
+        val switched = routeMode(GhostPick.BEST, RaceComparator.TARGET).withPick(GhostPick.LAST, fillSpeedMs = 5.0)
+
+        assertEquals(switched.path.totalM / 5.0, switched.ghostFor(RaceComparator.TARGET)!!.totalTimeS, 1e-6)
+        assertEquals(historyTotal(switched, GhostPick.LAST, fill = 5.0), switched.ghostFor(RaceComparator.HISTORY)!!.totalTimeS, 1e-6)
+    }
+
+    private fun historyTotal(mode: KGhostExtension.RouteMode, pick: GhostPick, fill: Double = 4.0): Double =
+        RouteGhost.build(mode.path.totalM, mode.aggregate!!.toLiveSegments(pick), fillSpeedM = fill)!!.totalTimeS
 
     private fun routeMode(pick: GhostPick, comparator: RaceComparator = RaceComparator.HISTORY): KGhostExtension.RouteMode {
         val path = PolylinePath(listOf(LatLng(0.0, 0.0), LatLng(0.0, 0.004)))

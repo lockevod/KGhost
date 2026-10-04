@@ -767,11 +767,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     ) {
         fun withPick(pick: GhostPick, fillSpeedMs: Double): RouteMode {
             val aggregate = aggregate ?: return this
+            val history = aggregate.toLiveSegments(pick)
             // TARGET stays segment-free across a repick: the pick only changes history, which this race ignores.
-            val segments = if (comparator == RaceComparator.TARGET) emptyList() else aggregate.toLiveSegments(pick)
+            // BOTH curves are refilled at [fillSpeedMs] — the current Ghost-Pace target — so the target curve
+            // never lags a target edited since load, and the two curves on one mode share one fill speed.
             return copy(
-                segments = segments,
-                historyGhost = RouteGhost.build(path.totalM, aggregate.toLiveSegments(pick), fillSpeedMs),
+                segments = if (comparator == RaceComparator.TARGET) emptyList() else history,
+                historyGhost = RouteGhost.build(path.totalM, history, fillSpeedMs),
+                targetGhost = RouteGhost.build(path.totalM, emptyList(), fillSpeedMs),
             )
         }
 
@@ -1817,7 +1820,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
      * the current target every tick), and including it would clear + fully re-match the route on
      * every keystroke while the rider edits the Ghost Pace mid-navigation — the stale fill pace until
      * the next route load is the long-standing, documented trade (see the match NOTE above).
-     * ONE exception: a pick-only repick rebuilds the ghost curve, and it does so from the CURRENT
+     * ONE exception: a pick-only repick rebuilds BOTH ghost curves, and it does so from the CURRENT
      * target — so a pending Ghost-Pace edit also lands the next time the rider changes pick.
      */
     internal data class MatchSig(val active: Boolean, val raceEnabled: Boolean, val pick: GhostPick)
