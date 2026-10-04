@@ -4,6 +4,8 @@ A [Hammerhead Karoo](https://www.hammerhead.io/) extension that races you agains
 a Ghost Pace riding at a fixed pace, or your own past self on a route — and shows the gap
 live on a data field and as a marker on the map.
 
+Needs All files access: grant it in the KGhost app so it can find your past rides.
+
 ## What it does
 
 - **Ghost Pace** — pick a target pace/speed and race a constant-pace ghost. The live gap (time
@@ -53,9 +55,9 @@ live on a data field and as a marker on the map.
 1. **Install** KGhost (see [Install](#install) below — from the Karoo's Extensions store, or by sideload) and open the app on the Karoo once.
 2. **Add a data field** — on a ride profile, add **Gap (graphic)** and/or **Gap (numeric)** from the
    Extensions section of the Karoo's data-field picker.
-3. **(Optional) Bring in past rides** — in the KGhost app, grant **All files access** when asked, then
-   drop GPX/FIT files into `/sdcard/KGhost/` and tap *Import* (it also scans your Karoo's own ride
-   history). Without this you can still race the fixed-pace Ghost Pace. KGhost needs this access to
+3. **(Optional) Bring in past rides** — in the KGhost app, grant **All files access** when asked. Your
+   past rides are found automatically while the Karoo is idle (the Import button is still there to
+   force a scan, or for GPX/FIT files you drop into `/sdcard/KGhost/`). Without this you can still race the fixed-pace Ghost Pace. KGhost needs this access to
    load your recorded ghosts, so if it's missing the app flags it **on its main screen** and with an
    occasional **in-ride reminder** until you grant it.
 4. **Set your Ghost Pace** — pick a target speed/pace for the fixed-pace mode. In a route race,
