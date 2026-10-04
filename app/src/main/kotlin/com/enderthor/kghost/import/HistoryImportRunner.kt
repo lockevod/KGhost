@@ -112,6 +112,8 @@ object HistoryImportRunner {
     /** Test seams (null in production): the scope jobs launch in, and the deps they run with. */
     internal var scopeForTest: CoroutineScope? = null
     internal var depsForTest: ((Context) -> LibraryDeps)? = null
+    /** Runs inside the completion handler, after its identity check and before its writes. */
+    internal var completionHookForTest: (() -> Unit)? = null
 
     // Guards admission: [job] and [jobIsAuto] change together, and only here.
     private val admission = Any()
@@ -160,10 +162,19 @@ object HistoryImportRunner {
             }
             // On COMPLETION, not in a finally: covers the whole job — lock wait, admission, body — and also
             // a job cancelled before its first dispatch, whose body (and any finally in it) never runs.
+            // Under [admission]: `isCompleted` turns true BEFORE handlers run, so without the monitor a
+            // start() on another thread could be admitted between the identity check and the writes, and
+            // this stale handler would then clear the NEW run's [running]. (Reentrant if a cancel under
+            // the monitor completes the job synchronously.)
             j.invokeOnCompletion { cause ->
-                ifCurrent(j) {
-                    if (cause is CancellationException) _canceled.value = true
-                    _running.value = false
+                synchronized(admission) {
+                    ifCurrent(j) {
+                        completionHookForTest?.invoke()
+                        // An automatic run was never started by the rider: the screen must not say
+                        // "Import canceled." for it.
+                        if (cause is CancellationException && !auto) _canceled.value = true
+                        _running.value = false
+                    }
                 }
             }
             job = j
@@ -316,7 +327,7 @@ object HistoryImportRunner {
 
     /** Cancels the active run only if it is an AUTOMATIC one; a manual import or rebuild is left alone. */
     fun cancelAuto() {
-        synchronized(admission) { if (jobIsAuto) job?.cancel() }
+        synchronized(admission) { if (activeRunIsAuto) job?.cancel() }
     }
 }
 

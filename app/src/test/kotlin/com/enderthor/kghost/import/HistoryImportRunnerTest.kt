@@ -44,6 +44,7 @@ class HistoryImportRunnerTest {
         if (LibraryLock.mutex.isLocked) LibraryLock.mutex.unlock()
         HistoryImportRunner.scopeForTest = null
         HistoryImportRunner.depsForTest = null
+        HistoryImportRunner.completionHookForTest = null
     }
 
     private fun start(auto: Boolean = false, onlyNew: Boolean = false, admit: (suspend () -> Boolean)? = null) =
@@ -122,7 +123,7 @@ class HistoryImportRunnerTest {
         assertTrue(start())
     }
 
-    @Test fun `a stale run cannot overwrite the new run's state`() = test {
+    @Test fun `a run admitted after a cancelled one starts and ends with its own state`() = test {
         fx.fits(1)
         LibraryLock.mutex.lock()
         assertTrue(start())
@@ -140,6 +141,36 @@ class HistoryImportRunnerTest {
         assertFalse(HistoryImportRunner.canceled.value)
         assertFalse(HistoryImportRunner.running.value)
         assertEquals(1, fx.decodes)
+    }
+
+    @Test fun `a stale completion handler cannot overwrite the new run's state`() = test {
+        LibraryLock.mutex.lock() // keeps both A and B queued on the lock
+        assertTrue(start())
+        advanceUntilIdle()
+        var other: Thread? = null
+        var admitted = false
+        // Between A's identity check and its writes, another thread tries to start B. Correct code holds
+        // [admission] there, so B waits until A's handler is done; the join timeout only bounds that wait.
+        HistoryImportRunner.completionHookForTest = {
+            HistoryImportRunner.completionHookForTest = null
+            other = Thread { admitted = start() }.apply { start(); join(500) }
+        }
+        HistoryImportRunner.cancel()
+        advanceUntilIdle()
+        other!!.join()
+        assertTrue("B must be admitted once A has completed", admitted)
+        assertTrue("A's handler must not clear the running B", HistoryImportRunner.running.value)
+        assertFalse(HistoryImportRunner.canceled.value)
+    }
+
+    @Test fun `cancelling an automatic run does not report an import cancel`() = test {
+        LibraryLock.mutex.lock()
+        assertTrue(start(auto = true))
+        advanceUntilIdle()
+        HistoryImportRunner.cancelAuto()
+        advanceUntilIdle()
+        assertFalse(HistoryImportRunner.running.value)
+        assertFalse(HistoryImportRunner.canceled.value)
     }
 
     @Test fun `manual new-only keeps its cutoff`() = test {
