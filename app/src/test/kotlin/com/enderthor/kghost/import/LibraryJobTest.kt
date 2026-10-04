@@ -170,6 +170,19 @@ class LibraryJobTest {
         assertTrue(fx.cfg.value.reconcileOwed())
     }
 
+    @Test fun `a ride saved just before the debt write stays owed`() = runTest {
+        val fx = fixture()
+        fx.duplicateOnly()
+        var first = true
+        val d = fx.deps(sweep = { null })
+        val bumping = d.copy(updateConfig = { t ->
+            if (first) { first = false; fx.cfg.update { it.copy(reconcileGen = it.reconcileGen + 1) } }
+            d.updateConfig(t)
+        })
+        run(bumping).getOrThrow()
+        assertTrue(fx.cfg.value.reconcileOwed())
+    }
+
     @Test fun `a run that stores a track still rebuilds`() = runTest {
         val fx = fixture()
         fx.fits(1)

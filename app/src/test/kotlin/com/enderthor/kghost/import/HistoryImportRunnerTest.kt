@@ -17,6 +17,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import java.io.File
+import com.enderthor.kghost.geo.TrackStore
 import org.junit.rules.TemporaryFolder
 import org.mockito.Mockito.mock
 
@@ -226,5 +228,18 @@ class HistoryImportRunnerTest {
         assertEquals(1, HistoryImportRunner.progress.value?.total)
         assertEquals(ImportProgress.Phase.DONE, HistoryImportRunner.progress.value?.phase)
         assertFalse("the stale cancel line must not sit under the new progress", HistoryImportRunner.canceled.value)
+    }
+
+    @Test fun `a rebuild that re-imports nothing still owes the model it stranded`() = test {
+        TrackStore(fx.tracksDir).add(fx.ride("r1"))
+        TrackStore(fx.tracksDir).add(fx.ride("r2"))
+        fx.fits(2)
+        HistoryImportRunner.depsForTest = { fx.deps(decode = { null }) }
+        HistoryImportRunner.rebuildAll(ctx, cm, lastScanEpoch = 0L)
+        dispatcher.scheduler.advanceUntilIdle()
+        assertTrue("fixture must archive", TrackStore(fx.tracksDir).allTrackIds().isEmpty())
+        // The no-op hand-back must keep the pre-archive debt, so the model is rebuilt over the emptied library.
+        assertTrue(File(fx.tracksDir, "gradepace.json").isFile)
+        assertFalse(fx.cfg.value.gradeModelDirty)
     }
 }
