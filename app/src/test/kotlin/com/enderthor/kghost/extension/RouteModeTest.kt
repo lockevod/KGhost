@@ -6,12 +6,14 @@ import com.enderthor.kghost.engine.GhostPick
 import com.enderthor.kghost.engine.GradePace
 import com.enderthor.kghost.engine.PacePatch
 import com.enderthor.kghost.engine.PerRouteAggregate
+import com.enderthor.kghost.engine.RaceComparator
 import com.enderthor.kghost.engine.RouteGhost
 import com.enderthor.kghost.geo.LatLng
 import com.enderthor.kghost.geo.PolylinePath
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RouteModeTest {
@@ -44,7 +46,20 @@ class RouteModeTest {
         assertSame(original.aggregate, latest.aggregate)
     }
 
-    private fun routeMode(pick: GhostPick): KGhostExtension.RouteMode {
+    // A TARGET race ignores history, so the marker curve must too: a repick must not bring the aggregate's
+    // recorded stretches back into a route ghost the number never races.
+    @Test fun `repick on a TARGET route keeps it segment-free and all target fill`() {
+        val original = routeMode(GhostPick.BEST, RaceComparator.TARGET)
+
+        val switched = original.withPick(GhostPick.LAST, fillSpeedMs = 4.0)
+
+        assertTrue(switched.segments.isEmpty())
+        assertEquals(RaceComparator.TARGET, switched.comparator)
+        // The whole path at the 4 m/s fill, no recorded stretch (those would race at 5 s per 25 m).
+        assertEquals(switched.path.totalM / 4.0, switched.routeGhost!!.totalTimeS, 1e-6)
+    }
+
+    private fun routeMode(pick: GhostPick, comparator: RaceComparator = RaceComparator.HISTORY): KGhostExtension.RouteMode {
         val path = PolylinePath(listOf(LatLng(0.0, 0.0), LatLng(0.0, 0.004)))
         val aggregate = PerRouteAggregate(
             routeKey = "loop:100",
@@ -57,7 +72,7 @@ class RouteModeTest {
                 *List(16) { AggregateNode(dtS = 4.0, count = 2, minDtS = 3.0, lastDtS = 5.0) }.toTypedArray(),
             ),
         )
-        val segments = aggregate.toLiveSegments(pick)
+        val segments = if (comparator == RaceComparator.TARGET) emptyList() else aggregate.toLiveSegments(pick)
         return KGhostExtension.RouteMode(
             path = path,
             polyline = "encoded-loop",
@@ -68,6 +83,7 @@ class RouteModeTest {
             pacePatch = PacePatch.build(emptyList()),
             gradePace = GradePace.Builder().build(),
             aggregate = aggregate,
+            comparator = comparator,
         )
     }
 }

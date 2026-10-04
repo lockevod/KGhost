@@ -21,7 +21,11 @@ use wall-clock time where required.
 
 ## 2. Historical pace lookup
 
-The tick computes one pace value and reuses it for accrual and the field's SEG/GP tag:
+Each route race has one comparator, chosen at route load and latched to the race (a reroute keeps
+it): **TARGET** when history covers under 10% of the planned path (`HISTORY_COVERAGE_MIN`, tier-1
+hits per 25 m sample) and `GradePace` has no usable bin; otherwise **HISTORY**. A TARGET race charges
+the Ghost Pace target on every verdict-eligible metre and never consults history; its map curve is
+all target fill. A HISTORY race uses the tiers below:
 
 1. `PacePatch`: pace on this road, selected by location cell and heading.
 2. `GradePace`: historical pace at the current gradient, when this road has no usable match.
@@ -29,10 +33,12 @@ The tick computes one pace value and reuses it for accrual and the field's SEG/G
 
 Both historical tiers require a fresh trusted GPS fix and `CoastQuality.LIVE`. The gradient tier
 also requires a recent `ELEVATION_GRADE` sample. Dead-reckoned metres do not acquire a historical
-verdict. The constant Ghost Pace target does not supply the normal neutral fill.
+verdict, and neither do they get the target in a TARGET race. A HISTORY race never falls back to the
+target.
 
-The visible field tag **SEG** means either historical tier supplied a verdict; **GP** means neutral
-fill in route mode. Diagnostic logs distinguish `seg=SEG`, `seg=GRADE`, and `seg=GP`.
+The visible field tag names the comparator: **SEG** for a HISTORY race, **GP** for a TARGET race. A
+HISTORY race shows `---` until a tick actually consumes a history metre. Diagnostic logs show the
+answering source (`seg=SEG`, `seg=GRADE`, `seg=TGT`, `seg=GP`) and `cmp=`.
 
 `PacePatch` stores AVERAGE/LAST/BEST reducers together. AVERAGE uses its recency-weighted mean,
 falling back to the last sample when there is only one contributing ride. The rider's exact cell
