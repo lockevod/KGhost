@@ -164,6 +164,10 @@ class HistoryImportRunnerTest {
     }
 
     @Test fun `cancelling an automatic run does not report an import cancel`() = test {
+        // A completed manual run clears whatever cancel line an earlier test left on the shared runner;
+        // an automatic run deliberately no longer does.
+        assertTrue(start())
+        advanceUntilIdle()
         LibraryLock.mutex.lock()
         assertTrue(start(auto = true))
         advanceUntilIdle()
@@ -182,5 +186,45 @@ class HistoryImportRunnerTest {
         assertTrue(start(auto = true, onlyNew = true))
         advanceUntilIdle()
         assertEquals("an automatic run always scans everything", 1, fx.decodes)
+    }
+
+    @Test fun `a zero-work automatic run leaves the manual summary untouched`() = test {
+        fx.fits(1)
+        assertTrue(start())
+        advanceUntilIdle()
+        val manual = HistoryImportRunner.progress.value
+        assertEquals(1, manual?.imported)
+        assertTrue(start(auto = true)) // the ledger skips the one file: nothing to do
+        advanceUntilIdle()
+        assertEquals(manual, HistoryImportRunner.progress.value)
+    }
+
+    @Test fun `a refused automatic run leaves the manual cancel line untouched`() = test {
+        LibraryLock.mutex.lock()
+        assertTrue(start())
+        advanceUntilIdle()
+        HistoryImportRunner.cancel()
+        advanceUntilIdle()
+        LibraryLock.mutex.unlock()
+        assertTrue(HistoryImportRunner.canceled.value)
+        assertTrue(start(auto = true, admit = { false }))
+        advanceUntilIdle()
+        assertTrue(HistoryImportRunner.canceled.value)
+    }
+
+    @Test fun `an automatic run with work replaces the manual summary`() = test {
+        LibraryLock.mutex.lock()
+        assertTrue(start())
+        advanceUntilIdle()
+        HistoryImportRunner.cancel()
+        advanceUntilIdle()
+        LibraryLock.mutex.unlock()
+        assertTrue(HistoryImportRunner.canceled.value)
+        fx.fits(1)
+        assertTrue(start(auto = true))
+        advanceUntilIdle()
+        assertEquals(1, HistoryImportRunner.progress.value?.total)
+        assertEquals(ImportProgress.Phase.DONE, HistoryImportRunner.progress.value?.phase)
+        assertFalse("the stale cancel line must not sit under the new progress", HistoryImportRunner.canceled.value)
     }
 }

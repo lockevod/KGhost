@@ -44,7 +44,7 @@ object HistoryImportRunner {
     val running: StateFlow<Boolean> = _running.asStateFlow()
 
     private val _canceled = MutableStateFlow(false)
-    /** True when the last import ended via [cancel] (cleared at the next [start]). */
+    /** True when the last import ended via [cancel] (cleared at the next manual [start]). */
     val canceled: StateFlow<Boolean> = _canceled.asStateFlow()
 
     private val _pendingCompletion = MutableStateFlow(false)
@@ -130,19 +130,15 @@ object HistoryImportRunner {
 
     /**
      * Single flight: refuses (false) until the previous job has COMPLETED — not merely been cancelled,
-     * which would let a cancelled run's cleanup overlap the next one. On admission resets the per-run
-     * state and marks [running]. The job starts only after it is published as [job], so the identity
+     * which would let a cancelled run's cleanup overlap the next one. On admission marks [running] and,
+     * for a manual run, resets the per-run state; an automatic one keeps the last manual summary on screen
+     * until its scan finds work (see [runImport]). The job starts only after it is published as [job], so the identity
      * check in [ifCurrent] can never miss its own run.
      */
     private fun launchRun(auto: Boolean, rebuild: Boolean, body: suspend (me: Job) -> Unit): Boolean =
         synchronized(admission) {
             if (job?.isCompleted == false) return false
-            _progress.value = null
-            _canceled.value = false
-            _rebuilding.value = rebuild
-            _rebuildRefused.value = false
-            _refusedCounts.value = null
-            _shortfall.value = 0
+            if (!auto) resetRunState(rebuild)
             // Deliberately NOT cleared here: if a prior import finished while the screen was away and the
             // host never refreshed its count, clearing it would lose that refresh. Every terminal path
             // sets it back to true anyway, so leaving a stale `true` only means one extra (idempotent)
@@ -157,7 +153,7 @@ object HistoryImportRunner {
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    publishError(me, e)
+                    publishError(me, e, show = !auto)
                 }
             }
             // On COMPLETION, not in a finally: covers the whole job — lock wait, admission, body — and also
@@ -182,6 +178,15 @@ object HistoryImportRunner {
             j.start()
             true
         }
+
+    private fun resetRunState(rebuild: Boolean) {
+        _progress.value = null
+        _canceled.value = false
+        _rebuilding.value = rebuild
+        _rebuildRefused.value = false
+        _refusedCounts.value = null
+        _shortfall.value = 0
+    }
 
     /** Terminal/progress state is published only by the run that is still the current [job]. */
     private inline fun ifCurrent(me: Job, block: () -> Unit) {
@@ -288,8 +293,16 @@ object HistoryImportRunner {
     }
 
     private suspend fun runImport(me: Job, deps: LibraryDeps, auto: Boolean, onlyNew: Boolean) {
+        // An automatic run surfaces only once its scan finds work: a zero-work or refused one (the common
+        // case, at every Idle) must not wipe the result line of the rider's last Import/Rebuild.
+        var shown = !auto
         try {
-            runLibraryJob(deps, auto, onlyNew) { p -> ifCurrent(me) { _progress.value = p } }
+            runLibraryJob(deps, auto, onlyNew) { p ->
+                ifCurrent(me) {
+                    if (!shown && p.total > 0) { resetRunState(rebuild = false); shown = true }
+                    if (shown) _progress.value = p
+                }
+            }
             // Normal DONE: ask the host to refresh its track count once.
             ifCurrent(me) { _pendingCompletion.value = true }
         } catch (e: CancellationException) {
@@ -301,16 +314,18 @@ object HistoryImportRunner {
             // Surface real failures instead of swallowing them: leave a terminal ERROR (keeping
             // the last counts) so the screen shows an error line rather than a frozen progress
             // bar, and still let the host refresh (chunked flushes may have persisted tracks).
-            publishError(me, e)
+            publishError(me, e, shown)
         }
     }
 
-    private fun publishError(me: Job, e: Exception) {
+    private fun publishError(me: Job, e: Exception, show: Boolean) {
         Timber.w(e, "history import failed")
         ifCurrent(me) {
-            val last = _progress.value
-            _progress.value = (last ?: ImportProgress(ImportProgress.Phase.ERROR, 0, 0, 0, 0, 0))
-                .copy(phase = ImportProgress.Phase.ERROR, message = e.message)
+            if (show) {
+                val last = _progress.value
+                _progress.value = (last ?: ImportProgress(ImportProgress.Phase.ERROR, 0, 0, 0, 0, 0))
+                    .copy(phase = ImportProgress.Phase.ERROR, message = e.message)
+            }
             _pendingCompletion.value = true
         }
     }
