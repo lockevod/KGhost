@@ -77,9 +77,13 @@ class Adv2GateCorruptKeysTest {
         keysFile(dir).writeText("{ this is not a json array")
         assertFalse("precondition: the keys file is corrupt", keysAreParseable(dir))
 
-        // An import that finds NOTHING AT ALL still runs BulkSink.commit() in its finally.
-        val p = runImport(dir, fits, tmp.newFolder("C1-import"), emptyMap())
-        assertEquals(0, p.imported)
+        // An import with work runs BulkSink.commit() in its finally. (One that finds nothing new returns
+        // before the sink opens and leaves the file alone — covered by HistoryImporterTest; the recovery
+        // then happens at the next writer.) A fresh, distinct ride forces the commit here.
+        File(fits, "new.fit").writeText("")
+        val fresh = decimated("fresh-1", 1_800_000_000_000L, Source.FITFILES_SCAN)
+        val p = runImport(dir, fits, tmp.newFolder("C1-import"), mapOf("new.fit" to fresh))
+        assertEquals(1, p.imported)
 
         assertTrue("the corrupt keys file was rewritten as valid JSON", keysAreParseable(dir))
         assertTrue(

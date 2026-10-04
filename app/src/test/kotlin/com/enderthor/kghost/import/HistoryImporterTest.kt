@@ -307,6 +307,62 @@ class HistoryImporterTest {
         }
     }
 
+    @Test fun `an import with nothing new writes nothing`() = runTest {
+        val fitFilesDir = tmp.newFolder("fitfiles")
+        val importDir = tmp.newFolder("import")
+        val tracksDir = tmp.newFolder("tracks")
+        touch(fitFilesDir, "a.fit")
+        val store = TrackStore(tracksDir)
+        val ledgerFile = File(tracksDir, "processed.json")
+        var setterCalls = 0
+        val importer = HistoryImporter(
+            fitFilesDir = fitFilesDir, importDir = importDir, trackStore = store,
+            decimate = { it }, fitDecode = { _, _ -> track("a", "key-a") }, gpxParse = { null },
+            lastScanProvider = { 0L }, lastScanSetter = { setterCalls++ },
+            processedLedgerFile = ledgerFile,
+        )
+        importer.import(onlyNew = false).toList()
+        val bookkeeping = listOf("index.json", "sourcekeys.json", "processed.json").map { File(tracksDir, it) }
+        bookkeeping.forEach { assertTrue("${it.name} must exist after the first import", it.exists()) }
+        // Sentinel mtimes: any rewrite in the second import moves them off 1_000.
+        bookkeeping.forEach { it.setLastModified(1_000L) }
+        val callsBefore = setterCalls
+
+        val last = importer.import(onlyNew = false).toList().last()
+
+        assertEquals(ImportProgress.Phase.DONE, last.phase)
+        assertEquals(0, last.imported)
+        bookkeeping.forEach { assertEquals("${it.name} must not be rewritten", 1_000L, it.lastModified()) }
+        assertEquals(callsBefore, setterCalls)
+    }
+
+    @Test fun `stored counts survive a cancel inside the scan-time write`() = runTest {
+        val fitFilesDir = tmp.newFolder("fitfiles")
+        val importDir = tmp.newFolder("import")
+        val tracksDir = tmp.newFolder("tracks")
+        val flushEvery = 25
+        repeat(2 * flushEvery + 3) { i -> touch(fitFilesDir, "f%02d.fit".format(i)).setLastModified(1_000L + i) }
+        val stored = ArrayList<Pair<Int, Int>>()
+        var setterCalls = 0
+        val importer = HistoryImporter(
+            fitFilesDir = fitFilesDir, importDir = importDir, trackStore = TrackStore(tracksDir),
+            decimate = { it },
+            fitDecode = { f, _ -> val id = f.name.removeSuffix(".fit"); track("t$id", "key-$id") },
+            gpxParse = { null },
+            lastScanProvider = { 0L },
+            lastScanSetter = { if (setterCalls++ == 0) throw CancellationException("cancel in scan write") },
+            processedLedgerFile = File(tracksDir, "processed.json"),
+            onStored = { a, e -> stored.add(a to e) },
+        )
+        var cancelled = false
+        importer.import(onlyNew = false)
+            .catch { e -> if (e is CancellationException) cancelled = true else throw e }
+            .toList()
+
+        assertTrue(cancelled)
+        assertEquals(listOf(flushEvery to 0), stored)
+    }
+
     @Test fun `onlyNew with future lastScan processes nothing`() = runTest {
         val fitFilesDir = tmp.newFolder("fitfiles")
         val importDir = tmp.newFolder("import")
