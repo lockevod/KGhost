@@ -198,7 +198,8 @@ Device-level switches and recorded-track-library management (not per profile):
 - **KGhost enabled** — the master on/off. When off, KGhost does nothing on any profile (no ghost, no
   recording, no alerts).
 - **Record rides** — auto-record each ride as a GPS track for future ghost comparison.
-- **Import history** — scan the Karoo's `/sdcard/FitFiles` and import GPX/FIT from `/sdcard/KGhost/`
+- **Import history** — past rides on the Karoo are found automatically while it is idle; this button imports
+  files you dropped in `/sdcard/KGhost/` right away, or forces a scan of the Karoo's `/sdcard/FitFiles` and that folder
   (needs all-files access); "import all" or "new only". Shows the recorded-track count and, after a
   scan, a summary: *imported · duplicates · not valid*. **Not valid** is not an error — it just counts
   files that can't be used as a ghost because they lack the GPS position **and** per-point timestamps a
@@ -259,7 +260,7 @@ reaches the store:
 3. Add the KGhost data fields to a ride profile and/or open the KGhost app to configure it.
 
 Whichever install method you used, to import external rides you must grant **All files access** when prompted (used to read
-`/sdcard/FitFiles` and `/sdcard/KGhost`). Without it KGhost can't load recorded ghosts and runs as a
+`/sdcard/FitFiles` and `/sdcard/KGhost`, and what lets KGhost find your past rides automatically). Without it KGhost can't load recorded ghosts and runs as a
 fixed-pace virtual partner only — so it surfaces the missing access on its main screen and with an
 occasional in-ride reminder until you grant it.
 
