@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.app.PendingIntent
+import android.content.Intent
 import android.graphics.Rect
 import android.widget.RemoteViews
 import com.enderthor.kghost.R
@@ -14,6 +16,10 @@ import com.enderthor.kghost.engine.GapState
 import com.enderthor.kghost.engine.GapStateHolder
 import com.enderthor.kghost.engine.RenderPrefs
 import com.enderthor.kghost.engine.SegmentInfoHolder
+import com.enderthor.kghost.activity.MainActivity
+import com.enderthor.kghost.managers.PermissionState
+import com.enderthor.kghost.managers.StoragePermission
+import com.enderthor.kghost.managers.permissionNotice
 import io.hammerhead.karooext.extension.DataTypeImpl
 import io.hammerhead.karooext.internal.ViewEmitter
 import io.hammerhead.karooext.models.UpdateGraphicConfig
@@ -51,7 +57,8 @@ import timber.log.Timber
  * is drawn in the amber estimate colour (the YOU dot keeps its ahead/behind hue). A legitimate stop
  * shows the real gap; only a truly sustained loss (the extension gives up and clears) returns to `---`.
  *
- * Passive readout, so there is no tap PendingIntent.
+ * Passive readout, so there is no tap PendingIntent — EXCEPT while all-files access is missing: the
+ * field then shows a short "Tap: permission" notice and a tap opens [MainActivity] (permission banner).
  *
  * ## Concurrency / render-buffer ownership
  * ALL mutable render state (the reused Bitmap+Canvas, every Paint that is mutated during draw,
@@ -117,6 +124,21 @@ class GapGraphicDataType(
         )
     }
 
+    // Cached: the real check is a system call and every frame + heartbeat asks.
+    private val permissionState = PermissionState(
+        check = { StoragePermission.hasAllFilesAccess(context) },
+        nowMs = android.os.SystemClock::elapsedRealtime,
+    )
+
+    // Built once; immutable + UPDATE_CURRENT so the same token serves every frame.
+    private val permissionTap: PendingIntent by lazy {
+        PendingIntent.getActivity(
+            context, 0,
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+    }
+
     override fun startView(context: Context, config: ViewConfig, emitter: ViewEmitter) {
         Timber.d("KVP gap-graphic startView preview=${config.preview}")
         // Each placement gets its OWN independent scope, cancelled ONLY by its own setCancellable
@@ -157,12 +179,14 @@ class GapGraphicDataType(
             // Mode tag: route segment (②) when SegmentInfoHolder.info is non-null, else fixed-pace
             // Ghost Pace (①). Preview always shows the Ghost-Pace sample.
             val seedIsRoute = if (config.preview) false else SegmentInfoHolder.info.value != null
+            val seedNotice = permissionNotice(permissionState.missing(), config.preview)
             val seedBmp = renderer.draw(
                 sw, sh, seedState, RenderPrefs.gapDisplay.value, seedIsRoute,
-                RenderPrefs.imperialDistance.value, context.isKarooNightMode(),
+                RenderPrefs.imperialDistance.value, context.isKarooNightMode(), seedNotice,
             )
             val seedRv = RemoteViews(context.packageName, R.layout.field_gap)
             seedRv.setImageViewBitmap(R.id.field_gap_image, seedBmp)
+            if (seedNotice) seedRv.setOnClickPendingIntent(R.id.field_gap_image, permissionTap)
             // The seed runs SYNCHRONOUSLY on the host's binder thread, outside any coroutine and outside
             // viewJob's catch. updateView is the same non-oneway transact as onNext, so a host that dies
             // mid-startView throws straight back into Binder.execTransact. That fails the transaction
@@ -238,9 +262,12 @@ class GapGraphicDataType(
                         // draw — reading it twice risked a key computed with one value and pixels drawn
                         // with the other (a key/render skew that defeats the dedup), plus a wasted read.
                         val dark = context.isKarooNightMode()
+                        // Re-read on EVERY frame incl. the heartbeat (cached 5 s) so a grant flips the key
+                        // and the cached RemoteViews with the click intent is not re-served stale.
+                        val notice = permissionNotice(permissionState.missing(), config.preview)
                         val key = gapRenderKey(
                             state, gapDisplay, isRoute,
-                            dark = dark, imperial = imperial,
+                            dark = dark, imperial = imperial, permissionNotice = notice,
                         )
                         if (isHeartbeat) {
                             val cached = lastRv
@@ -253,9 +280,10 @@ class GapGraphicDataType(
                             return@collect // pixel-identical change → skip redraw + IPC
                         }
                         val (w, h) = bitmapSize(config)
-                        val bmp = renderer.draw(w, h, state, gapDisplay, isRoute, imperial, dark)
+                        val bmp = renderer.draw(w, h, state, gapDisplay, isRoute, imperial, dark, notice)
                         val rv = RemoteViews(context.packageName, R.layout.field_gap)
                         rv.setImageViewBitmap(R.id.field_gap_image, bmp)
+                        if (notice) rv.setOnClickPendingIntent(R.id.field_gap_image, permissionTap)
                         emitter.updateView(rv)
                         if (!config.preview && !loggedFirstActive && state.active) {
                             loggedFirstActive = true
@@ -337,7 +365,7 @@ class GapGraphicDataType(
             reuseCanvas = null
         }
 
-        fun draw(w: Int, h: Int, state: GapState, gapDisplay: GapDisplay, isRoute: Boolean, imperial: Boolean, dark: Boolean): Bitmap {
+        fun draw(w: Int, h: Int, state: GapState, gapDisplay: GapDisplay, isRoute: Boolean, imperial: Boolean, dark: Boolean, notice: Boolean = false): Bitmap {
             // Reuse the bitmap+Canvas across frames; only recreate when the target size changes
             // (e.g. config.viewSize changed). Same-coroutine: this recreate cannot race a draw from
             // another scope. RemoteViews copies the bitmap into the Binder parcel at updateView
@@ -364,6 +392,18 @@ class GapGraphicDataType(
             // Blank ONLY on !active (no target / not recording / no first data). A GPS loss does NOT
             // blank: the value keeps coasting and is drawn in the estimate colour instead (a navigator
             // should keep showing a best estimate through a dropout, not go dark).
+            if (notice) {
+                // Short localized call-to-action instead of the gap / `---`, sized to fit the width.
+                val msg = context.getString(R.string.field_permission_notice)
+                textPaint.color = neutral
+                textPaint.textSize = h * 0.3f
+                val maxW = w * 0.9f
+                val measured = textPaint.measureText(msg)
+                if (measured > maxW) textPaint.textSize *= maxW / measured
+                textPaint.getTextBounds(msg, 0, msg.length, textBounds)
+                canvas.drawText(msg, w / 2f, h / 2f - textBounds.exactCenterY(), textPaint)
+                return bmp
+            }
             val waiting = !state.active
             if (waiting) {
                 // Neutral `---` centred — waiting for data, not disabled.

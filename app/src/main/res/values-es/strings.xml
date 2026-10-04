@@ -137,4 +137,5 @@
     <string name="import_canceled_rebuild">Reconstrucción cancelada. Tus rutas antiguas están archivadas: pulsa \"Todos\" para recuperarlas.</string>
     <string name="import_error">La importación falló. Revisa el acceso al almacenamiento e inténtalo de nuevo.</string>
     <string name="discovery_found_rides">KGhost: %1$d salidas encontradas</string>
+    <string name="field_permission_notice">Toca: permiso</string>
 </resources>
