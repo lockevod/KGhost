@@ -3,9 +3,9 @@
   "packageName": "com.enderthor.kghost",
   "latestApkUrl": "https://github.com/lockevod/KGhost/releases/latest/download/kghost.apk",
   "iconUrl": "https://github.com/lockevod/KGhost/releases/latest/download/kghost.png",
-  "latestVersion": "1.2.2",
-  "latestVersionCode": 2026100301,
+  "latestVersion": "1.3.0",
+  "latestVersionCode": 2026100401,
   "developer": "github.com/lockevod",
   "description": "Race against a ghost on your Karoo: a fixed-pace Ghost Pace or your own past self on a route, stitched into one continuous ghost. Shows the live time/distance gap on graphical and numeric data fields and draws the ghost's position on the map. Records each ride automatically and can import GPX/FIT ghosts dropped in /sdcard/KGhost. Keeps estimating during GPS dropouts.",
-  "releaseNotes": "If the Karoo ride app restarts in the middle of a ride, KGhost now keeps your lead on the ghost when the ride resumes instead of starting again from zero."
+  "releaseNotes": "On a route you have barely ridden before, the ghost now races your Ghost Pace target instead of sitting at 0 for the whole ride; once you have enough history on the route it races your past self again. Until there is something to compare you with, the gap shows --- instead of a misleading 0, and the SEG/GP tag now tells you which one you are racing (SEG = your past self, GP = the Ghost Pace target)."
 }
