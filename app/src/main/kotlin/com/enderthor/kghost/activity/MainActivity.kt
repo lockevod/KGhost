@@ -28,6 +28,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.enderthor.kghost.R
 import com.enderthor.kghost.data.KGhostConfig
+import com.enderthor.kghost.extension.AutoDiscoveryHub
 import com.enderthor.kghost.geo.TrackStore
 import com.enderthor.kghost.geo.TrackStorage
 import com.enderthor.kghost.managers.ConfigurationManager
@@ -67,6 +68,13 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    // Same process as the extension: returning here (e.g. from granting all-files access) asks it to
+    // discover past rides. It decides — a request mid-ride admits nothing.
+    override fun onResume() {
+        super.onResume()
+        AutoDiscoveryHub.instance?.request("app-resume")
+    }
 }
 
 /**
@@ -105,9 +113,10 @@ fun TabLayout() {
         onPauseOrDispose { }
     }
 
-    // The settings Activity runs in its OWN process (separate from the extension service), so it needs
-    // its own KarooSystemService to read the rider's unit system (UserProfile.preferredUnit.distance)
-    // and show the Ghost Pace target in km/h or mph. Connected for the lifetime of this screen.
+    // The settings Activity shares the extension's process but not its KarooSystemService binding (that
+    // one is private to the service and may not be connected yet), so it needs its own KarooSystemService
+    // to read the rider's unit system (UserProfile.preferredUnit.distance) and show the Ghost Pace target
+    // in km/h or mph. Connected for the lifetime of this screen.
     var imperial by remember { mutableStateOf(false) }
     var activeProfileId by remember { mutableStateOf<String?>(null) }
     DisposableEffect(Unit) {

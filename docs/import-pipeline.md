@@ -89,6 +89,23 @@ The **invariant** `imported + skippedDuplicates + failed == total` holds for eve
 decode/decimate result is either `Failed` (null decode, `<2` decimated points, or a thrown exception) or
 a track that lands in a chunk and becomes `imported | skipped` on flush.
 
+## 3a. Automatic discovery
+
+`AutoDiscovery` (extension) starts an automatic import (`HistoryImportRunner.start(auto = true)`) with no
+rider action. Triggers: every transition into `RideState.Idle` (first one after startup and every ride
+end) and the app's resume (via `AutoDiscoveryHub`). Leaving Idle cancels a running *automatic* import;
+a manual one is never touched. The decision (`shouldAutoImport`: observed Idle + all-files access) is
+taken by `admit` only after the runner holds `LibraryLock`, so a queued request is judged on the state of
+that moment. One request is kept pending while a run is active and re-issued when it ends.
+
+`runLibraryJob` is lock-free (the caller holds `LibraryLock`). Before the first decode it persists two
+durable debts: `gradeModelDirty` (grade-pace model rebuild) and `reconcileGen` (twin reconciliation, paid
+by acking `reconcileAckGen` after the sweep). They are cleared only after the work verifiably succeeded,
+and `dischargeDebts` runs on every run, so a cancelled or crashed run's debt is paid next time. Empty-work
+fast path: a scan with nothing new sets no debts and rewrites no bookkeeping. Automatic runs add what they
+stored to `pendingFoundRides`, announced once by the ride-start alert "KGhost: N past rides found". Without
+access the graphical gap field shows "Tap: permission" and tapping opens the app.
+
 ## 4. The four performance layers (the ~1200-ride story)
 
 A cold "import all" over a big library used to take several minutes; a re-run took nearly as long. Four

@@ -35,7 +35,7 @@ class GradePaceRebuildBenchmarkTest {
         repeat(4) { iteration ->
             val start = System.nanoTime()
             val builder = GradePace.Builder()
-            store.forEachTrack(builder::add)
+            store.forEachTrack(action = builder::add)
             val model = builder.build()
             GradePaceStore(dir).save(model)
             val ms = (System.nanoTime() - start) / 1_000_000.0

@@ -52,6 +52,7 @@ import com.enderthor.kghost.geo.atomicWriteText
 import com.enderthor.kghost.geo.BBox
 import com.enderthor.kghost.geo.TIDY_RULE_VERSION
 import com.enderthor.kghost.geo.GradePaceStore
+import com.enderthor.kghost.geo.LibraryLock
 import com.enderthor.kghost.geo.LatLng
 import com.enderthor.kghost.geo.Polyline
 import com.enderthor.kghost.geo.PolylinePath
@@ -59,6 +60,7 @@ import com.enderthor.kghost.geo.TrackRecorder
 import com.enderthor.kghost.geo.TrackStore
 import com.enderthor.kghost.geo.TrackStorage
 import com.enderthor.kghost.geo.routeKeyOf
+import com.enderthor.kghost.import_.HistoryImportRunner
 import com.enderthor.kghost.managers.ConfigurationManager
 import com.enderthor.kghost.managers.PermAlertState
 import com.enderthor.kghost.managers.PermissionAlertSchedule
@@ -424,6 +426,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private lateinit var configManager: ConfigurationManager
     private val activeConfig = MutableStateFlow(KGhostConfig())
+    // Latest RideState from the host, null until the first one arrives ("unknown" — never treated as
+    // Idle). Read by [autoDiscovery], which owns every automatic library pass.
+    private val rideState = MutableStateFlow<RideState?>(null)
+    private var autoDiscovery: AutoDiscovery? = null
     private var tickJob: Job? = null
     // GPS location consumer. Subscribed only while Recording (started in startTick, cancelled in
     // stopTick/stopTickAndJoin) so GPS fixes aren't consumed when the recorder/projector don't need
@@ -975,7 +981,15 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             .launchIn(scope)
         // One-time backlog sweep: clean the EXISTING library once (off-Main), then stamp the epoch so it
         // never re-runs. Gated on autoTidy; sweep() has its own hard cap for a degenerate library.
-        scope.launch(Dispatchers.IO) {
+        // Under the library lock: these passes mutate the library, so no import may interleave. No
+        // discovery request from in here — the first Idle makes it, and its run waits for this lock.
+        scope.launch(Dispatchers.IO) { LibraryLock.mutex.withLock {
+            // Stamp the discovery epoch once, BEFORE the first automatic run can take this lock: only rides
+            // that started before it count as "found" (see KGhostConfig.discoveryEpoch).
+            val now = System.currentTimeMillis()
+            if (!configManager.updateConfig { if (it.discoveryEpoch == 0L) it.copy(discoveryEpoch = now) else it }) {
+                Timber.w("KVP discovery: epoch not persisted; found rides are not counted until it is")
+            }
             // Pay the index's lazy one-time costs (legacy rebuild) and repair index/file drift NOW,
             // at service start off-Main — not under the indexLock on the FIRST route match of a ride.
             runCatching { trackStore().prewarmAndReconcile() }
@@ -1017,7 +1031,24 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     }
                     .onFailure { Timber.w(it, "KVP tidy: backlog sweep failed — not stamped, will retry") }
             }
-        }
+        } }
+        autoDiscovery = AutoDiscovery(
+            scope = scope,
+            rideState = rideState,
+            runActive = HistoryImportRunner.running,
+            hasAccess = { StoragePermission.hasAllFilesAccess(applicationContext) },
+            // Fresh from the store: admit runs on the runner's IO scope, after the lock wait.
+            masterEnabled = { configManager.loadConfigFlow().first().masterEnabled },
+            start = { admit ->
+                // onlyNew=false: the ledger skips unchanged files. lastScanEpoch read NOW (the runner's
+                // watermark sync starts from it), not captured at service start.
+                HistoryImportRunner.start(
+                    applicationContext, configManager, onlyNew = false,
+                    lastScanEpoch = activeConfig.value.lastScanEpoch, auto = true, admit = admit,
+                )
+            },
+            cancelAuto = HistoryImportRunner::cancelAuto,
+        ).also { AutoDiscoveryHub.instance = it }
         karooSystem.connect { connected -> if (connected) onConnected() }
         scheduleUpdateCheck()
     }
@@ -1137,6 +1168,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         lastRejoinActive = true
         rideJob = karooSystem.streamRide().onEach { state ->
             Timber.d("KVP ride state=$state tickActive=${tickJob?.isActive} route=${routeMode != null}")
+            // Published first: a ride start cancels an automatic import before anything else runs, and
+            // every transition into Idle (startup included, ride end included) requests one.
+            val prevState = rideState.value
+            rideState.value = state
             when (state) {
                 is RideState.Recording -> {
                     // A resume restarts the GPS-lost clock: a long pause indoors is not a loss to report
@@ -1149,6 +1184,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // marker forward — the first post-resume tick simply glides it to the new value.
                     startTick()
                     maybeAlertMissingPermission()
+                    if (isFreshRideStart(prevState, state)) maybeAlertFoundRides()
                 }
                 is RideState.Paused -> {
                     // The clock is tied to ELAPSED_TIME, which the ride app already pauses, so the tick
@@ -1951,6 +1987,33 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 }
                 Timber.d("KVP perm alert fired count=${next.firedCount}")
             }
+        }
+    }
+
+    /**
+     * At ride start, announces once what automatic discovery stored since the last ride. The count is
+     * cleared BEFORE the dispatch (see [consumeFoundRides]); same colour/id pattern as the permission
+     * alert, info hue.
+     */
+    private fun maybeAlertFoundRides() {
+        scope.launch(Dispatchers.IO) {
+            val n = consumeFoundRides(
+                load = { configManager.loadConfigFlow().first() },
+                update = configManager::updateConfig,
+            ) ?: return@launch
+            val now = System.currentTimeMillis()
+            karooSystem.dispatch(
+                InRideAlert(
+                    id = "kghost-found-$now",
+                    icon = R.drawable.ic_ghost,
+                    title = applicationContext.resources.getQuantityString(R.plurals.discovery_found_rides, n, n),
+                    detail = null,
+                    autoDismissMs = 10_000L,
+                    backgroundColor = R.color.segment_alert_bg,
+                    textColor = R.color.segment_alert_text,
+                ),
+            )
+            Timber.i("KVP discovery: found-rides alert n=$n")
         }
     }
 
@@ -3105,10 +3168,18 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     val store = trackStore()
                     if (store.add(track)) {
                         Timber.i("KVP recording: saved track ${track.id} (${track.points.size} pts) → ${trackStoreDir}")
+                        // Owe a reconcile: an import flushing concurrently may have stored this ride's FIT
+                        // too (the add above is deliberately outside the lock). No gradeModelDirty here —
+                        // only import jobs, under the lock, may set it.
+                        if (!configManager.updateConfig { it.copy(reconcileGen = it.reconcileGen + 1) }) {
+                            Timber.w("KVP recording: reconcile debt not persisted for ${track.id}")
+                        }
                         // Auto-clean: archive near-duplicate rides of this route so BEST/LAST stay solid.
                         if (activeConfig.value.autoTidy) {
-                            val archived = runCatching { store.tidyGroup(track) }.getOrElse { e ->
-                                Timber.w(e, "KVP tidy: tidyGroup failed for ${track.id}"); 0
+                            val archived = LibraryLock.mutex.withLock {
+                                runCatching { store.tidyGroup(track) }.getOrElse { e ->
+                                    Timber.w(e, "KVP tidy: tidyGroup failed for ${track.id}"); 0
+                                }
                             }
                             if (archived > 0) Timber.i("KVP tidy: archived $archived near-duplicate(s) of ${track.id}")
                         }
@@ -3133,6 +3204,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     }
 
     override fun onDestroy() {
+        if (AutoDiscoveryHub.instance === autoDiscovery) AutoDiscoveryHub.instance = null
+        // The runner's scope outlives the service: an automatic run must not keep scanning without it.
+        HistoryImportRunner.cancelAuto()
         stopTick()
         scope.coroutineContext[Job]?.cancel()
         if (::karooSystem.isInitialized) karooSystem.disconnect()

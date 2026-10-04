@@ -37,12 +37,14 @@ class GradePaceStore(private val dir: File) {
         }
     }
 
-    fun save(model: GradePace) {
-        runCatching {
-            if (!dir.exists()) dir.mkdirs()
-            atomicWriteText(file, jsonForStorage.encodeToString(model.toDto()))
-        }.onFailure { Timber.w(it, "could not persist the grade-pace model") }
-    }
+    /**
+     * True only if the model reached disk: [atomicWriteText] preserves the old file on an IO error and
+     * reports it solely through its Boolean, so callers clearing a "model dirty" debt must see it.
+     */
+    fun save(model: GradePace): Boolean = runCatching {
+        if (!dir.exists()) dir.mkdirs()
+        atomicWriteText(file, jsonForStorage.encodeToString(model.toDto()))
+    }.onFailure { Timber.w(it, "could not persist the grade-pace model") }.getOrDefault(false)
 
     companion object {
         const val FILE_NAME = "gradepace.json"

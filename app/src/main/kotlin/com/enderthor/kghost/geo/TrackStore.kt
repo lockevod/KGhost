@@ -84,8 +84,11 @@ class TrackStore(private val dir: File) {
      * library (see [allTracksMeta]). Unparseable files are skipped. Not the hot match path, which prunes
      * via the spatial index ([loadCandidates]/[rankedCandidateIdsFor]).
      */
-    fun forEachTrack(action: (RecordedTrack) -> Unit) {
-        for (id in allTrackIds()) loadTrack(id)?.let(action)
+    fun forEachTrack(checkCancel: () -> Unit = {}, action: (RecordedTrack) -> Unit) {
+        for (id in allTrackIds()) {
+            checkCancel()
+            loadTrack(id)?.let(action)
+        }
     }
 
     /**
@@ -331,6 +334,10 @@ class TrackStore(private val dir: File) {
         private val failedIds = mutableSetOf<String>()
         val lastFailedIds: Set<String> get() = failedIds.toSet() // copy: the backing set is cleared per call
 
+        /** The tracks the LAST [addAll] newly stored; same per-call idiom as [lastFailedIds]. */
+        private val addedTracks = mutableListOf<RecordedTrack>()
+        val lastAdded: List<RecordedTrack> get() = addedTracks.toList()
+
         private var recordedByKey: Map<String, String>? = null
 
         private fun recordedLookup(): Map<String, String> =
@@ -346,8 +353,8 @@ class TrackStore(private val dir: File) {
         fun addAll(tracks: List<RecordedTrack>): Int {
             lastEnrichedCount = 0
             failedIds.clear()
+            addedTracks.clear()
             if (tracks.isEmpty()) return 0
-            var added = 0
             synchronized(indexLock) {
                 // Pick up keys written by a concurrent live recorder between chunks.
                 known += sourceKeys().keys
@@ -370,10 +377,10 @@ class TrackStore(private val dir: File) {
                     if (t.source == Source.RECORDED && t.sourceKey.isNotEmpty()) {
                         recordedByKey = (recordedByKey ?: emptyMap()) + (t.sourceKey to t.id)
                     }
-                    added++
+                    addedTracks += t
                 }
             }
-            return added
+            return addedTracks.size
         }
 
         /** Persist the accumulated index + sourcekeys once (fsynced), UNION-MERGED onto the CURRENT
@@ -463,13 +470,16 @@ class TrackStore(private val dir: File) {
      * The caller must be able to tell those apart: a skip that reads as "completed, archived 0" would
      * let the one-shot upgrade sweep stamp itself done on exactly the libraries it never examined.
      */
-    fun sweep(maxTracks: Int = sweepMaxDefault): Int? = synchronized(tidyLock) {
+    fun sweep(maxTracks: Int = sweepMaxDefault, checkCancel: () -> Unit = {}): Int? = synchronized(tidyLock) {
         val ids = allTrackIds()
         if (ids.size > maxTracks) {
             Timber.i("KVP tidy: sweep skipped (%d tracks > cap %d)", ids.size, maxTracks)
             return@synchronized null
         }
-        val metas = ids.mapNotNull { id -> loadTrack(id)?.let { trackMetaOf(it) } }
+        val metas = ids.mapNotNull { id ->
+            checkCancel()
+            loadTrack(id)?.let { trackMetaOf(it) }
+        }
         // archive()'s return, not toArchive.size: report what moved, not what we intended to move.
         archive(selectArchivable(metas))
     }

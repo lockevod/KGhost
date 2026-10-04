@@ -1,8 +1,7 @@
 package com.enderthor.kghost.import_
 
 import android.content.Context
-import com.enderthor.kghost.engine.GradePace
-import com.enderthor.kghost.geo.GradePaceStore
+import com.enderthor.kghost.geo.LibraryLock
 import com.enderthor.kghost.geo.Source
 import com.enderthor.kghost.geo.TrackStorage
 import com.enderthor.kghost.geo.TrackIdentity
@@ -10,13 +9,17 @@ import com.enderthor.kghost.geo.TrackStore
 import com.enderthor.kghost.managers.ConfigurationManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import timber.log.Timber
 import java.io.File
 
@@ -41,7 +44,7 @@ object HistoryImportRunner {
     val running: StateFlow<Boolean> = _running.asStateFlow()
 
     private val _canceled = MutableStateFlow(false)
-    /** True when the last import ended via [cancel] (cleared at the next [start]). */
+    /** True when the last import ended via [cancel] (cleared at the next manual [start]). */
     val canceled: StateFlow<Boolean> = _canceled.asStateFlow()
 
     private val _pendingCompletion = MutableStateFlow(false)
@@ -102,42 +105,144 @@ object HistoryImportRunner {
     val shortfall: StateFlow<Int> = _shortfall.asStateFlow()
 
     /** The two directories an import scans — one definition, so [rebuildAll]'s "are the source files
-     *  still there?" guard counts exactly the files [runImport] will read. */
+     *  still there?" guard counts exactly the files the import will read. */
     private val fitFilesDir = File("/sdcard/FitFiles")
     private val importDir = File("/sdcard/KGhost")
+
+    /** Test seams (null in production): the scope jobs launch in, and the deps they run with. */
+    internal var scopeForTest: CoroutineScope? = null
+    internal var depsForTest: ((Context) -> LibraryDeps)? = null
+    /** Runs inside the completion handler, after its identity check and before its writes. */
+    internal var completionHookForTest: (() -> Unit)? = null
+
+    // Guards admission: [job] and [jobIsAuto] change together, and only here.
+    private val admission = Any()
 
     @Volatile
     private var job: Job? = null
 
+    @Volatile
+    private var jobIsAuto = false
+
+    /** True while the admitted run is an AUTOMATIC one (queued on the lock or running). */
+    val activeRunIsAuto: Boolean
+        get() = synchronized(admission) { jobIsAuto && job?.isCompleted == false }
+
     /**
-     * Shared start-of-run guard: no-op (returns false) if a job is already active, otherwise resets
-     * the per-run state and marks [running] true. Used by both [start] and [rebuildAll] so a
-     * double-tap or a screen re-entry that re-fires can't stack two scans.
+     * Single flight: refuses (false) until the previous job has COMPLETED — not merely been cancelled,
+     * which would let a cancelled run's cleanup overlap the next one. On admission marks [running] and,
+     * for a manual run, resets the per-run state; an automatic one keeps the last manual summary on screen
+     * until its scan finds work (see [runImport]). The job starts only after it is published as [job], so the identity
+     * check in [ifCurrent] can never miss its own run.
      */
-    private fun beginRun(): Boolean {
-        if (job?.isActive == true) return false
+    private fun launchRun(auto: Boolean, rebuild: Boolean, body: suspend (me: Job) -> Unit): Boolean =
+        synchronized(admission) {
+            if (job?.isCompleted == false) return false
+            if (!auto) resetRunState(rebuild)
+            // Deliberately NOT cleared here: if a prior import finished while the screen was away and the
+            // host never refreshed its count, clearing it would lose that refresh. Every terminal path
+            // sets it back to true anyway, so leaving a stale `true` only means one extra (idempotent)
+            // recount mid-run; clearing it could silently drop one. So we let the host consume it.
+            _running.value = true
+            val j = (scopeForTest ?: scope).launch(start = CoroutineStart.LAZY) {
+                val me = coroutineContext.job
+                // Backstop for what fails OUTSIDE the import proper (resolving the dirs, [start]'s admit):
+                // an exception escaping a SupervisorJob child would crash the process.
+                try {
+                    body(me)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    publishError(me, e, show = !auto)
+                }
+            }
+            // On COMPLETION, not in a finally: covers the whole job — lock wait, admission, body — and also
+            // a job cancelled before its first dispatch, whose body (and any finally in it) never runs.
+            // Under [admission]: `isCompleted` turns true BEFORE handlers run, so without the monitor a
+            // start() on another thread could be admitted between the identity check and the writes, and
+            // this stale handler would then clear the NEW run's [running]. (Reentrant if a cancel under
+            // the monitor completes the job synchronously.)
+            j.invokeOnCompletion { cause ->
+                synchronized(admission) {
+                    ifCurrent(j) {
+                        completionHookForTest?.invoke()
+                        // An automatic run was never started by the rider: the screen must not say
+                        // "Import canceled." for it.
+                        if (cause is CancellationException && !auto) _canceled.value = true
+                        _running.value = false
+                    }
+                }
+            }
+            job = j
+            jobIsAuto = auto
+            j.start()
+            true
+        }
+
+    private fun resetRunState(rebuild: Boolean) {
         _progress.value = null
         _canceled.value = false
-        _rebuilding.value = false
+        _rebuilding.value = rebuild
         _rebuildRefused.value = false
         _refusedCounts.value = null
         _shortfall.value = 0
-        // Deliberately NOT cleared here: if a prior import finished while the screen was away and the
-        // host never refreshed its count, clearing it would lose that refresh. Every terminal path
-        // below sets it back to true anyway, so leaving a stale `true` only means one extra (idempotent)
-        // recount mid-run; clearing it could silently drop one. So we let the host consume it.
-        _running.value = true
-        return true
     }
 
+    /** Terminal/progress state is published only by the run that is still the current [job]. */
+    private inline fun ifCurrent(me: Job, block: () -> Unit) {
+        if (job === me) block()
+    }
+
+    private fun depsFor(appContext: Context, configManager: ConfigurationManager, lastScanEpoch: Long): LibraryDeps =
+        depsForTest?.invoke(appContext) ?: run {
+            val tracksDir = TrackStorage.tracksDir(appContext)
+            LibraryDeps(
+                tracksDir = tracksDir,
+                fitFilesDir = fitFilesDir,
+                importDir = importDir,
+                config = { configManager.loadConfigFlow().first() },
+                updateConfig = configManager::updateConfig,
+                newImporter = { onStored ->
+                    HistoryImporter(
+                        fitFilesDir = fitFilesDir,
+                        importDir = importDir,
+                        trackStore = TrackStore(tracksDir),
+                        decimate = HistoryImporter::defaultDecimate,
+                        lastScanProvider = { lastScanEpoch },
+                        // Awaited inside the importer's flush (suspend setter): persisting lastScan in
+                        // order — not via a detached scope.launch — prevents an out-of-order write from
+                        // leaving a stale epoch and surfaces a write failure instead of swallowing it.
+                        lastScanSetter = { epoch ->
+                            configManager.updateConfig { it.copy(lastScanEpoch = epoch) }
+                        },
+                        processedLedgerFile = File(tracksDir, "processed.json"),
+                        onStored = onStored,
+                    )
+                },
+                sweep = { c -> TrackStore(tracksDir).sweep(checkCancel = c) },
+            )
+        }
+
     /**
-     * Starts an import in the process scope. No-op if one is already running (so a double-tap or a
-     * screen re-entry that re-fires can't stack two scans). [appContext] should be the APPLICATION
-     * context (the work outlives the Activity). [lastScanEpoch] is the cutoff for `onlyNew`.
+     * Starts an import in the process scope; returns false (and does nothing) while a previous job has
+     * not completed, so a double-tap or a screen re-entry can't stack two scans. [appContext] should be
+     * the APPLICATION context (the work outlives the Activity). [lastScanEpoch] is the cutoff for a
+     * manual `onlyNew`; an [auto] run always scans everything (the ledger skips unchanged files).
+     * [admit] runs AFTER [LibraryLock] is acquired — the moment the decision is current — and false
+     * ends the job without importing.
      */
-    fun start(appContext: Context, configManager: ConfigurationManager, onlyNew: Boolean, lastScanEpoch: Long) {
-        if (!beginRun()) return
-        job = scope.launch { runImport(appContext, configManager, onlyNew, lastScanEpoch) }
+    fun start(
+        appContext: Context,
+        configManager: ConfigurationManager,
+        onlyNew: Boolean,
+        lastScanEpoch: Long,
+        auto: Boolean = false,
+        admit: (suspend () -> Boolean)? = null,
+    ): Boolean = launchRun(auto, rebuild = false) { me ->
+        LibraryLock.mutex.withLock {
+            if (admit?.invoke() == false) return@withLock
+            runImport(me, depsFor(appContext, configManager, lastScanEpoch), auto, onlyNew = if (auto) false else onlyNew)
+        }
     }
 
     /**
@@ -153,93 +258,75 @@ object HistoryImportRunner {
      * instead of as a cheerful "0 imported".
      */
     fun rebuildAll(appContext: Context, configManager: ConfigurationManager, lastScanEpoch: Long) {
-        if (!beginRun()) return
-        _rebuilding.value = true
-        job = scope.launch {
-            val prepared = try {
-                _preparing.value = true
-                runCatching {
-                    prepareRebuild(
-                        TrackStorage.tracksDir(appContext),
-                        fitFilesDir,
-                        importDir,
-                        onShortOfFiles = { available, tracks -> _refusedCounts.value = available to tracks },
-                    )
+        launchRun(auto = false, rebuild = true) { me ->
+            // ONE lock hold for prepare + import: nothing may touch the library between the archive and
+            // the re-import that restores it.
+            LibraryLock.mutex.withLock {
+                val deps = depsFor(appContext, configManager, lastScanEpoch)
+                val prepared = try {
+                    _preparing.value = true
+                    runCatching {
+                        prepareRebuild(
+                            deps.tracksDir,
+                            deps.fitFilesDir,
+                            deps.importDir,
+                            onShortOfFiles = { available, tracks -> _refusedCounts.value = available to tracks },
+                        )
+                    }
+                        .onFailure { Timber.w(it, "rebuild: prepare failed; running an ordinary import instead") }
+                        // A THROWN prepare folds into 0, NOT into a refusal: it is already logged with a
+                        // stack trace and may have archived before it threw, so the shortfall line — not the
+                        // refusal line — is the one that can still catch it.
+                        .getOrDefault(0)
+                } finally {
+                    _preparing.value = false
                 }
-                    .onFailure { Timber.w(it, "rebuild: prepare failed; running an ordinary import instead") }
-                    // A THROWN prepare folds into 0, NOT into a refusal: it is already logged with a
-                    // stack trace and may have archived before it threw, so the shortfall line — not the
-                    // refusal line — is the one that can still catch it.
-                    .getOrDefault(0)
-            } finally {
-                _preparing.value = false
+                _rebuildRefused.value = prepared == null // null ⇒ prepareRebuild REFUSED; the screen says so.
+                val archived = prepared ?: 0
+                runImport(me, deps, auto = false, onlyNew = false)
+                // After runImport, so it sees the terminal counts. A cancel rethrows out of runImport and
+                // never reaches here — that path already has its own "your rides are in archive/" line.
+                _shortfall.value = rebuildShortfall(archived, _progress.value?.imported ?: 0)
+                    .also { if (it > 0) Timber.w("rebuild STRANDED %d of %d archived track(s) in archive/", it, archived) }
             }
-            _rebuildRefused.value = prepared == null // null ⇒ prepareRebuild REFUSED; the screen says so.
-            val archived = prepared ?: 0
-            runImport(appContext, configManager, onlyNew = false, lastScanEpoch = lastScanEpoch)
-            // After runImport, so it sees the terminal counts. A cancel rethrows out of runImport and
-            // never reaches here — that path already has its own "your rides are in archive/" line.
-            _shortfall.value = rebuildShortfall(archived, _progress.value?.imported ?: 0)
-                .also { if (it > 0) Timber.w("rebuild STRANDED %d of %d archived track(s) in archive/", it, archived) }
         }
     }
 
-    private suspend fun runImport(
-        appContext: Context,
-        configManager: ConfigurationManager,
-        onlyNew: Boolean,
-        lastScanEpoch: Long,
-    ) {
+    private suspend fun runImport(me: Job, deps: LibraryDeps, auto: Boolean, onlyNew: Boolean) {
+        // An automatic run surfaces only once its scan finds work: a zero-work or refused one (the common
+        // case, at every Idle) must not wipe the result line of the rider's last Import/Rebuild.
+        var shown = !auto
         try {
-            val importer = HistoryImporter(
-                fitFilesDir = fitFilesDir,
-                importDir = importDir,
-                trackStore = TrackStore(TrackStorage.tracksDir(appContext)),
-                decimate = HistoryImporter::defaultDecimate,
-                lastScanProvider = { lastScanEpoch },
-                // Awaited inside the importer's flush (suspend setter): persisting lastScan in
-                // order — not via a detached scope.launch — prevents an out-of-order write from
-                // leaving a stale epoch and surfaces a write failure instead of swallowing it.
-                lastScanSetter = { epoch ->
-                    configManager.updateConfig { it.copy(lastScanEpoch = epoch) }
-                },
-                processedLedgerFile = File(TrackStorage.tracksDir(appContext), "processed.json"),
-            )
-            importer.import(onlyNew = onlyNew).collect { _progress.value = it }
-            // Rebuild the global gradient model from the freshly-imported history — off Main (this
-            // whole job runs on Dispatchers.IO) and never allowed to fail the import: a bad rebuild
-            // just leaves the ghost falling back to its neutral fill until the next successful one.
-            // Gated on something having ACTUALLY been imported: a "New only" run that found nothing new
-            // would otherwise re-parse the whole library to rebuild the identical model.
-            if (((_progress.value?.imported ?: 0) + (_progress.value?.enriched ?: 0)) > 0) runCatching {
-                val dir = TrackStorage.tracksDir(appContext)
-                // STREAMED, one track parsed at a time: the whole library in heap at once OOMs a Karoo,
-                // and the failure would land here as a swallowed "rebuild failed" with no model.
-                val builder = GradePace.Builder()
-                TrackStore(dir).forEachTrack(builder::add)
-                val model = builder.build()
-                GradePaceStore(dir).save(model)
-                Timber.i("grade-pace model rebuilt: coveredM=%.0f", model.coveredM)
-            }.onFailure { Timber.w(it, "grade-pace rebuild failed; the ghost falls back to the neutral fill") }
+            runLibraryJob(deps, auto, onlyNew) { p ->
+                ifCurrent(me) {
+                    if (!shown && p.total > 0) { resetRunState(rebuild = false); shown = true }
+                    if (shown) _progress.value = p
+                }
+            }
             // Normal DONE: ask the host to refresh its track count once.
-            _pendingCompletion.value = true
+            ifCurrent(me) { _pendingCompletion.value = true }
         } catch (e: CancellationException) {
             // A cancel may still have flushed chunks (partial work persists), so signal a
             // completion too — the count must reflect whatever was already written.
-            _canceled.value = true
-            _pendingCompletion.value = true
+            ifCurrent(me) { _pendingCompletion.value = true }
             throw e
         } catch (e: Exception) {
             // Surface real failures instead of swallowing them: leave a terminal ERROR (keeping
             // the last counts) so the screen shows an error line rather than a frozen progress
             // bar, and still let the host refresh (chunked flushes may have persisted tracks).
-            Timber.w(e, "history import failed")
-            val last = _progress.value
-            _progress.value = (last ?: ImportProgress(ImportProgress.Phase.ERROR, 0, 0, 0, 0, 0))
-                .copy(phase = ImportProgress.Phase.ERROR, message = e.message)
+            publishError(me, e, shown)
+        }
+    }
+
+    private fun publishError(me: Job, e: Exception, show: Boolean) {
+        Timber.w(e, "history import failed")
+        ifCurrent(me) {
+            if (show) {
+                val last = _progress.value
+                _progress.value = (last ?: ImportProgress(ImportProgress.Phase.ERROR, 0, 0, 0, 0, 0))
+                    .copy(phase = ImportProgress.Phase.ERROR, message = e.message)
+            }
             _pendingCompletion.value = true
-        } finally {
-            _running.value = false
         }
     }
 
@@ -251,6 +338,11 @@ object HistoryImportRunner {
     /** Cancels an in-flight import (sets [canceled]); no-op if none is running. */
     fun cancel() {
         job?.cancel()
+    }
+
+    /** Cancels the active run only if it is an AUTOMATIC one; a manual import or rebuild is left alone. */
+    fun cancelAuto() {
+        synchronized(admission) { if (activeRunIsAuto) job?.cancel() }
     }
 }
 

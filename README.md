@@ -4,6 +4,8 @@ A [Hammerhead Karoo](https://www.hammerhead.io/) extension that races you agains
 a Ghost Pace riding at a fixed pace, or your own past self on a route — and shows the gap
 live on a data field and as a marker on the map.
 
+Needs All files access: grant it in the KGhost app so it can find your past rides.
+
 ## What it does
 
 - **Ghost Pace** — pick a target pace/speed and race a constant-pace ghost. The live gap (time
@@ -53,11 +55,12 @@ live on a data field and as a marker on the map.
 1. **Install** KGhost (see [Install](#install) below — from the Karoo's Extensions store, or by sideload) and open the app on the Karoo once.
 2. **Add a data field** — on a ride profile, add **Gap (graphic)** and/or **Gap (numeric)** from the
    Extensions section of the Karoo's data-field picker.
-3. **(Optional) Bring in past rides** — in the KGhost app, grant **All files access** when asked, then
-   drop GPX/FIT files into `/sdcard/KGhost/` and tap *Import* (it also scans your Karoo's own ride
-   history). Without this you can still race the fixed-pace Ghost Pace. KGhost needs this access to
-   load your recorded ghosts, so if it's missing the app flags it **on its main screen** and with an
-   occasional **in-ride reminder** until you grant it.
+3. **(Optional) Bring in past rides** — in the KGhost app, grant **All files access** when asked. Your
+   past rides are found automatically while the Karoo is idle (the Import button is still there to
+   force a scan, or for GPX/FIT files you drop into `/sdcard/KGhost/`). Without this you can still
+   race the fixed-pace Ghost Pace. KGhost needs this access to load your recorded ghosts, so if it's
+   missing the app flags it **on its main screen** and with an occasional **in-ride reminder** until
+   you grant it.
 4. **Set your Ghost Pace** — pick a target speed/pace for the fixed-pace mode. In a route race,
    this target fills gaps in the map curve; unknown ground holds the time lead when neither
    historical pace tier can answer — except on a route your history covers less than 10% of (and no
@@ -196,16 +199,17 @@ Device-level switches and recorded-track-library management (not per profile):
 - **KGhost enabled** — the master on/off. When off, KGhost does nothing on any profile (no ghost, no
   recording, no alerts).
 - **Record rides** — auto-record each ride as a GPS track for future ghost comparison.
-- **Import history** — scan the Karoo's `/sdcard/FitFiles` and import GPX/FIT from `/sdcard/KGhost/`
-  (needs all-files access); "import all" or "new only". Shows the recorded-track count and, after a
-  scan, a summary: *imported · duplicates · not valid*. **Not valid** is not an error — it just counts
-  files that can't be used as a ghost because they lack the GPS position **and** per-point timestamps a
-  race needs (most often route exports from Strava/Komoot, which carry no time), plus empty/corrupt or
-  too-short files. The scan keeps running if you switch screens. Re-running *import all* is **fast** —
-  rides already in your library are skipped without being re-read, so a large library only pays the
-  full import cost once. The recorded-track count also **refreshes when you return to the app** (for
-  example after granting access following a reinstall), so it reflects the rides already on the device
-  without a re-scan.
+- **Import history** — past rides on the Karoo are found automatically while it is idle; this button
+  imports files you dropped in `/sdcard/KGhost/` right away, or forces a scan of the Karoo's
+  `/sdcard/FitFiles` and that folder (needs all-files access); "import all" or "new only". Shows the
+  recorded-track count and, after a scan, a summary: *imported · duplicates · not valid*. **Not valid**
+  is not an error — it just counts files that can't be used as a ghost because they lack the GPS
+  position **and** per-point timestamps a race needs (most often route exports from Strava/Komoot, which
+  carry no time), plus empty/corrupt or too-short files. The scan keeps running if you switch screens.
+  Re-running *import all* is **fast** — rides already in your library are skipped without being re-read,
+  so a large library only pays the full import cost once. The recorded-track count also **refreshes when
+  you return to the app** (for example after granting access following a reinstall), so it reflects the
+  rides already on the device without a re-scan.
 - **Rebuild history** — re-reads every ride file from scratch (tap twice to confirm — it archives your
   current library first, then re-imports it). Use it if your library predates the gradient-pace tier
   above, so older rides pick up the elevation data that tier needs. It **takes as long as a first
@@ -257,9 +261,10 @@ reaches the store:
 3. Add the KGhost data fields to a ride profile and/or open the KGhost app to configure it.
 
 Whichever install method you used, to import external rides you must grant **All files access** when prompted (used to read
-`/sdcard/FitFiles` and `/sdcard/KGhost`). Without it KGhost can't load recorded ghosts and runs as a
-fixed-pace virtual partner only — so it surfaces the missing access on its main screen and with an
-occasional in-ride reminder until you grant it.
+`/sdcard/FitFiles` and `/sdcard/KGhost`, and what lets KGhost find your past rides automatically).
+Without it KGhost can't load recorded ghosts and runs as a fixed-pace virtual partner only — so it
+surfaces the missing access on its main screen and with an occasional in-ride reminder until you
+grant it.
 
 
 ## Third-party

@@ -53,6 +53,9 @@ class HistoryImporter(
     // the ledger get a fresh, never-populated file; production always passes the real tracks dir
     // (see HistoryImportRunner).
     private val processedLedgerFile: File = File(fitFilesDir, ".processed_ledger.json"),
+    // Plain (non-suspend) and invoked right after each sink.addAll, BEFORE the suspending syncLastScan:
+    // a cancel landing inside that suspend must not lose the count of tracks already on disk.
+    private val onStored: (added: List<RecordedTrack>, enriched: Int) -> Unit = { _, _ -> },
 ) {
 
     private enum class Kind { FITFILES_FIT, IMPORT_FIT, IMPORT_GPX }
@@ -121,6 +124,13 @@ class HistoryImporter(
         val total = work.size
         if (skippedByLedger > 0) Timber.d("import: ledger skipped %d already-processed files", skippedByLedger)
         emit(ImportProgress(ImportProgress.Phase.SCANNING, current = 0, total = total, 0, 0, 0))
+        // Nothing new (the common case now that this runs at every Idle): return BEFORE the bulk sink
+        // opens, so commit() and ledger.save() never rewrite index.json/sourcekeys.json/processed.json,
+        // and lastScan is not touched.
+        if (work.isEmpty()) {
+            emit(ImportProgress(ImportProgress.Phase.DONE, current = 0, total = 0, imported = 0, skippedDuplicates = 0, failed = 0, enriched = 0))
+            return@flow
+        }
 
         // --- PARSING ---
         // The expensive decode stays per-file (one FIT buffer at a time). The STORE write is now
@@ -207,6 +217,8 @@ class HistoryImporter(
             val storeFailed = sink.lastFailedIds
             imported += added
             enriched += sink.lastEnrichedCount
+            // Synchronous and before any suspend point below, so a cancel inside syncLastScan keeps it.
+            onStored(sink.lastAdded, sink.lastEnrichedCount)
             skippedDuplicates += (chunk.size - added - storeFailed.size)
             failed += storeFailed.size
             // Mark the ledger for exactly the files whose tracks were just persisted above — NOT at

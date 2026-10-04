@@ -121,6 +121,7 @@ internal data class GapRenderKey(
     val dark: Boolean,
     val imperial: Boolean,
     val isRoute: Boolean = false,
+    val permissionNotice: Boolean = false,
 )
 
 private fun Double.toQuantOrSentinel(): Int = if (isFinite()) roundToInt() else Int.MIN_VALUE
@@ -137,9 +138,10 @@ internal fun gapRenderKey(
     isRoute: Boolean,
     dark: Boolean,
     imperial: Boolean,
+    permissionNotice: Boolean = false,
 ): GapRenderKey {
     if (!state.active) {
-        return GapRenderKey(false, false, GapStatus.NEUTRAL, 0, 0, gapDisplay, dark, imperial, isRoute)
+        return GapRenderKey(false, false, GapStatus.NEUTRAL, 0, 0, gapDisplay, dark, imperial, isRoute, permissionNotice)
     }
     return GapRenderKey(
         active = true,
@@ -158,5 +160,6 @@ internal fun gapRenderKey(
         dark = dark,
         imperial = imperial,
         isRoute = isRoute,
+        permissionNotice = permissionNotice,
     )
 }

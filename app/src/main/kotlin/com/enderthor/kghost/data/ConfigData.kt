@@ -99,6 +99,28 @@ data class KGhostConfig(
      * files not modified since. 0L means no scan has run yet (import everything).
      */
     val lastScanEpoch: Long = 0L,
+    /**
+     * The grade-pace model on disk no longer reflects the library (a rebuild was owed but its save did
+     * not land). Boolean because it is only ever set inside [com.enderthor.kghost.geo.LibraryLock].
+     */
+    val gradeModelDirty: Boolean = false,
+    /**
+     * Reconcile (tidy-sweep) debt counter: debt is owed iff [reconcileGen] > [reconcileAckGen]. Every
+     * library mutation BUMPS this; a completed sweep acks the gen it read BEFORE starting, so a ride
+     * saved while the sweep ran (gen bumped after that read) stays owed. See [reconcileOwed].
+     */
+    val reconcileGen: Long = 0L,
+    /** The [reconcileGen] a completed sweep read before it started; see [reconcileGen]. */
+    val reconcileAckGen: Long = 0L,
+    /** Rides auto-discovered but not yet announced to the rider. */
+    val pendingFoundRides: Int = 0,
+    /**
+     * Wall-clock ms of the first extension start that saw this 0. Rides that started before it are "past
+     * rides found"; later rides are recorded live by KGhost, so their FITs are twins, not discoveries.
+     * 0 = not stamped yet: an automatic run then counts nothing. Upgraders get it stamped on their first
+     * start of this version, so their pre-existing history counts.
+     */
+    val discoveryEpoch: Long = 0L,
     /** Master kill-switch: when false the whole extension is inert (no gap, recording, ghost, alerts). */
     val masterEnabled: Boolean = true,
     /** Auto-learned per-profile overrides, keyed by RideProfile.id. Empty = every profile uses global. */
@@ -196,3 +218,6 @@ fun KGhostConfig.migrateToLatest(): KGhostConfig {
     if (c.version < 9) c = c.copy(version = 9)
     return c
 }
+
+/** Reconcile debt exists iff a mutation bumped [KGhostConfig.reconcileGen] past what a sweep acked. */
+fun KGhostConfig.reconcileOwed(): Boolean = reconcileGen > reconcileAckGen
