@@ -242,4 +242,17 @@ class HistoryImportRunnerTest {
         assertTrue(File(fx.tracksDir, "gradepace.json").isFile)
         assertFalse(fx.cfg.value.gradeModelDirty)
     }
+
+    @Test fun `a rebuild that cannot record the model debt does not archive`() = test {
+        TrackStore(fx.tracksDir).add(fx.ride("r1"))
+        fx.fits(1)
+        var first = true
+        HistoryImportRunner.depsForTest = {
+            val d = fx.deps(decode = { null })
+            d.copy(updateConfig = { t -> if (first) { first = false; false } else d.updateConfig(t) })
+        }
+        HistoryImportRunner.rebuildAll(ctx, cm, lastScanEpoch = 0L)
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(listOf("r1"), TrackStore(fx.tracksDir).allTrackIds())
+    }
 }
