@@ -117,6 +117,70 @@ class LibraryJobTest {
         assertTrue(fx.cfg.value.gradeModelDirty)
     }
 
+    // A duplicate-only scan: the library already holds r1 (same sourceKey), the FIT folder offers r1 again.
+    private fun LibraryFixture.duplicateOnly() {
+        TrackStore(tracksDir).add(ride("r1"))
+        fits(1)
+    }
+
+    @Test fun `a completed run that stores nothing skips the model rebuild and the sweep`() = runTest {
+        val fx = fixture()
+        fx.duplicateOnly()
+        var swept = false
+        assertEquals(0, run(fx.deps(sweep = { swept = true; 0 })).getOrThrow())
+        assertTrue("fixture must decode", fx.decodes > 0)
+        assertFalse(File(fx.tracksDir, "gradepace.json").exists())
+        assertFalse(swept)
+        assertFalse(fx.cfg.value.gradeModelDirty)
+        assertFalse(fx.cfg.value.reconcileOwed())
+    }
+
+    @Test fun `a no-op run still pays a debt owed from before`() = runTest {
+        val fx = fixture()
+        fx.duplicateOnly()
+        fx.cfg.value = KGhostConfig(gradeModelDirty = true, reconcileGen = 4)
+        var swept = false
+        run(fx.deps(sweep = { swept = true; 0 })).getOrThrow()
+        assertTrue(File(fx.tracksDir, "gradepace.json").isFile)
+        assertTrue(swept)
+        assertFalse(fx.cfg.value.gradeModelDirty)
+        assertFalse(fx.cfg.value.reconcileOwed())
+    }
+
+    @Test fun `a cancelled no-op run keeps its debts`() = runTest {
+        val fx = fixture()
+        fx.duplicateOnly()
+        val r = run(fx.deps(decode = { throw CancellationException("cut mid-scan") }))
+        assertTrue(r.exceptionOrNull() is CancellationException)
+        assertTrue(fx.cfg.value.gradeModelDirty)
+        assertTrue(fx.cfg.value.reconcileOwed())
+    }
+
+    @Test fun `a ride saved during a no-op run stays owed`() = runTest {
+        val fx = fixture()
+        TrackStore(fx.tracksDir).add(fx.ride("r1"))
+        fx.fits(1)
+        // The sweep stub does not complete (null), so only the hand-back decides whether the saved ride stays owed.
+        run(
+            fx.deps(
+                decode = { f -> fx.cfg.update { it.copy(reconcileGen = it.reconcileGen + 1) }; fx.ride(f.nameWithoutExtension) },
+                sweep = { null },
+            ),
+        ).getOrThrow()
+        assertTrue(fx.cfg.value.reconcileOwed())
+    }
+
+    @Test fun `a run that stores a track still rebuilds`() = runTest {
+        val fx = fixture()
+        fx.fits(1)
+        var swept = false
+        assertEquals(1, run(fx.deps(sweep = { swept = true; 0 })).getOrThrow())
+        assertTrue(File(fx.tracksDir, "gradepace.json").isFile)
+        assertTrue(swept)
+        assertFalse(fx.cfg.value.gradeModelDirty)
+        assertFalse(fx.cfg.value.reconcileOwed())
+    }
+
     @Test fun `a ride saved during a sweep stays owed`() = runTest {
         val fx = fixture()
         fx.cfg.value = KGhostConfig(reconcileGen = 1)
