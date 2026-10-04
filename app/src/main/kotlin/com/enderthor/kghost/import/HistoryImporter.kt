@@ -55,7 +55,7 @@ class HistoryImporter(
     private val processedLedgerFile: File = File(fitFilesDir, ".processed_ledger.json"),
     // Plain (non-suspend) and invoked right after each sink.addAll, BEFORE the suspending syncLastScan:
     // a cancel landing inside that suspend must not lose the count of tracks already on disk.
-    private val onStored: (added: Int, enriched: Int) -> Unit = { _, _ -> },
+    private val onStored: (added: List<RecordedTrack>, enriched: Int) -> Unit = { _, _ -> },
 ) {
 
     private enum class Kind { FITFILES_FIT, IMPORT_FIT, IMPORT_GPX }
@@ -218,7 +218,7 @@ class HistoryImporter(
             imported += added
             enriched += sink.lastEnrichedCount
             // Synchronous and before any suspend point below, so a cancel inside syncLastScan keeps it.
-            onStored(added, sink.lastEnrichedCount)
+            onStored(sink.lastAdded, sink.lastEnrichedCount)
             skippedDuplicates += (chunk.size - added - storeFailed.size)
             failed += storeFailed.size
             // Mark the ledger for exactly the files whose tracks were just persisted above — NOT at

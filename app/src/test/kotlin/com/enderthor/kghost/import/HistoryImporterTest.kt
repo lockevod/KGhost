@@ -352,7 +352,7 @@ class HistoryImporterTest {
             lastScanProvider = { 0L },
             lastScanSetter = { if (setterCalls++ == 0) throw CancellationException("cancel in scan write") },
             processedLedgerFile = File(tracksDir, "processed.json"),
-            onStored = { a, e -> stored.add(a to e) },
+            onStored = { a, e -> stored.add(a.size to e) },
         )
         var cancelled = false
         importer.import(onlyNew = false)

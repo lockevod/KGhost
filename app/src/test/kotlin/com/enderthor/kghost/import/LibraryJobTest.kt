@@ -161,6 +161,7 @@ class LibraryJobTest {
 
     @Test fun `a cancelled auto run still counts its stored tracks`() = runTest {
         val fx = fixture()
+        fx.cfg.value = KGhostConfig(discoveryEpoch = Long.MAX_VALUE)
         fx.fits(30)
         // The first flush's lastScan persist is the cancel point: after the store, before any later
         // progress emission could report it.
@@ -178,10 +179,36 @@ class LibraryJobTest {
 
     @Test fun `found rides sum across runs`() = runTest {
         val fx = fixture()
+        fx.cfg.value = KGhostConfig(discoveryEpoch = Long.MAX_VALUE)
         fx.fits(2)
         run(fx.deps(), auto = true).getOrThrow()
         fx.fits(3, from = 3)
         run(fx.deps(), auto = true).getOrThrow()
         assertEquals(5, fx.cfg.value.pendingFoundRides)
+    }
+
+    // Fixture rides start at 1_000_000 + n * 10_000 ms, so r1 starts at 1_010_000 and r2 at 1_020_000.
+
+    @Test fun `a FIT twin of a recorded ride does not add to pendingFoundRides`() = runTest {
+        val fx = fixture()
+        fx.cfg.value = KGhostConfig(discoveryEpoch = 1_000_000L) // KGhost was already running when r1 started
+        fx.fits(1)
+        assertEquals(1, run(fx.deps(), auto = true).getOrThrow())
+        assertEquals(0, fx.cfg.value.pendingFoundRides)
+    }
+
+    @Test fun `a ride from before KGhost's first run is counted`() = runTest {
+        val fx = fixture()
+        fx.cfg.value = KGhostConfig(discoveryEpoch = 1_015_000L) // between r1 and r2
+        fx.fits(2)
+        assertEquals(2, run(fx.deps(), auto = true).getOrThrow())
+        assertEquals(1, fx.cfg.value.pendingFoundRides)
+    }
+
+    @Test fun `an unstamped discovery epoch counts nothing`() = runTest {
+        val fx = fixture()
+        fx.fits(1)
+        assertEquals(1, run(fx.deps(), auto = true).getOrThrow())
+        assertEquals(0, fx.cfg.value.pendingFoundRides)
     }
 }

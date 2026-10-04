@@ -984,6 +984,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // Under the library lock: these passes mutate the library, so no import may interleave. No
         // discovery request from in here — the first Idle makes it, and its run waits for this lock.
         scope.launch(Dispatchers.IO) { LibraryLock.mutex.withLock {
+            // Stamp the discovery epoch once, BEFORE the first automatic run can take this lock: only rides
+            // that started before it count as "found" (see KGhostConfig.discoveryEpoch).
+            val now = System.currentTimeMillis()
+            if (!configManager.updateConfig { if (it.discoveryEpoch == 0L) it.copy(discoveryEpoch = now) else it }) {
+                Timber.w("KVP discovery: epoch not persisted; found rides are not counted until it is")
+            }
             // Pay the index's lazy one-time costs (legacy rebuild) and repair index/file drift NOW,
             // at service start off-Main — not under the indexLock on the FIRST route match of a ride.
             runCatching { trackStore().prewarmAndReconcile() }

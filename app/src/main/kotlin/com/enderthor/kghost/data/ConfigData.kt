@@ -114,6 +114,13 @@ data class KGhostConfig(
     val reconcileAckGen: Long = 0L,
     /** Rides auto-discovered but not yet announced to the rider. */
     val pendingFoundRides: Int = 0,
+    /**
+     * Wall-clock ms of the first extension start that saw this 0. Rides that started before it are "past
+     * rides found"; later rides are recorded live by KGhost, so their FITs are twins, not discoveries.
+     * 0 = not stamped yet: an automatic run then counts nothing. Upgraders get it stamped on their first
+     * start of this version, so their pre-existing history counts.
+     */
+    val discoveryEpoch: Long = 0L,
     /** Master kill-switch: when false the whole extension is inert (no gap, recording, ghost, alerts). */
     val masterEnabled: Boolean = true,
     /** Auto-learned per-profile overrides, keyed by RideProfile.id. Empty = every profile uses global. */

@@ -334,6 +334,10 @@ class TrackStore(private val dir: File) {
         private val failedIds = mutableSetOf<String>()
         val lastFailedIds: Set<String> get() = failedIds.toSet() // copy: the backing set is cleared per call
 
+        /** The tracks the LAST [addAll] newly stored; same per-call idiom as [lastFailedIds]. */
+        private val addedTracks = mutableListOf<RecordedTrack>()
+        val lastAdded: List<RecordedTrack> get() = addedTracks.toList()
+
         private var recordedByKey: Map<String, String>? = null
 
         private fun recordedLookup(): Map<String, String> =
@@ -349,8 +353,8 @@ class TrackStore(private val dir: File) {
         fun addAll(tracks: List<RecordedTrack>): Int {
             lastEnrichedCount = 0
             failedIds.clear()
+            addedTracks.clear()
             if (tracks.isEmpty()) return 0
-            var added = 0
             synchronized(indexLock) {
                 // Pick up keys written by a concurrent live recorder between chunks.
                 known += sourceKeys().keys
@@ -373,10 +377,10 @@ class TrackStore(private val dir: File) {
                     if (t.source == Source.RECORDED && t.sourceKey.isNotEmpty()) {
                         recordedByKey = (recordedByKey ?: emptyMap()) + (t.sourceKey to t.id)
                     }
-                    added++
+                    addedTracks += t
                 }
             }
-            return added
+            return addedTracks.size
         }
 
         /** Persist the accumulated index + sourcekeys once (fsynced), UNION-MERGED onto the CURRENT

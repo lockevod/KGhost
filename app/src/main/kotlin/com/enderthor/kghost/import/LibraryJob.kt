@@ -4,6 +4,7 @@ import com.enderthor.kghost.data.KGhostConfig
 import com.enderthor.kghost.data.reconcileOwed
 import com.enderthor.kghost.engine.GradePace
 import com.enderthor.kghost.geo.GradePaceStore
+import com.enderthor.kghost.geo.RecordedTrack
 import com.enderthor.kghost.geo.TrackStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -24,7 +25,7 @@ data class LibraryDeps(
     val importDir: File,
     val config: suspend () -> KGhostConfig,
     val updateConfig: suspend ((KGhostConfig) -> KGhostConfig) -> Boolean,
-    val newImporter: (onStored: (Int, Int) -> Unit) -> HistoryImporter,
+    val newImporter: (onStored: (List<RecordedTrack>, Int) -> Unit) -> HistoryImporter,
     val sweep: (checkCancel: () -> Unit) -> Int?,
 )
 
@@ -35,7 +36,8 @@ data class LibraryDeps(
  * The debts are set BEFORE any decode (a crash or cancel after a flush must still owe the model rebuild
  * and the twin reconciliation) and cleared only after their work verifiably succeeded. Automatic runs
  * count what they stored into `pendingFoundRides` even when cancelled, from the importer's own per-flush
- * count — UI progress lags a flush and would undercount.
+ * report — UI progress lags a flush and would undercount. Only tracks that started before
+ * [KGhostConfig.discoveryEpoch] count: a later ride was recorded live, so its FIT is a twin, not a find.
  */
 suspend fun runLibraryJob(
     deps: LibraryDeps,
@@ -44,8 +46,14 @@ suspend fun runLibraryJob(
     onProgress: (ImportProgress) -> Unit,
 ): Int {
     val stored = AtomicInteger(0)
+    val found = AtomicInteger(0)
+    // 0 (not stamped yet) counts nothing: no ride starts before the epoch 0.
+    val cutoff = if (auto) deps.config().discoveryEpoch else 0L
     try {
-        deps.newImporter { added, _ -> stored.addAndGet(added) }.import(onlyNew).collect { p ->
+        deps.newImporter { added, _ ->
+            stored.addAndGet(added.size)
+            found.addAndGet(added.count { it.startedAtEpoch < cutoff })
+        }.import(onlyNew).collect { p ->
             // The importer suspends on this emission, so the debts are durable before its first decode.
             if (p.phase == ImportProgress.Phase.SCANNING && p.total > 0) {
                 val ok = withContext(NonCancellable) {
@@ -58,8 +66,8 @@ suspend fun runLibraryJob(
         dischargeDebts(deps)
         return stored.get()
     } finally {
-        val n = stored.get()
-        if (auto && n > 0) withContext(NonCancellable) {
+        val n = found.get()
+        if (n > 0) withContext(NonCancellable) {
             if (!deps.updateConfig { it.copy(pendingFoundRides = it.pendingFoundRides + n) }) {
                 Timber.w("could not persist %d found ride(s); the next-ride notice will miss them", n)
             }
