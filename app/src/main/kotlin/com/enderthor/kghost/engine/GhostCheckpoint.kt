@@ -69,3 +69,30 @@ data class GhostCheckpoint(
                 elapsedNowS >= rideElapsedS - CHECKPOINT_ELAPSED_SLACK_S
             )
 }
+
+/** The ONE way the race tick builds a checkpoint. [comparator] and [historyVerdictSeen] are REQUIRED here
+ *  (the class defaults them only so legacy blobs decode): a checkpoint written without its comparator is
+ *  rejected on every resume, which would silently kill the mid-ride resume with no test failing. */
+fun raceCheckpoint(
+    rideEpoch: Long,
+    leadS: Double,
+    lastRiderDist: Double,
+    pick: GhostPick,
+    vpTimePerM: Double,
+    savedAtEpoch: Long,
+    routeKey: String,
+    rideElapsedS: Double,
+    comparator: RaceComparator,
+    historyVerdictSeen: Boolean,
+): GhostCheckpoint = GhostCheckpoint(
+    rideEpoch = rideEpoch,
+    leadS = leadS,
+    lastRiderDist = lastRiderDist,
+    pick = pick,
+    vpTimePerM = vpTimePerM,
+    savedAtEpoch = savedAtEpoch,
+    routeKey = routeKey,
+    rideElapsedS = rideElapsedS,
+    comparator = comparator,
+    historyVerdictSeen = historyVerdictSeen,
+)

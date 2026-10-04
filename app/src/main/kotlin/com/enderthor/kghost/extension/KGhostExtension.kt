@@ -39,6 +39,7 @@ import com.enderthor.kghost.engine.toInfo
 import com.enderthor.kghost.engine.AGG_MIN_LAPS
 import com.enderthor.kghost.engine.CorridorSeeder
 import com.enderthor.kghost.engine.GhostCheckpoint
+import com.enderthor.kghost.engine.raceCheckpoint
 import com.enderthor.kghost.engine.GhostIntegrator
 import com.enderthor.kghost.engine.GradePace
 import com.enderthor.kghost.engine.PacePatch
@@ -2610,7 +2611,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             integPick = eff.ghostPick
                             if (nowCp - lastCheckpointMs >= CHECKPOINT_INTERVAL_MS && integPick != null) {
                                 lastCheckpointMs = nowCp
-                                pendingCheckpoint = GhostCheckpoint(
+                                pendingCheckpoint = raceCheckpoint(
                                     rideEpoch = recordingStartedEpoch,
                                     leadS = integ.gapTimeS,
                                     lastRiderDist = integLastRiderDist,
@@ -2830,6 +2831,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // missing target blanks — EXCEPT after a sustained (~3 min) loss, where
                         // handleGpsLoss() gives up and we blank rather than show a wild extrapolation.
                         publishSegment(null, fireExit = false)
+                        // The VP branch now owns the holder: a route that loads next (the integrator survives
+                        // the interstitial) must publish before its hold may freeze anything, else this VP
+                        // number stays on screen for a whole stop (pendingHold persists while stationary).
+                        integPublished = false
                         mapGhostState = null // VP mode: no map ghost (the loop hides it)
                         // ① is reached ONLY with no route: this is the `else` of `if (rm != null)`, so the
                         // compiler proved the old `if (rm != null)` here always false. Under the path-

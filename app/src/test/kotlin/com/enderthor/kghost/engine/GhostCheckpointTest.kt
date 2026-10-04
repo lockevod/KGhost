@@ -80,6 +80,17 @@ class GhostCheckpointComparatorTest {
         assertTrue(back.restorableFor(RaceComparator.TARGET))
     }
 
+    // The tick's builder must carry the race's comparator and latch, or every resume is rejected.
+    @Test fun `a checkpoint built by the race resumes the same race`() {
+        val built = raceCheckpoint(rideEpoch = 1L, leadS = 0.0, lastRiderDist = 5000.0, pick = GhostPick.LAST,
+            vpTimePerM = 0.3, savedAtEpoch = 0L, routeKey = "r", rideElapsedS = 900.0,
+            comparator = RaceComparator.HISTORY, historyVerdictSeen = true)
+        val back = jsonForStorage.decodeFromString(GhostCheckpoint.serializer(),
+            jsonForStorage.encodeToString(GhostCheckpoint.serializer(), built))
+        assertTrue(back.restorableFor(RaceComparator.HISTORY))
+        assertTrue(back.historyVerdictSeen)
+    }
+
     @Test fun `a lead never crosses comparators`() {
         assertFalse(cp(RaceComparator.TARGET).restorableFor(RaceComparator.HISTORY))
         assertFalse(cp(RaceComparator.HISTORY).restorableFor(RaceComparator.TARGET))
