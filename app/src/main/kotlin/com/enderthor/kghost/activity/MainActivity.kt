@@ -114,8 +114,9 @@ fun TabLayout() {
     }
 
     // The settings Activity shares the extension's process but not its KarooSystemService binding (that
-    // one is private to the service and may not be connected yet), so it needs its own KarooSystemService to read the rider's unit system (UserProfile.preferredUnit.distance)
-    // and show the Ghost Pace target in km/h or mph. Connected for the lifetime of this screen.
+    // one is private to the service and may not be connected yet), so it needs its own KarooSystemService
+    // to read the rider's unit system (UserProfile.preferredUnit.distance) and show the Ghost Pace target
+    // in km/h or mph. Connected for the lifetime of this screen.
     var imperial by remember { mutableStateOf(false) }
     var activeProfileId by remember { mutableStateOf<String?>(null) }
     DisposableEffect(Unit) {
