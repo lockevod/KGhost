@@ -216,7 +216,7 @@ object HistoryImportRunner {
                 // STREAMED, one track parsed at a time: the whole library in heap at once OOMs a Karoo,
                 // and the failure would land here as a swallowed "rebuild failed" with no model.
                 val builder = GradePace.Builder()
-                TrackStore(dir).forEachTrack(builder::add)
+                TrackStore(dir).forEachTrack(action = builder::add)
                 val model = builder.build()
                 GradePaceStore(dir).save(model)
                 Timber.i("grade-pace model rebuilt: coveredM=%.0f", model.coveredM)
