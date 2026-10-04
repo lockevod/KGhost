@@ -99,7 +99,8 @@ Ahead is green, behind is red, on-pace is neutral. During a **GPS dropout** the 
 **amber** as an estimate (dead-reckoned) rather than blanking; leaving the **route** does *not* make it
 an estimate — the number races your actual path and stays solid off-route. `---` appears only when
 there is nothing to show — no target set, not recording, you haven't started riding yet, a route race
-against your past self that hasn't reached any ground you've ridden before, or after a sustained GPS
+against your past self that hasn't yet compared any ridden metres with your road or gradient history
+(a resumed ride keeps a comparison it had already made), or after a sustained GPS
 loss (see below). Fields are designed for sunlight
 readability and respect the Karoo's day/night theme.
 

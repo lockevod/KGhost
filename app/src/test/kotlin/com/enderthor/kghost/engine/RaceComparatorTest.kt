@@ -113,4 +113,26 @@ class RaceComparatorTest {
         assertFalse(consumedHistory(10.0, 10.0))
         assertFalse(consumedHistory(10.0, 9.0))
     }
+
+    // Codex sequence: neutral HISTORY race at 1000 m / 200 s, VP interstitial to 2000 m / 400 s, then a
+    // route tick whose fix has 0.4 s/m history. Charging the whole step mints +200 s AND latches it.
+    @Test fun `the step after a VP interstitial is neutral in a history race`() {
+        fun race(afterVp: Boolean): GhostIntegrator {
+            val g = GhostIntegrator(GhostPick.LAST, vpTimePerM = 0.2, decimateM = 20.0)
+            g.onTick(0.0, 0.0, 0.0, 90.0, 0.0) { _, _, _ -> null }
+            g.onTick(1000.0, 0.0, 1000.0, 90.0, 200.0) { _, _, _ -> null }
+            val pace = paceAfterInterstitial(RaceComparator.HISTORY, afterVp, 0.4)
+            g.onTick(2000.0, 0.0, 2000.0, 90.0, 400.0) { _, _, _ -> pace }
+            return g
+        }
+        assertEquals("unguarded step fabricates the lead", 200.0, race(afterVp = false).gapTimeS, 1e-9)
+        val guarded = race(afterVp = true)
+        assertEquals(0.0, guarded.gapTimeS, 1e-9)
+        assertFalse(consumedHistory(0.0, guarded.matchedM))
+    }
+
+    @Test fun `a target race keeps charging the target across the interstitial`() {
+        assertEquals(0.2, paceAfterInterstitial(RaceComparator.TARGET, true, 0.2)!!, 0.0)
+        assertEquals(0.4, paceAfterInterstitial(RaceComparator.HISTORY, false, 0.4)!!, 0.0)
+    }
 }

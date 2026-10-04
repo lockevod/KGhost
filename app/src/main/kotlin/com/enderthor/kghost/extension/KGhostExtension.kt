@@ -17,6 +17,7 @@ import com.enderthor.kghost.engine.RouteGapPublication
 import com.enderthor.kghost.engine.chooseComparator
 import com.enderthor.kghost.engine.consumedHistory
 import com.enderthor.kghost.engine.historyCoverage
+import com.enderthor.kghost.engine.paceAfterInterstitial
 import com.enderthor.kghost.engine.routeGapPublication
 import com.enderthor.kghost.engine.selectRacePace
 import com.enderthor.kghost.engine.GpsHealth
@@ -612,6 +613,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // Whether this race has published a live gap. The pendingHold freeze only holds a number THIS race
     // published — otherwise a restored lead (or the previous mode's stale value) would sit behind it.
     @Volatile private var integPublished: Boolean = false
+    // The VP branch raced while this integrator existed → its next onTick spans the interstitial (see
+    // paceAfterInterstitial). Cleared once an onTick has actually run.
+    @Volatile private var integAfterVp: Boolean = false
     // Monotonic (elapsedRealtime ms) of the last checkpoint write — throttles the ~5 s periodic persist.
     @Volatile private var lastCheckpointMs: Long = 0L
     // Latest checkpoint SNAPSHOT, built on the Main tick (so the IO writer never reads the integrator's
@@ -661,6 +665,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         integComparator = null
         historyVerdictSeen = false
         integPublished = false
+        integAfterVp = false
         lastCheckpointMs = 0L
         pendingCheckpoint = null
         lastReliableGhostRouteDist = null
@@ -2474,6 +2479,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             integComparator = raceComparator
                             historyVerdictSeen = false
                             integPublished = false
+                            integAfterVp = false
                             lastCheckpointMs = 0L
                             // Resume an interrupted ride WITH the accrued lead: restore the persisted checkpoint
                             // iff same pick, RECENT enough, AND the same ride ([GhostCheckpoint.continuesRide]:
@@ -2591,7 +2597,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // publishes (and re-persists) a default ZERO gap.
                         if (!coast.pendingHold || !integInitialised) {
                             val matchedBefore = integ.matchedM
-                            integ.onTick(riderDist, gLat, gLng, gHdg, elapsedS - moveStart) { _, _, _ -> paceNow }
+                            val tickPace = paceAfterInterstitial(raceCmp, integAfterVp, paceNow)
+                            integ.onTick(riderDist, gLat, gLng, gHdg, elapsedS - moveStart) { _, _, _ -> tickPace }
+                            integAfterVp = false
                             // Latch on metres actually CONSUMED, not on a returned pace: a first anchor, a restore
                             // anchor or a dd<=0 tick can carry a pace and still compare nothing.
                             if (raceCmp == RaceComparator.HISTORY && consumedHistory(matchedBefore, integ.matchedM)) {
@@ -2835,6 +2843,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // the interstitial) must publish before its hold may freeze anything, else this VP
                         // number stays on screen for a whole stop (pendingHold persists while stationary).
                         integPublished = false
+                        if (integrator != null) integAfterVp = true
                         mapGhostState = null // VP mode: no map ghost (the loop hides it)
                         // ① is reached ONLY with no route: this is the `else` of `if (rm != null)`, so the
                         // compiler proved the old `if (rm != null)` here always false. Under the path-

@@ -25,7 +25,8 @@ Each route race has one comparator, chosen at route load and latched to the race
 it): **TARGET** when history covers under 10% of the planned path (`HISTORY_COVERAGE_MIN`, tier-1
 hits per 25 m sample) and `GradePace` has no usable bin; otherwise **HISTORY**. A TARGET race charges
 the Ghost Pace target on every verdict-eligible metre and never consults history; its map curve is
-all target fill. A HISTORY race uses the tiers below:
+all target fill (after a reroute onto a route classified HISTORY the marker follows that route's
+curve while the number keeps racing the target — accepted trade). A HISTORY race uses the tiers below:
 
 1. `PacePatch`: pace on this road, selected by location cell and heading.
 2. `GradePace`: historical pace at the current gradient, when this road has no usable match.

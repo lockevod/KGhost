@@ -100,3 +100,14 @@ fun routeGapPublication(
  * "a pace was returned" would latch the verdict on a tick that compared nothing.
  */
 fun consumedHistory(matchedBefore: Double, matchedAfter: Double): Boolean = matchedAfter > matchedBefore
+
+/**
+ * Pace for the first integrator tick after a no-route (VP) interstitial. The route integrator got no ticks
+ * while the VP branch raced, so its next dd spans the WHOLE interstitial and would be charged at the one
+ * endpoint fix's history pace (Codex: 995 m of VP riding + a 0.4 s/m endpoint = +200 s, where the 5 m of
+ * real history earned 1 s) — and that rise in matchedM would certify it as the race's first verdict.
+ * A HISTORY race therefore neutral-fills that one step (lead carried unchanged, nothing latched). A TARGET
+ * race keeps the target: it is valid on every metre, which is what VP charged meanwhile.
+ */
+fun paceAfterInterstitial(comparator: RaceComparator, afterInterstitial: Boolean, pace: Double?): Double? =
+    if (afterInterstitial && comparator == RaceComparator.HISTORY) null else pace
