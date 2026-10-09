@@ -2168,7 +2168,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         val diagLogMs = 2500L
         // Edge-log of the per-profile/master gate: an inert tick logs nothing else, so without this a
         // rider disabling the profile mid-ride is indistinguishable from a dead tick in the ride log.
-        var lastGateActive: Boolean? = null
+        var lastGateLog: String? = null
 
         tickJob = scope.launch(Dispatchers.Default) {
             // Probe the RAW DISTANCE arrivals here: combine()+sample(REFRESH_MS) below discards this
@@ -2313,11 +2313,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // gap/segment fields (→ `---`), hide the ghost, skip recording, and emit nothing.
                     // The service stays subscribed, so flipping the master switch or the profile's enable
                     // (config flow) or changing profile (rideProfileJob) re-activates on the next tick.
-                    val eff: EffectiveProfile = resolveProfile(cfg, activeProfileId)
-                    if (eff.active != lastGateActive) {
-                        lastGateActive = eff.active
-                        val why = if (!cfg.masterEnabled) "master off" else if (!eff.active) "profile disabled" else "enabled"
-                        Timber.i("KVP gate: active=${eff.active} ($why) profile=$activeProfileId")
+                    val profileId = activeProfileId // one read: the decision and its log name the same profile
+                    val eff: EffectiveProfile = resolveProfile(cfg, profileId)
+                    val why = if (!cfg.masterEnabled) "master off" else if (!eff.active) "profile disabled" else "enabled"
+                    // Keyed on the cause too, so master-on-but-profile-still-off or a profile switch re-logs.
+                    val gateLog = "active=${eff.active} ($why) profile=$profileId"
+                    if (gateLog != lastGateLog) {
+                        lastGateLog = gateLog
+                        Timber.i("KVP gate: $gateLog")
                     }
                     if (!eff.active) {
                         GapStateHolder.clear()
