@@ -2166,6 +2166,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // GPS settle) the logs matter most. elapsedRealtime never goes backward.
         var lastDiagLogMs = 0L
         val diagLogMs = 2500L
+        // Edge-log of the per-profile/master gate: an inert tick logs nothing else, so without this a
+        // rider disabling the profile mid-ride is indistinguishable from a dead tick in the ride log.
+        var lastGateActive: Boolean? = null
 
         tickJob = scope.launch(Dispatchers.Default) {
             // Probe the RAW DISTANCE arrivals here: combine()+sample(REFRESH_MS) below discards this
@@ -2311,6 +2314,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // The service stays subscribed, so flipping the master switch or the profile's enable
                     // (config flow) or changing profile (rideProfileJob) re-activates on the next tick.
                     val eff: EffectiveProfile = resolveProfile(cfg, activeProfileId)
+                    if (eff.active != lastGateActive) {
+                        lastGateActive = eff.active
+                        val why = if (!cfg.masterEnabled) "master off" else if (!eff.active) "profile disabled" else "enabled"
+                        Timber.i("KVP gate: active=${eff.active} ($why) profile=$activeProfileId name=${eff.profileName}")
+                    }
                     if (!eff.active) {
                         GapStateHolder.clear()
                         SegmentInfoHolder.clear()
