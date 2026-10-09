@@ -2317,7 +2317,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     if (eff.active != lastGateActive) {
                         lastGateActive = eff.active
                         val why = if (!cfg.masterEnabled) "master off" else if (!eff.active) "profile disabled" else "enabled"
-                        Timber.i("KVP gate: active=${eff.active} ($why) profile=$activeProfileId name=${eff.profileName}")
+                        Timber.i("KVP gate: active=${eff.active} ($why) profile=$activeProfileId")
                     }
                     if (!eff.active) {
                         GapStateHolder.clear()
