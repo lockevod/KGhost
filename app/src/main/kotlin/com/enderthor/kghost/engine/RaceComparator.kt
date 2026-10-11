@@ -111,3 +111,19 @@ fun consumedHistory(matchedBefore: Double, matchedAfter: Double): Boolean = matc
  */
 fun paceAfterInterstitial(comparator: RaceComparator, afterInterstitial: Boolean, pace: Double?): Double? =
     if (afterInterstitial && comparator == RaceComparator.HISTORY) null else pace
+
+enum class GateResume { NORMAL, WAIT_REPUBLISH, REANCHOR }
+
+/**
+ * What a route tick does after the per-profile / master gate kept the extension inert while a race was
+ * running ([gateInterstitial]). The integrator got no ticks meanwhile, so its next dd would charge the
+ * whole disabled stretch at one endpoint pace (and the race clock would count or freeze all of it). The
+ * inactive interval must contribute exactly 0, so the race RE-ANCHORS: lead kept, odometer re-baselined.
+ * But not while a pending distance interval is unresolved: it straddles the gate, and re-anchoring before
+ * it settles would charge its metres after reactivation — so WAIT (republishing the last number).
+ */
+fun gateResume(gateInterstitial: Boolean, pendingHold: Boolean): GateResume = when {
+    !gateInterstitial -> GateResume.NORMAL
+    pendingHold -> GateResume.WAIT_REPUBLISH
+    else -> GateResume.REANCHOR
+}

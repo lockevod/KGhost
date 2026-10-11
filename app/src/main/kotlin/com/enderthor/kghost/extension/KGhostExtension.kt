@@ -18,6 +18,8 @@ import com.enderthor.kghost.engine.chooseComparator
 import com.enderthor.kghost.engine.consumedHistory
 import com.enderthor.kghost.engine.historyCoverage
 import com.enderthor.kghost.engine.paceAfterInterstitial
+import com.enderthor.kghost.engine.gateResume
+import com.enderthor.kghost.engine.GateResume
 import com.enderthor.kghost.engine.routeGapPublication
 import com.enderthor.kghost.engine.selectRacePace
 import com.enderthor.kghost.engine.GpsHealth
@@ -633,6 +635,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // The VP branch raced while this integrator existed → its next onTick spans the interstitial (see
     // paceAfterInterstitial). Cleared once an onTick has actually run.
     @Volatile private var integAfterVp: Boolean = false
+    // The per-profile / master gate kept the extension inert while a route race was running → the next
+    // active route tick must re-anchor the integrator (see engine.gateResume) so the disabled stretch
+    // contributes 0. [gateSnapshot] = the last PUBLISHED gap (seconds AND route-derived metres), republished
+    // while that re-anchor waits on an unresolved pending hold; null = keep the field blank ("---").
+    @Volatile private var gateInterstitial: Boolean = false
+    @Volatile private var gateSnapshot: GapState? = null
     // Monotonic (elapsedRealtime ms) of the last checkpoint write — throttles the ~5 s periodic persist.
     @Volatile private var lastCheckpointMs: Long = 0L
     // Latest checkpoint SNAPSHOT, built on the Main tick (so the IO writer never reads the integrator's
@@ -686,6 +694,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         historyVerdictSeen = false
         integPublished = false
         integAfterVp = false
+        gateInterstitial = false
+        gateSnapshot = null
         lastCheckpointMs = 0L
         pendingCheckpoint = null
         lastReliableGhostRouteDist = null
@@ -2364,6 +2374,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         Timber.i("KVP gate: $gateLog")
                     }
                     if (!eff.active) {
+                        if (!gateInterstitial && integrator != null) {
+                            gateSnapshot = GapStateHolder.state.value.takeIf { integPublished && it.active }
+                            gateInterstitial = true
+                        }
                         GapStateHolder.clear()
                         SegmentInfoHolder.clear()
                         mapGhostState = null
@@ -2595,6 +2609,28 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             return@runCatching
                         }
                         val riderDist = coast.effectiveDistanceM
+                        // Back from a gate-inactive stretch: the integrator got no ticks, so its next dd would
+                        // charge the whole stretch at one endpoint pace — re-anchor instead (lead kept, nothing
+                        // earned or lost), but only once no pending interval straddles the gate.
+                        when (gateResume(gateInterstitial, coast.pendingHold)) {
+                            GateResume.WAIT_REPUBLISH -> {
+                                prevTickElapsedS = elapsedS
+                                gateSnapshot?.let { GapStateHolder.update(it) } ?: GapStateHolder.clear()
+                                // The snapshot's SEG tag too (the inert branch cleared it), as the PUBLISH path sets it.
+                                if (gateSnapshot != null && integComparator == RaceComparator.HISTORY) SegmentInfoHolder.set(B2_ON_HISTORY)
+                                return@runCatching
+                            }
+                            GateResume.REANCHOR -> {
+                                integrator?.let { it.restore(it.gapTimeS, riderDist) }
+                                integLastRiderDist = riderDist
+                                prevTickElapsedS = elapsedS // this tick must not freeze the race clock either
+                                integInitialised = false // forces the restore's re-anchor through the guard
+                                integPublished = false
+                                gateInterstitial = false
+                                gateSnapshot = null
+                            }
+                            GateResume.NORMAL -> Unit
+                        }
                         // MOVING-TIME race clock (option B): while the rider isn't advancing on the ground
                         // (stopped at the finish or a light), HOLD raceElapsed by advancing the origin, so the
                         // gap FREEZES at the result instead of drifting BEHIND, and resumes cleanly on moving.
