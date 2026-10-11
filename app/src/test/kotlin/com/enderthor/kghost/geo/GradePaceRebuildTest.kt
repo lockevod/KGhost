@@ -216,6 +216,24 @@ class GradePaceRebuildTest {
         assertFalse(File(dir, GradePaceStore.FOLDS_FILE_NAME).readText().contains("\"r1\""))
     }
 
+    /** A checkCancel that throws on its [n]th call (it runs once per track file, before the file). */
+    private fun cancelAt(n: Int): () -> Unit {
+        var calls = 0
+        return { if (++calls >= n) throw java.util.concurrent.CancellationException("ride started") }
+    }
+
+    @Test fun `a cancelled rebuild keeps what it parsed - the rerun parses only the remainder`() {
+        val dir = tmp.newFolder()
+        val rides = (0 until 4).map { ride("r$it", t0 + it * day, speed = 5.0 + it) }.onEach { write(dir, it) }
+        assertTrue(runCatching { GradePaceStore(dir).rebuild(cancelAt(3)) }.isFailure) // 2 parsed, then cut
+        // A second cut before any file must not wipe the first one's progress.
+        assertTrue(runCatching { GradePaceStore(dir).rebuild(cancelAt(1)) }.isFailure)
+        val r = GradePaceStore(dir).rebuild()
+        assertEquals(2, r.parsed)
+        assertEquals(2, r.cached)
+        assertEquals(fresh(*rides.toTypedArray()).toDto(), r.model.toDto())
+    }
+
     @Test fun `a corrupt cache is recomputed`() {
         val dir = tmp.newFolder()
         val rides = threeRides(dir)

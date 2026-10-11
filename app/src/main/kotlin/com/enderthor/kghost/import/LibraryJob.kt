@@ -112,9 +112,10 @@ private suspend fun dischargeDebts(deps: LibraryDeps) {
     val ctx = currentCoroutineContext()
     val checkCancel = { ctx.ensureActive() }
     val gradeStore = GradePaceStore(deps.tracksDir)
-    // A missing or stale-schema model is owed too: that is how a schema bump makes the first run after an
-    // upgrade rebuild once over the whole archive. No loop: save() writes even an empty model.
-    if (cfg.gradeModelDirty || gradeStore.load() == null) {
+    // A missing or older-schema model is owed too: that is how a schema bump makes the first run after an
+    // upgrade rebuild once over the whole archive (an older but servable model keeps serving meanwhile).
+    // No loop: save() writes even an empty model.
+    if (cfg.gradeModelDirty || !gradeStore.isCurrent()) {
         try {
             // STREAMED, one track file at a time (live + archive, cached per file): the library in heap OOMs a Karoo.
             val r = gradeStore.rebuild(checkCancel)

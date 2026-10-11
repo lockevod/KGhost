@@ -14,25 +14,29 @@ import java.io.File
  * One-file persistence for the global [GradePace] model. Tiny (41 bins), rewritten only when an import
  * finishes, read once per route load.
  *
- * A stale schema or an unparseable file is DISCARDED, never partially trusted: the caller then falls back
+ * An unservable schema (below [MIN_SERVABLE_SCHEMA]) or an unparseable file is DISCARDED, never partially
+ * trusted: the caller then falls back
  * to the neutral fill, which is a silence rather than a wrong verdict. Same policy as [AggregateStore].
  */
 class GradePaceStore(private val dir: File) {
 
     private val file: File get() = File(dir, FILE_NAME)
 
-    fun load(): GradePace? {
+    /**
+     * The model to SERVE: any schema in [MIN_SERVABLE_SCHEMA]..[GRADE_SCHEMA_VERSION] (same DTO layout), so
+     * an input-set bump keeps the old model answering until the rebuild it owes ([isCurrent]) completes.
+     */
+    fun load(): GradePace? = readDto()
+        ?.takeIf { it.schemaVersion in MIN_SERVABLE_SCHEMA..GRADE_SCHEMA_VERSION }
+        ?.let(GradePace::fromDto)
+
+    /** False when the model is missing, unreadable or of an older schema: a rebuild is OWED. */
+    fun isCurrent(): Boolean = readDto()?.schemaVersion == GRADE_SCHEMA_VERSION
+
+    private fun readDto(): GradePaceDto? {
         val f = file
         if (!f.isFile) return null
-        return runCatching {
-            jsonWithUnknownKeys.decodeFromString<GradePaceDto>(f.readText())
-                .takeIf { it.schemaVersion == GRADE_SCHEMA_VERSION }
-                ?.let(GradePace::fromDto)
-                ?: run {
-                    Timber.i("grade-pace model is a stale schema; discarding (will rebuild on next import)")
-                    null
-                }
-        }.getOrElse {
+        return runCatching { jsonWithUnknownKeys.decodeFromString<GradePaceDto>(f.readText()) }.getOrElse {
             Timber.w(it, "grade-pace model unreadable; discarding")
             null
         }
@@ -86,7 +90,8 @@ class GradePaceStore(private val dir: File) {
      *  - an altitude-bearing RECORDED track's interval uses ELAPSED time (shorter, same start), so its FIT
      *    twin still overlaps it by more than 50 % of its own duration and one of them is suppressed.
      *
-     * The cache is written atomically AFTER the model save; a cache write failure only costs a re-parse.
+     * The cache is written atomically AFTER the model save; a cache write failure only costs a re-parse. A
+     * cancelled (or failed) pass still writes the folds it parsed, so a cold rebuild converges across runs.
      */
     fun rebuild(checkCancel: () -> Unit = {}): RebuildResult {
         val t0 = System.nanoTime()
@@ -96,44 +101,49 @@ class GradePaceStore(private val dir: File) {
         var cached = 0
         var liveFiles = 0
         var archiveFiles = 0
-        for (where in listOf(LIVE, ARCHIVE)) {
-            val d = if (where == LIVE) dir else File(dir, TrackStore.ARCHIVE_SUBDIR)
-            for (f in d.listFiles().orEmpty()) {
-                if (!TrackStore.isTrackFile(f)) continue
-                checkCancel()
-                if (where == LIVE) liveFiles++ else archiveFiles++
-                val id = TrackStore.trackIdOf(f)
-                val size = f.length()
-                val mtime = f.lastModified()
-                // Same place first, then the other one: a live -> archive move keeps size and mtime.
-                val hit = listOf(where, if (where == LIVE) ARCHIVE else LIVE)
-                    .firstNotNullOfOrNull { w -> old[w to id]?.takeIf { it.size == size && it.mtime == mtime } }
-                if (hit != null) {
-                    entries += hit.copy(where = where)
-                    cached++
-                    continue
+        try {
+            for (where in listOf(LIVE, ARCHIVE)) {
+                val d = if (where == LIVE) dir else File(dir, TrackStore.ARCHIVE_SUBDIR)
+                for (f in d.listFiles().orEmpty()) {
+                    if (!TrackStore.isTrackFile(f)) continue
+                    checkCancel()
+                    if (where == LIVE) liveFiles++ else archiveFiles++
+                    val id = TrackStore.trackIdOf(f)
+                    val size = f.length()
+                    val mtime = f.lastModified()
+                    // Same place first, then the other one: a live -> archive move keeps size and mtime.
+                    val hit = listOf(where, if (where == LIVE) ARCHIVE else LIVE)
+                        .firstNotNullOfOrNull { w -> old[w to id]?.takeIf { it.size == size && it.mtime == mtime } }
+                    if (hit != null) {
+                        entries += hit.copy(where = where)
+                        cached++
+                        continue
+                    }
+                    // An unreadable file gets NO entry, so a transient IO error is retried next time; an
+                    // undecodable one is cached as empty (it is not a track) until its size/mtime change.
+                    val text = runCatching { f.readText() }.getOrElse {
+                        Timber.w(it, "grade-pace rebuild: could not read %s", f.name)
+                        null
+                    } ?: continue
+                    parsed++
+                    val track = runCatching { jsonWithUnknownKeys.decodeFromString<RecordedTrack>(text) }.getOrNull()
+                    val fold = track?.let(GradePace::foldOf)
+                    val start = track?.startedAtEpoch ?: 0L
+                    val end = start + ((track?.points?.lastOrNull()?.timeS ?: 0.0) * 1000.0).toLong()
+                    entries += FoldEntry(where, id, size, mtime, start, end, fold?.sumDt.orEmpty(), fold?.sumDd.orEmpty())
                 }
-                // An unreadable file gets NO entry, so a transient IO error is retried next time; an
-                // undecodable one is cached as empty (it is not a track) until its size/mtime change.
-                val text = runCatching { f.readText() }.getOrElse {
-                    Timber.w(it, "grade-pace rebuild: could not read %s", f.name)
-                    null
-                } ?: continue
-                parsed++
-                val track = runCatching { jsonWithUnknownKeys.decodeFromString<RecordedTrack>(text) }.getOrNull()
-                val fold = track?.let(GradePace::foldOf)
-                val start = track?.startedAtEpoch ?: 0L
-                val end = start + ((track?.points?.lastOrNull()?.timeS ?: 0.0) * 1000.0).toLong()
-                entries += FoldEntry(where, id, size, mtime, start, end, fold?.sumDt.orEmpty(), fold?.sumDd.orEmpty())
             }
+        } catch (e: Throwable) {
+            // Cut short (an auto run is cancelled when a ride starts): keep what this pass parsed, plus the old
+            // entries it never reached, so a cold rebuild converges across cancelled runs. No model save.
+            val seen = entries.mapTo(HashSet()) { it.where to it.id }
+            writeFolds(entries + old.filterKeys { it !in seen }.values)
+            throw e
         }
         val (folds, suppressed) = dedupe(entries)
         val model = GradePace.reduce(folds)
         val saved = save(model)
-        val cacheOk = runCatching {
-            atomicWriteText(foldsFile, jsonForStorage.encodeToString(FoldCacheDto(GRADE_SCHEMA_VERSION, entries)))
-        }.getOrDefault(false)
-        if (!cacheOk) Timber.w("grade-pace fold cache not persisted; the next rebuild re-parses")
+        if (!writeFolds(entries)) Timber.w("grade-pace fold cache not persisted; the next rebuild re-parses")
         Timber.i(
             "grade-pace rebuild: %d ms, files live=%d archive=%d, parsed=%d cached=%d, rides=%d suppressed=%d, coveredM=%.0f",
             (System.nanoTime() - t0) / 1_000_000, liveFiles, archiveFiles, parsed, cached, folds.size, suppressed,
@@ -143,6 +153,10 @@ class GradePaceStore(private val dir: File) {
     }
 
     private val foldsFile: File get() = File(dir, FOLDS_FILE_NAME)
+
+    private fun writeFolds(entries: List<FoldEntry>): Boolean = runCatching {
+        atomicWriteText(foldsFile, jsonForStorage.encodeToString(FoldCacheDto(GRADE_SCHEMA_VERSION, entries)))
+    }.getOrDefault(false)
 
     /** The previous run's folds; empty (= full recompute) when missing, corrupt or of another schema. */
     private fun loadFolds(): Map<Pair<String, String>, FoldEntry> {
@@ -181,6 +195,11 @@ class GradePaceStore(private val dir: File) {
         const val FOLDS_FILE_NAME = "gradepace-folds.json"
         internal const val LIVE = "live"
         internal const val ARCHIVE = "archive"
+
+        /** Oldest persisted model [load] still serves. 1 -> 2 changed only the input set (the DTO is the
+         *  same), so a v1 model keeps the ghost going while the v2 rebuild is owed. Raise it to the new
+         *  version when a bump changes the DTO or the meaning of a field. */
+        internal const val MIN_SERVABLE_SCHEMA = 1
 
         /** Longest interval rule (b) believes. Real rides, ultras included, fit; a clock-jumped FIT does not. */
         internal const val MAX_RIDE_SPAN_MS = 24 * 3_600_000L
