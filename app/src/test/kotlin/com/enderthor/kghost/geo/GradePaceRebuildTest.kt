@@ -280,6 +280,33 @@ class GradePaceRebuildTest {
         assertEquals(3, GradePaceStore(dir).rebuild().parsed)
     }
 
+    @Test fun `a drift fold cached before the drift gate is recomputed - and comes back empty`() {
+        val dir = tmp.newFolder()
+        // GPS jitter at home: a point every 10 s, golden-angle scattered within 100 m, flat.
+        var d = 0.0
+        var prev: Pair<Double, Double>? = null
+        val pts = (0 until 360).map { i ->
+            val r = 20.0 + (i * 37 % 80)
+            val a = Math.toRadians(i * 137.5)
+            val xy = r * kotlin.math.cos(a) to r * kotlin.math.sin(a)
+            prev?.let { d += kotlin.math.hypot(xy.first - it.first, xy.second - it.second) }
+            prev = xy
+            TrackPointDto(41.0 + xy.second / 111_195.0, 2.0 + xy.first / 83_900.0, d, i * 10.0, 50.0)
+        }
+        val drift = RecordedTrack("drift", t0, pts)
+        write(dir, drift)
+        val f = File(dir, "drift.json")
+        // The cache a pre-gate build (schema 2, pre-gate signature) left: this drift folded as 30 km of flat.
+        val stale = GradePaceStore.FoldCacheDto(
+            2, "bin=1.0 max=20.0 win=100.0 gap=200.0 v=0.5..30.0",
+            listOf(GradePaceStore.FoldEntry(GradePaceStore.LIVE, "drift", f.length(), f.lastModified(), t0, t0 + 3_600_000L, mapOf(0 to 3600.0), mapOf(0 to 30_000.0))),
+        )
+        File(dir, GradePaceStore.FOLDS_FILE_NAME).writeText(jsonForStorage.encodeToString(stale))
+        val r = GradePaceStore(dir).rebuild()
+        assertEquals(1, r.parsed)
+        assertEquals(0.0, r.model.coveredM, 0.0)
+    }
+
     @Test fun `a corrupt cache is recomputed`() {
         val dir = tmp.newFolder()
         val rides = threeRides(dir)

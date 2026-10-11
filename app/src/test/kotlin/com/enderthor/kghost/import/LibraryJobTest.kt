@@ -305,7 +305,7 @@ class LibraryJobTest {
         val f = File(fx.tracksDir, GradePaceStore.FILE_NAME)
         f.writeText("""{"schemaVersion":1,"bins":[]}""")
         run(fx.deps()).getOrThrow()
-        assertTrue(f.readText().contains("\"schemaVersion\":2"))
+        assertTrue(f.readText().contains("\"schemaVersion\":${com.enderthor.kghost.engine.GRADE_SCHEMA_VERSION}"))
     }
 
     @Test fun `an empty library writes an empty model once and then stops rebuilding`() = runTest {

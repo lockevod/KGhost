@@ -1,6 +1,10 @@
 package com.enderthor.kghost.engine
 
+import com.enderthor.kghost.geo.LatLng
+import com.enderthor.kghost.geo.Polyline
 import com.enderthor.kghost.geo.RecordedTrack
+import com.enderthor.kghost.geo.TrackPointDto
+import kotlin.math.ceil
 import kotlinx.serialization.Serializable
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -11,14 +15,30 @@ import kotlin.math.roundToInt
  *  when the DTO or a field's meaning changes). The per-file fold cache carries this version AND
  *  [GRADE_FOLD_SIGNATURE], so a changed fold constant invalidates cached folds even without a bump.
  *  2: the model counts the archive too, one contribution per physical ride — the bump makes the first run
- *  after the upgrade rebuild once over the whole archive (the one-time history recovery). */
-const val GRADE_SCHEMA_VERSION = 2
+ *  after the upgrade rebuild once over the whole archive (the one-time history recovery).
+ *  3: the home-drift gate ([GradePace.isHomeDrift]) empties drift sessions; the DTO is unchanged. */
+const val GRADE_SCHEMA_VERSION = 3
 
 /** Every constant [GradePace.foldOf] reads, stamped into the fold cache: change one and every cached fold is
  *  recomputed. Add any new foldOf input here. */
 internal val GRADE_FOLD_SIGNATURE: String =
     "bin=$GRADE_BIN_PCT max=$GRADE_MAX_PCT win=$GRADE_WINDOW_M gap=${TrackSamples.DROPOUT_GAP_M} " +
-        "v=$AGG_MIN_SPEED_MS..$AGG_MAX_SPEED_MS"
+        "v=$AGG_MIN_SPEED_MS..$AGG_MAX_SPEED_MS " +
+        "drift=$DRIFT_FOOTPRINT_M/$DRIFT_MAX_TURN_DEG/$DRIFT_MIN_CHORD_M/$DRIFT_MIN_PAIRS"
+
+/** Home-drift gate ([GradePace.isHomeDrift]): a track whose robust footprint (95th-percentile distance of its
+ *  points from their per-axis median point) is under this many metres may be drift... */
+const val DRIFT_FOOTPRINT_M = 1000.0
+
+/** ...and IS drift when the median turn between consecutive qualifying steps exceeds this. Genuine rides
+ *  measured on the real library: median turn p50 8 deg, max 12 deg; drift sessions p50 63 deg. */
+const val DRIFT_MAX_TURN_DEG = 30.0
+
+/** A step only carries a heading when its GEOGRAPHIC chord is at least this long (shorter is GPS noise). */
+const val DRIFT_MIN_CHORD_M = 5.0
+
+/** Below this many qualifying heading pairs there is no verdict, and the track is kept. */
+const val DRIFT_MIN_PAIRS = 20
 
 /** Gradient bin width (%). 1% is finer than the noise floor of a smoothed barometric profile and keeps the
  *  table at 41 entries. */
@@ -128,9 +148,11 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
         fun build(tracks: List<RecordedTrack>): GradePace =
             Builder().apply { tracks.forEach { add(it) } }.build()
 
-        /** One track's per-bin (seconds, metres) totals; empty maps when it carries no usable altitude. */
+        /** One track's per-bin (seconds, metres) totals; empty maps when it carries no usable altitude or is
+         *  home drift ([isHomeDrift]) — gated HERE so the per-file fold cache stores the empty result. */
         fun foldOf(track: RecordedTrack): Fold {
             val pts = track.points
+            if (isHomeDrift(pts)) return Fold(track.startedAtEpoch, emptyMap(), emptyMap())
             // Per-bin totals for THIS track: seconds and metres, so [reduce] emits one metre-weighted
             // sample per bin.
             val sumDt = HashMap<Int, Double>()
@@ -190,6 +212,54 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                 sumDd[bin] = (sumDd[bin] ?: 0.0) + stepM
             }
             return Fold(track.startedAtEpoch, sumDt, sumDd)
+        }
+
+        /**
+         * HOME DRIFT: a Karoo left on at home (or on a café table) records GPS jitter that the distance
+         * stream turns into kilometres of "riding" at plausible speeds, flat — it inflated the flat bin's
+         * metres and could become LAST. Speed, footprint or altitude alone cannot tell it from slow riding;
+         * HEADING COHERENCE can: riding — a small circuit, hill repeats, a velodrome — turns a little from
+         * step to step, jitter points anywhere. A track is drift iff BOTH:
+         *  1. its robust footprint (95th-percentile haversine distance of its points from the per-axis
+         *     MEDIAN point) is under [DRIFT_FOOTPRINT_M] — robust, so one far-off fix cannot hide it; and
+         *  2. the median |Δbearing| between consecutive QUALIFYING steps (geographic chord >=
+         *     [DRIFT_MIN_CHORD_M]) exceeds [DRIFT_MAX_TURN_DEG]. Headings are never paired across a step
+         *     [foldOf] rejects as a dropout or a speed spike; the pairing restarts after it. Fewer than
+         *     [DRIFT_MIN_PAIRS] pairs: no verdict, kept.
+         * Accepted residuals (user decision 2026-10-11): a session circling a loop smaller than ~80 m across
+         * (radius < ~40 m at the 20 m stored decimation -> a > 30 deg turn per chord), e.g. a very compact
+         * pump track, is excluded. Coherent back-and-forth drift along a line is NOT caught (no worse than
+         * before the gate).
+         */
+        internal fun isHomeDrift(pts: List<TrackPointDto>): Boolean {
+            val turns = ArrayList<Double>()
+            var lastBearing = Double.NaN
+            for (i in 1 until pts.size) {
+                val a = pts[i - 1]
+                val b = pts[i]
+                val stepM = b.distanceM - a.distanceM
+                val stepT = b.timeS - a.timeS
+                if (stepM > TrackSamples.DROPOUT_GAP_M || (stepT > 0.0 && stepM / stepT > AGG_MAX_SPEED_MS)) {
+                    lastBearing = Double.NaN
+                    continue
+                }
+                val la = LatLng(a.lat, a.lng)
+                val lb = LatLng(b.lat, b.lng)
+                if (Polyline.haversineM(la, lb) < DRIFT_MIN_CHORD_M) continue
+                val bearing = Polyline.bearingDeg(la, lb)
+                if (!lastBearing.isNaN()) turns += Polyline.bearingDiffDeg(lastBearing, bearing)
+                lastBearing = bearing
+            }
+            if (turns.size < DRIFT_MIN_PAIRS || turns.sorted()[turns.size / 2] <= DRIFT_MAX_TURN_DEG) return false
+            return robustFootprintM(pts) < DRIFT_FOOTPRINT_M
+        }
+
+        /** 95th-percentile haversine distance of [pts] from their per-axis median point. */
+        internal fun robustFootprintM(pts: List<TrackPointDto>): Double {
+            if (pts.isEmpty()) return 0.0
+            val centre = LatLng(pts.map { it.lat }.sorted()[pts.size / 2], pts.map { it.lng }.sorted()[pts.size / 2])
+            val d = pts.map { Polyline.haversineM(centre, LatLng(it.lat, it.lng)) }.sorted()
+            return d[ceil(0.95 * d.size).toInt() - 1]
         }
 
         /**
