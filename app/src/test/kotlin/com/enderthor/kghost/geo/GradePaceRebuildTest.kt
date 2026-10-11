@@ -357,7 +357,7 @@ class GradePaceRebuildTest {
         assertEquals(setOf("r0", "r1", "r2"), TrackStore(dir).allTrackIds().toSet())
     }
 
-    @Test fun `reduce parity holds with a sub-floor fast fragment, and the fragment cannot own BEST on either path`() {
+    @Test fun `reduce parity holds with a sub-floor fast fragment, and the fragment cannot own BEST or LAST on either path`() {
         val dir = tmp.newFolder()
         val kept = threeRides(dir) +
             ride("frag", t0 + 5 * day, durS = 38.0, speed = 12.0).also { write(dir, it) } // 360 m folded
@@ -370,6 +370,8 @@ class GradePaceRebuildTest {
         for (m in listOf(expected, fresh, cached)) {
             val best = m.pace(0.0, com.enderthor.kghost.engine.GhostPick.BEST)!!
             assertTrue("BEST $best must not be the fragment's $fragTpm", best > fragTpm + 1e-6)
+            val last = m.pace(0.0, com.enderthor.kghost.engine.GhostPick.LAST)!!
+            assertTrue("LAST $last must not be the newest ride's sub-floor fragment $fragTpm", last > fragTpm + 1e-6)
             assertEquals(4, countAt0(m))
         }
     }

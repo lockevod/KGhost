@@ -17,9 +17,9 @@ import kotlin.math.roundToInt
  *  2: the model counts the archive too, one contribution per physical ride — the bump makes the first run
  *  after the upgrade rebuild once over the whole archive (the one-time history recovery).
  *  3: the home-drift gate ([GradePace.isHomeDrift]) and the motorised gate ([GradePace.isMotorised]) empty
- *  drift and car sessions; the DTO is unchanged. `minTpm` also changed meaning under 3 (BEST from qualifying
- *  rides only, see [GradePace.reduce]); a schema-1/2 model served while its rebuild is owed keeps the old BEST
- *  until that rebuild — an accepted continuity tradeoff for an unreleased schema. */
+ *  drift and car sessions; the DTO is unchanged. `minTpm` and `lastTpm` also changed meaning under 3 (BEST and
+ *  LAST from qualifying rides only, see [GradePace.reduce]); a schema-1/2 model served while its rebuild is owed
+ *  keeps the old BEST/LAST until that rebuild — an accepted continuity tradeoff for an unreleased schema. */
 const val GRADE_SCHEMA_VERSION = 3
 
 /** Every constant [GradePace.foldOf] reads, stamped into the fold cache: change one and every cached fold is
@@ -113,6 +113,8 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
         /** Fastest per-ride pace among rides with >= [GRADE_MIN_BIN_M] in this bin, or [meanTpm] when none
          *  qualifies (finite, never 0/Infinity). See [reduce]. */
         var minTpm: Double = 0.0,
+        /** The newest ride's pace among rides with >= [GRADE_MIN_BIN_M] in this bin, or [meanTpm] when none
+         *  qualifies (finite, never 0/Infinity). See [reduce]. */
         var lastTpm: Double = 0.0,
         var metres: Double = 0.0,
         var count: Int = 0,
@@ -351,15 +353,18 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
          * for `lastTpm` to mean the most recent ride; `sortedBy` is stable, so folds sharing an epoch keep
          * the caller's order.
          *
-         * BEST (`minTpm`) is taken ONLY from rides that rode at least [GRADE_MIN_BIN_M] in the bin; `mean`,
-         * `last`, `metres` and `count` still take every ride. On the real library a few metres of anomalous
+         * BEST (`minTpm`) and LAST (`lastTpm`) are taken ONLY from rides that rode at least [GRADE_MIN_BIN_M] in
+         * the bin; `mean`, `metres` and `count` still take every ride. On the real library a few metres of anomalous
          * rides (a missed car, a GPS spike) pinned BEST at the 2x clamp in almost every bin (+8 %: 18.1 km/h
-         * vs AVERAGE 8.9); with the floor +8 % BEST is ~10.5. A bin with no qualifying ride persists
-         * `minTpm = meanTpm`, so BEST == AVERAGE there and the JSON stays finite.
+         * vs AVERAGE 8.9); with the floor +8 % BEST is ~10.5. LAST is the NEWEST qualifying ride (oldest-first
+         * order, equal epochs in the caller's order): a 45 m sliver set LAST at -19 % to 3.1 km/h, and a short
+         * home session as the newest ride would set the flat LAST. A bin with no qualifying ride persists
+         * `minTpm = lastTpm = meanTpm`, so BEST == LAST == AVERAGE there and the JSON stays finite.
          */
         fun reduce(folds: List<Fold>): GradePace {
             val map = HashMap<Int, Reducer>()
             val qualMin = HashMap<Int, Double>() // bins that HAVE a qualifying ride -> their fastest one
+            val qualLast = HashMap<Int, Double>() // ... -> their newest one
             for (fold in folds.sortedBy { it.epoch }) {
                 for ((bin, dd) in fold.sumDd) {
                     if (dd <= 0.0) continue
@@ -370,13 +375,18 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                     // the bin, against every metre already there. `r.metres` is read BEFORE the add below.
                     r.meanTpm =
                         if (r.count == 0) tpm else (r.meanTpm * r.metres + tpm * dd) / (r.metres + dd)
-                    if (dd >= GRADE_MIN_BIN_M) qualMin[bin] = min(qualMin[bin] ?: tpm, tpm)
-                    r.lastTpm = tpm
+                    if (dd >= GRADE_MIN_BIN_M) {
+                        qualMin[bin] = min(qualMin[bin] ?: tpm, tpm)
+                        qualLast[bin] = tpm
+                    }
                     r.metres += dd
                     r.count++
                 }
             }
-            for ((bin, r) in map) r.minTpm = qualMin[bin] ?: r.meanTpm
+            for ((bin, r) in map) {
+                r.minTpm = qualMin[bin] ?: r.meanTpm
+                r.lastTpm = qualLast[bin] ?: r.meanTpm
+            }
             return GradePace(map)
         }
     }

@@ -418,6 +418,34 @@ class GradePaceTest {
         assertEquals(1200.0, dto0(g).metres, 1e-9)
     }
 
+    // --- LAST from qualifying rides only: the newest ride with >= GRADE_MIN_BIN_M in the bin ---------------
+    private fun f(epoch: Long, dt: Double, dd: Double) = GradePace.Fold(epoch, mapOf(0 to dt), mapOf(0 to dd))
+
+    @Test fun `LAST - a sole 400 m ride is LAST and AVERAGE alike`() {
+        val g = GradePace.reduce(listOf(f(1L, 100.0, 400.0)))
+        assertEquals(0.25, g.pace(0.0, GhostPick.LAST)!!, 1e-12)
+        assertEquals(dto0(g).meanTpm, dto0(g).lastTpm, 0.0)
+    }
+
+    @Test fun `LAST - two 200 m rides, neither qualifying, is the mean, not the newer one`() {
+        val g = GradePace.reduce(listOf(f(1L, 40.0, 200.0), f(2L, 80.0, 200.0)))
+        assertEquals(0.3, g.pace(0.0, GhostPick.LAST)!!, 1e-12)
+        assertEquals(dto0(g).meanTpm, dto0(g).lastTpm, 0.0)
+    }
+
+    @Test fun `LAST - a newer 20 m sliver cannot displace an older qualifying ride`() {
+        val g = GradePace.reduce(listOf(f(1L, 80.0, 400.0), f(2L, 20.0, 20.0)))
+        assertEquals(0.2, g.pace(0.0, GhostPick.LAST)!!, 1e-12)
+        assertEquals(100.0 / 420.0, g.pace(0.0, GhostPick.AVERAGE)!!, 1e-12) // mean/count unchanged: ~0.2381
+        assertEquals(2, dto0(g).count)
+        assertEquals(420.0, dto0(g).metres, 1e-9)
+    }
+
+    @Test fun `LAST - equal epochs keep the caller's order, the later qualifying fold wins`() {
+        val g = GradePace.reduce(listOf(f(5L, 160.0, 400.0), f(5L, 80.0, 400.0), f(5L, 1.0, 10.0)))
+        assertEquals(0.2, g.pace(0.0, GhostPick.LAST)!!, 1e-12)
+    }
+
     @Test fun `the json round-trip carries no non-finite value when no ride qualifies`() {
         val folds = (1L..3L).map { GradePace.Fold(it, mapOf(0 to 40.0, 5 to 60.0), mapOf(0 to 200.0, 5 to 150.0)) }
         val g = GradePace.reduce(folds)
@@ -425,6 +453,7 @@ class GradePaceTest {
         assertFalse(json, json.contains("NaN") || json.contains("Infinity"))
         for (b in g.toDto().bins) {
             assertTrue("$b", listOf(b.meanTpm, b.minTpm, b.lastTpm, b.metres).all { it.isFinite() && it > 0.0 })
+            assertEquals("$b: no qualifying ride -> LAST is the mean", b.meanTpm, b.lastTpm, 0.0)
         }
         val back = GradePace.fromDto(com.enderthor.kghost.extension.jsonForStorage.decodeFromString(GradePaceDto.serializer(), json))
         for (pick in GhostPick.entries) assertEquals(pick.name, g.pace(0.0, pick)!!, back.pace(0.0, pick)!!, 0.0)
