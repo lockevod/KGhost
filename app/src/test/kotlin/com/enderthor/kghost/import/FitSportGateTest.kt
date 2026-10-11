@@ -81,6 +81,7 @@ class FitSportGateTest {
      */
     private fun writeFit(
         name: String, sessionSport: Sport?, speedMs: Double, sportMesgSport: Sport? = null,
+        positioned: Int = Int.MAX_VALUE,
     ): File {
         val out = File.createTempFile(name, ".fit")
         out.deleteOnExit()
@@ -101,9 +102,12 @@ class FitSportGateTest {
             enc.write(
                 RecordMesg().apply {
                     timestamp = DateTime(java.util.Date(startMs + (d / speedMs * 1000).toLong()))
-                    // ~41.4N 2.1E in semicircles, walking east so the points are distinct.
-                    positionLat = (41.4 * (1L shl 31) / 180.0).toInt()
-                    positionLong = ((2.1 + i * 0.0002) * (1L shl 31) / 180.0).toInt()
+                    // ~41.4N 2.1E in semicircles, walking east so the points are distinct. Records past
+                    // [positioned] carry no position (indoor trainer / GPS never locked).
+                    if (i < positioned) {
+                        positionLat = (41.4 * (1L shl 31) / 180.0).toInt()
+                        positionLong = ((2.1 + i * 0.0002) * (1L shl 31) / 180.0).toInt()
+                    }
                     distance = d.toFloat()
                     altitude = (100.0 + d * 0.06).toFloat()
                 },
@@ -161,6 +165,43 @@ class FitSportGateTest {
         val verdict = FitDecoder.decodeForImport(driven, Source.FIT_IMPORT)
         assertNotNull("the import path must get a VERDICT, not a transient failure", verdict)
         assertTrue("...carried as an empty track", verdict!!.points.isEmpty())
+
+        // Default-wired importer (no fitDecode override): the real decoder, the real ledger.
+        val ledger = File(tracks, "processed.json")
+        suspend fun once(): ImportProgress = HistoryImporter(
+            fitFilesDir = fits,
+            importDir = File(fits, "none"),
+            trackStore = com.enderthor.kghost.geo.TrackStore(tracks),
+            processedLedgerFile = ledger,
+        ).import(onlyNew = false).toList().last()
+
+        assertEquals(1, once().failed)
+        assertEquals("ledgered: nothing left to decode on the next import", 0, once().total)
+        fits.deleteRecursively()
+    }
+
+    /**
+     * An indoor trainer ride / never-locked GPS: a perfectly decodable CYCLING file with fewer than 2
+     * positioned records. That verdict is as deterministic as the sport gate's, so the import path must
+     * get the [FitDecoder.notARide] sentinel (→ Invalid → ledgered once), not a transient null that is
+     * re-decoded on every auto-discovery run forever. The ordinary [FitDecoder.decode] contract stays null.
+     */
+    @Test fun `a cycling FIT with no positioned record is a verdict, not a transient failure`() = assertUnpositionedVerdict(0)
+
+    @Test fun `a cycling FIT with one positioned record is a verdict, not a transient failure`() = assertUnpositionedVerdict(1)
+
+    private fun assertUnpositionedVerdict(n: Int) {
+        val f = writeFit("indoor-$n", Sport.CYCLING, speedMs = 6.0, positioned = n)
+        val verdict = FitDecoder.decodeForImport(f, Source.FIT_IMPORT)
+        assertNotNull("the import path must get a verdict", verdict)
+        assertTrue("...carried as an empty track", verdict!!.points.isEmpty())
+        assertNull("decode() still folds it to null", FitDecoder.decode(f, Source.FIT_IMPORT))
+    }
+
+    @Test fun `an unpositioned cycling FIT is decoded once and then ledgered`() = kotlinx.coroutines.test.runTest {
+        val fits = File.createTempFile("indoor-scan", "").let { it.delete(); it.mkdirs(); it }
+        val tracks = File(fits, "tracks").apply { mkdirs() }
+        writeFit("indoor", Sport.CYCLING, speedMs = 6.0, positioned = 0).copyTo(File(fits, "indoor.fit"))
 
         // Default-wired importer (no fitDecode override): the real decoder, the real ledger.
         val ledger = File(tracks, "processed.json")

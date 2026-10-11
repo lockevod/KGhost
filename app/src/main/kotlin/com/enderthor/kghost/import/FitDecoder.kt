@@ -87,9 +87,10 @@ object FitDecoder {
         decodeForImport(file, source)?.takeIf { it.points.isNotEmpty() }
 
     /**
-     * [decode] for the import pipeline, which needs the two rejections told apart: a gate rejection comes
-     * back as [notARide] (deterministic → ledgered after one decode), everything else as null (transient
-     * → retried). See [notARide].
+     * [decode] for the import pipeline, which needs the two rejections told apart: a gate rejection, or a
+     * cycling file with <2 positioned records (indoor trainer, GPS never locked), comes back as [notARide]
+     * (deterministic → ledgered after one decode); a decoder exception as null (transient → retried).
+     * See [notARide].
      */
     fun decodeForImport(file: File, source: Source): RecordedTrack? = runCatching {
         val decode = Decode()
@@ -174,8 +175,8 @@ object FitDecoder {
         null
     }
 
-    private fun buildTrack(points: List<TrackPoint>, firstEpochMs: Long?, source: Source): RecordedTrack? {
-        if (points.size < 2 || firstEpochMs == null) return null
+    private fun buildTrack(points: List<TrackPoint>, firstEpochMs: Long?, source: Source): RecordedTrack {
+        if (points.size < 2 || firstEpochMs == null) return notARide(source)
 
         // Re-base distance so the first positioned record starts at 0.0.
         val firstDistanceM = points.first().distanceM
