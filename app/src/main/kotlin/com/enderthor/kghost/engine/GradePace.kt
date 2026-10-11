@@ -180,32 +180,22 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                 while (j < i - 1 && here.distanceM - pts[j + 1].distanceM >= GRADE_WINDOW_M) j++
                 val stepM = here.distanceM - prev.distanceM
                 val stepT = here.timeS - prev.timeS
-                if (stepM > TrackSamples.DROPOUT_GAP_M) {
-                    // A device-off / tunnel jump, not riding. RESTART the gradient window here: left
-                    // alone, the trailing edge stays on the far side of the gap for the next ~100 m and
-                    // divides the gap's whole altitude jump by (gap + a few steps), landing a bogus
-                    // gradient — carrying the step's real, flat pace — in a steep bin. Costs the first
-                    // GRADE_WINDOW_M after every gap, which is the right trade. Checked BEFORE the
-                    // stepT guard below: a dropout's landing point can carry a duplicate/backward
-                    // timestamp (stepT <= 0), and that must still restart the window — a timestamp
-                    // fault must never suppress a distance-based dropout restart.
-                    j = i
-                    continue
-                }
-                if (stepM <= 0.0 || stepT <= 0.0) continue
-                val stepSpeed = stepM / stepT
-                if (stepSpeed > AGG_MAX_SPEED_MS) {
-                    // A GPS spike (30-200 m in one step): not riding, so it is no pace sample — and, like a
-                    // dropout, it must RESTART the window. Left alone the spike's metres stay in `dd` for the
-                    // next ~100 m and dilute the gradient ~2.5x, filing an 8% climb's crawl in bin +3.
-                    j = i
+                if (isStepFault(stepM, stepT)) {
+                    // A DROPOUT (device-off / tunnel jump, > DROPOUT_GAP_M) or a GPS SPIKE (above
+                    // AGG_MAX_SPEED_MS) is not riding, and it RESTARTS the gradient window: left alone the
+                    // trailing edge stays behind it for the next ~100 m and divides its altitude jump (or
+                    // dilutes the gradient with its metres) into a bogus bin carrying real pace. Costs the
+                    // first GRADE_WINDOW_M after each, which is the right trade. The dropout test ignores the
+                    // timestamp: its landing point can carry a duplicate/backward one, and a timestamp fault
+                    // must never suppress a distance-based restart.
+                    if (stepM > TrackSamples.DROPOUT_GAP_M || (stepT > 0.0 && stepM / stepT > AGG_MAX_SPEED_MS)) j = i
                     continue
                 }
                 // A DWELL (red light, cafe, a photo) is DROPPED, not clipped to the floor: a stop says
                 // nothing about pace-at-gradient, and a GradePace bin is GLOBAL — bin 0 holds 80-90% of a
                 // rider's metres, so a clipped city stop moves the pace used on a country lane. (`PacePatch`
                 // can afford the clip: its 18 m cells keep the poison at the junction it happened in.)
-                if (stepSpeed < AGG_MIN_SPEED_MS) continue
+                if (stepM / stepT < AGG_MIN_SPEED_MS) continue
                 val ele = here.eleM ?: continue
                 val back = pts[j]
                 val backEle = back.eleM ?: continue
@@ -238,8 +228,12 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
          *  1. its robust footprint (95th-percentile haversine distance of its points from the per-axis
          *     MEDIAN point) is under [DRIFT_FOOTPRINT_M] — robust, so one far-off fix cannot hide it; and
          *  2. the median |Δbearing| between consecutive QUALIFYING steps (geographic chord >=
-         *     [DRIFT_MIN_CHORD_M]) exceeds [DRIFT_MAX_TURN_DEG]. Headings are never paired across a step
-         *     [foldOf] rejects as a dropout or a speed spike; the pairing restarts after it. Fewer than
+         *     [DRIFT_MIN_CHORD_M]) exceeds [DRIFT_MAX_TURN_DEG]. Headings are never paired across a
+         *     faulty step ([isStepFault]: dropout, spike, non-positive distance or time) — the pairing
+         *     restarts after it. A DWELL step (< [AGG_MIN_SPEED_MS]), which [foldOf] also drops, still
+         *     carries a heading on purpose: drift IS dwell-speed jitter, and on the real library resetting at
+         *     dwells cleared 28 of 46 drift sessions, pouring ~45 km of jitter into the fold
+         *     (bin 0 AVERAGE 11.85 -> 10.07 km/h). Fewer than
          *     [DRIFT_MIN_PAIRS] pairs: no verdict, kept.
          * Accepted residuals (user decision 2026-10-11): a session circling a loop smaller than ~80 m across
          * (radius < ~40 m at the 20 m stored decimation -> a > 30 deg turn per chord), e.g. a very compact
@@ -252,9 +246,7 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
             for (i in 1 until pts.size) {
                 val a = pts[i - 1]
                 val b = pts[i]
-                val stepM = b.distanceM - a.distanceM
-                val stepT = b.timeS - a.timeS
-                if (stepM > TrackSamples.DROPOUT_GAP_M || (stepT > 0.0 && stepM / stepT > AGG_MAX_SPEED_MS)) {
+                if (isStepFault(b.distanceM - a.distanceM, b.timeS - a.timeS)) {
                     lastBearing = Double.NaN
                     continue
                 }
@@ -314,6 +306,12 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
             val d = pts.map { Polyline.haversineM(centre, LatLng(it.lat, it.lng)) }.sorted()
             return d[ceil(0.95 * d.size).toInt() - 1]
         }
+
+        /** A step that is no movement at all: a dropout (> DROPOUT_GAP_M), a non-positive distance or time,
+         *  or a spike (above [AGG_MAX_SPEED_MS]). ONE rule for [foldOf], which drops it, and [isHomeDrift],
+         *  which restarts its heading pairing after it, so the two cannot diverge. */
+        private fun isStepFault(stepM: Double, stepT: Double): Boolean =
+            !(stepM > 0.0 && stepM <= TrackSamples.DROPOUT_GAP_M && stepT > 0.0 && stepM / stepT <= AGG_MAX_SPEED_MS)
 
         /** The true median: the mean of the two central values for an even count. */
         private fun median(v: List<Double>): Double {

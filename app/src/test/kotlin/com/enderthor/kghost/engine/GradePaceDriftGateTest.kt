@@ -146,22 +146,45 @@ class GradePaceDriftGateTest {
         assertTrue(GradePace.foldOf(track(ridden(golden(22)))).isEmpty) // 21 steps -> 20 pairs
     }
 
-    @Test fun `a dropout between coherent sections creates no fake heading change`() {
-        // Three straight 10-step sections (27 zero-turn pairs) and 30 lone steps, each in its own direction,
-        // all separated by 300 m dropouts, inside a 200 m area. Pairing across the gaps would add ~32 big turns
-        // and flip the median; reset at every gap, only the 27 straight pairs count -> kept.
+    /** Three straight 10-step sections (27 zero-turn pairs) and 30 lone steps, each in its own direction, inside
+     *  a 200 m area, joined by a step of [joinM] metres over [joinS] seconds. Pairing headings across the joins
+     *  would add ~64 big turns and flip the median; reset at every join, only the 27 straight pairs count. */
+    private fun sections(joinM: Double, joinS: Double): RecordedTrack {
         val pts = ArrayList<P>()
         var d = 0.0; var t = 0.0
         fun section(i: Int, steps: Int) {
             val (sx, sy) = golden(i + 1)[i]
             val a = Math.toRadians(i * 97.0)
-            if (pts.isNotEmpty()) { d += 300.0; t += 60.0 }
+            if (pts.isNotEmpty()) { d += joinM; t += joinS }
             for (k in 0..steps) {
                 if (k > 0) { d += 20.0; t += 4.0 }
                 pts += P(sx + k * 20 * sin(a), sy + k * 20 * cos(a), d, t)
             }
         }
         for (i in 0 until 33) section(i, if (i % 11 == 0) 10 else 1)
-        assertFalse(GradePace.foldOf(track(pts)).isEmpty)
+        return track(pts)
+    }
+
+    @Test fun `a dropout between coherent sections creates no fake heading change`() {
+        assertFalse(GradePace.foldOf(sections(300.0, 60.0)).isEmpty)
+    }
+
+    @Test fun `a faulty step resets the heading pairing - duplicate timestamp, no distance, spike`() {
+        // On isHomeDrift itself: 32 spike joins would also trip the motorised gate in foldOf.
+        assertFalse("dt = 0", GradePace.isHomeDrift(sections(20.0, 0.0).points))
+        assertFalse("dd = 0", GradePace.isHomeDrift(sections(0.0, 4.0).points))
+        assertFalse("spike", GradePace.isHomeDrift(sections(150.0, 4.0).points))
+    }
+
+    @Test fun `slow drift - every other step a dwell below 0_5 m s - is still excluded, dwells carry the evidence`() {
+        // foldOf drops the dwell steps but folds the others. Resetting the heading pairing at each dwell would
+        // leave every folded step without a partner -> no verdict -> the jitter folds.
+        val xy = golden(80)
+        var d = 0.0; var t = 0.0
+        val pts = xy.mapIndexed { i, (x, y) ->
+            if (i > 0) { val c = hypot(x - xy[i - 1].first, y - xy[i - 1].second); d += c; t += c / (if (i % 2 == 0) 0.3 else 2.0) }
+            P(x, y, d, t)
+        }
+        assertTrue(GradePace.foldOf(track(pts)).isEmpty)
     }
 }
