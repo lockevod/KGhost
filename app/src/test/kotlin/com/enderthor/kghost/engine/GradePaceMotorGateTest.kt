@@ -29,8 +29,28 @@ class GradePaceMotorGateTest {
 
     private fun kept(vararg segs: Seg) = !GradePace.foldOf(track(*segs)).isEmpty
 
-    @Test fun `a car session - city 30-50 km h with 4 min over 60 km h on the flat - yields an empty fold`() {
-        assertFalse(kept(Seg(40.0, 900.0), Seg(30.0, 300.0, 1.0), Seg(65.0, 240.0), Seg(50.0, 600.0, -0.5)))
+    @Test fun `a car session - city 30-50 km h, 4 min over 60 km h with 1 min of it uphill - yields an empty fold`() {
+        assertFalse(kept(Seg(40.0, 900.0), Seg(30.0, 300.0, 1.0), Seg(65.0, 180.0), Seg(60.0, 60.0, 3.0), Seg(50.0, 600.0, -0.5)))
+    }
+
+    @Test fun `a car that never goes fast uphill is kept - the documented accepted miss`() {
+        // One 8-min city session in the real library is such a car.
+        assertTrue(kept(Seg(40.0, 900.0), Seg(30.0, 300.0, 1.0), Seg(65.0, 240.0), Seg(50.0, 600.0, -0.5)))
+    }
+
+    @Test fun `a tailwind out-and-back - 30 km back at 56 km h on the flat - is kept`() {
+        assertTrue(kept(Seg(25.0, 4320.0), Seg(56.0, 1930.0)))
+        assertTrue("on a +1.5 % false flat too", kept(Seg(25.0, 4320.0, -1.5), Seg(56.0, 1930.0, 1.5)))
+    }
+
+    @Test fun `a valley ride - up at 20 km h, back at 55 km h on -0_8 pct - is kept`() {
+        assertTrue(kept(Seg(20.0, 3600.0, 1.0), Seg(55.0, 1800.0, -0.8)))
+    }
+
+    @Test fun `29 s fast uphill does not corroborate, 31 s does`() {
+        // A slow +4 % lead-in so every fast step's window is all +4 %: 24 x 1.2 s = 28.8 s, then 26 x 1.2 = 31.2 s.
+        assertTrue(kept(Seg(40.0, 1200.0), Seg(65.0, 240.0), Seg(20.0, 60.0, 4.0), Seg(60.0, 29.0, 4.0)))
+        assertFalse(kept(Seg(40.0, 1200.0), Seg(65.0, 240.0), Seg(20.0, 60.0, 4.0), Seg(60.0, 31.5, 4.0)))
     }
 
     @Test fun `a 120 s recording with an 18 s sprint at 57_6 km h is kept - under the 45 s minimum`() {
@@ -57,8 +77,20 @@ class GradePaceMotorGateTest {
     }
 
     @Test fun `steps above the speed cap still count as evidence`() {
-        // 2 min at 120 km/h on the flat: foldOf drops those steps as spikes, the gate must still see them.
-        assertFalse(kept(Seg(40.0, 1800.0), Seg(120.0, 120.0)))
+        // A +4 % climb where the only steps with a known window are 40 m-in-1 s steps (above AGG_MAX_SPEED_MS):
+        // each restarts the window, so the 60 km/h steps between them stay unknown. foldOf drops such steps as
+        // spikes; the gate must still count them: 50 s of uphill evidence.
+        // 80 m between them (4 steps) keeps every window between them under GRADE_WINDOW_M.
+        val climb = (1..50).flatMap { listOf(Seg(60.0, 5.0, 4.0), Seg(0.0, 1.0, gapM = 40.0)) }
+        assertFalse(kept(Seg(40.0, 300.0), *climb.toTypedArray()))
+    }
+
+    @Test fun `an above-cap spike restarts the gradient window - its metres cannot drag a descent into flat evidence`() {
+        // 35 s genuinely fast uphill (corroborated, but under 45 s), then 2 min at 60 km/h on -2 % with a 150 m
+        // GPS spike every 100 m. Left in the window, each spike's metres read the descent as ~-0.8 % -> ~2 min
+        // of false flat evidence -> motorised. Restarted, those windows are unknown.
+        val descent = (1..20).flatMap { listOf(Seg(60.0, 6.1, -2.0), Seg(0.0, 1.0, gapM = 150.0)) }
+        assertTrue(kept(Seg(30.0, 1800.0, 1.0), Seg(60.0, 35.0, 4.0), *descent.toTypedArray()))
     }
 
     @Test fun `a gap step - 1000 m over 60 s - does not count as fast`() {

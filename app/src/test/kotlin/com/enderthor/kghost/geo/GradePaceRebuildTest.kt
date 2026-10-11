@@ -309,12 +309,12 @@ class GradePaceRebuildTest {
 
     @Test fun `a car fold cached before the motorised gate is recomputed - and comes back empty`() {
         val dir = tmp.newFolder()
-        // 20 min at 40 km/h then 4 min at 72 km/h, flat: a car.
+        // 20 min at 40 km/h on the flat, then 4 min at 72 km/h up +3 %: a car.
         val car = ride("car", t0, durS = 1200.0, speed = 11.0).let { slow ->
             val last = slow.points.last()
             slow.copy(points = slow.points + (1..240).map { i ->
                 val d = last.distanceM + i * 20.0
-                TrackPointDto(41.0, 2.0 + d / 83_000.0, d, last.timeS + i * 1.0, 0.0)
+                TrackPointDto(41.0, 2.0 + d / 83_000.0, d, last.timeS + i * 1.0, i * 20.0 * 0.03)
             })
         }
         write(dir, car)
