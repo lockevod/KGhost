@@ -63,6 +63,23 @@ class GradePaceRebuildTest {
         assertEquals(fresh(fit).toDto(), m.toDto())
     }
 
+    // Codex counterexample: an enriched RECORDED fold's interval is ELAPSED time (pauses excluded), its FIT
+    // twin's is wall time. R=[08:00,09:00] vs F=[08:00,11:00]: the overlap (1 h) is all of R but only a third of
+    // F, so a rule judged on the candidate's OWN duration let F through when R had more metres. Judged on the
+    // SHORTER of the two, it is a duplicate in either order.
+    @Test fun `an elapsed-time recording and its much longer wall-time FIT twin count once, either one larger`() {
+        for ((recM, fitM) in listOf(20_000.0 to 19_000.0, 19_000.0 to 20_000.0)) {
+            val dir = tmp.newFolder()
+            val rec = ride("rec", t0, durS = 3_600.0, speed = recM / 3_600.0, source = Source.RECORDED)
+            val fit = ride("fit", t0, durS = 10_800.0, speed = fitM / 10_800.0, source = Source.FITFILES_SCAN)
+            write(dir, rec)
+            write(archiveDir(dir), fit)
+            val r = GradePaceStore(dir).rebuild()
+            assertEquals("rec=$recM fit=$fitM", 1, r.suppressed)
+            assertEquals(fresh(if (recM > fitM) rec else fit).toDto(), r.model.toDto())
+        }
+    }
+
     @Test fun `the same id live and archived counts once, the copy with more metres`() {
         val dir = tmp.newFolder()
         // Epoch 0: rule (b) never suppresses it, so only the same-id rule (a) can collapse the pair.
@@ -116,7 +133,8 @@ class GradePaceRebuildTest {
     }
 
     @Test fun `A-B-C with A then C largest - all three survive`() {
-        // B overlaps only 25 % of its own 2 h with A and with C.
+        // B shares 30 min with A and with C: 25 % of its own 2 h, and exactly 50 % of the SHORTER (A's or C's 1 h)
+        // under the min-duration rule - still not STRICTLY more, so the expectation is unchanged.
         assertEquals(setOf(0L, 30L, 120L), survivors(entry("A", 0, 60, 3000.0), entry("B", 30, 150, 1000.0), entry("C", 120, 180, 2000.0)))
     }
 

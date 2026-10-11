@@ -80,7 +80,8 @@ class GradePaceStore(private val dir: File) {
      *  a. the same id live AND archived (a rebuildAll re-decode) is one candidate — the fold with more metres;
      *  b. candidates in descending total metres (tie: lowest id) are accepted unless their own interval
      *     `[startedAtEpoch, startedAtEpoch + lastPoint.timeS]` overlaps an already-ACCEPTED one by MORE than 50 %
-     *     of their OWN duration. Pairwise against accepted folds only — no transitive clusters, so a long
+     *     of the SHORTER of the two durations (an enriched RECORDED fold's interval is ELAPSED time, pauses
+     *     excluded, so its wall-time FIT twin can be several times longer). Pairwise against accepted folds only — no transitive clusters, so a long
      *     ride B straddling A and C cannot chain A and C into one. An UNDATABLE interval — `startedAtEpoch
      *     <= 0`, end <= start (a backward clock jump) or longer than [MAX_RIDE_SPAN_MS] (a forward jump, e.g.
      *     the FIT-replay simulator moving the system clock) — is exempt from (b) both ways: it never
@@ -89,9 +90,9 @@ class GradePaceStore(private val dir: File) {
      *  - a friend's overlapping FIT imported by hand replaces the owner's fold when it has more metres
      *    (before, both counted);
      *  - a ride split across two partial files keeps only the larger part;
-     *  - a clock-shifted re-export of the same ride counts twice (as before);
-     *  - an altitude-bearing RECORDED track's interval uses ELAPSED time (shorter, same start), so its FIT
-     *    twin still overlaps it by more than 50 % of its own duration and one of them is suppressed.
+     *  - on the rider's real library, two FIT-replay simulator replays of one ride on different days
+     *    (archive-only copies before) are now counted twice; a developer-testing artefact, ~3 % of
+     *    metres, not handled.
      *
      * The cache is written atomically AFTER the model save; a cache write failure only costs a re-parse. A
      * cancelled (or failed) pass still writes the folds it parsed, so a cold rebuild converges across runs.
@@ -225,9 +226,9 @@ class GradePaceStore(private val dir: File) {
             // (b) greedy, most metres first, pairwise against ACCEPTED candidates only.
             val accepted = ArrayList<FoldEntry>()
             for (c in byId.sortedWith(compareByDescending<FoldEntry> { it.totalM }.thenBy { it.id })) {
-                val dur = c.endEpoch - c.startEpoch
                 val dup = c.datable && accepted.any { a ->
-                    a.datable && minOf(a.endEpoch, c.endEpoch) - maxOf(a.startEpoch, c.startEpoch) > dur / 2.0
+                    val shorter = minOf(c.endEpoch - c.startEpoch, a.endEpoch - a.startEpoch)
+                    a.datable && minOf(a.endEpoch, c.endEpoch) - maxOf(a.startEpoch, c.startEpoch) > shorter / 2.0
                 }
                 if (dup) suppressed++ else accepted += c
             }
