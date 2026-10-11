@@ -2057,6 +2057,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             locRepeatCount = 0L; locRepeatMovingCount = 0L; probeRiderMoving = false
             lastLocLat = Double.NaN; lastLocLng = Double.NaN
             lastCadenceLogMs = 0L; lastTickDistM = Double.NaN
+            // The route-load line is the only other place this shows, so a no-route ride never said whether
+            // the gradient model exists (field logs: "absent" on every device that never imported).
+            scope.launch(Dispatchers.IO) {
+                val gp = GradePaceStore(TrackStorage.tracksDir(applicationContext)).load()
+                Timber.i("KVP ride start: gradePace=%s", gp?.let { "coveredM=%.0f usable=%b".format(it.coveredM, it.hasUsableBin) } ?: "absent")
+            }
         }
         // GPS location consumer — subscribed only while Recording. `lastFix` is the ONE position source
         // the ride uses: the RECORDER, the historical-pace lookup, and the marker's route projection all
