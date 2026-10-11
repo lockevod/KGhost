@@ -40,6 +40,9 @@ import com.enderthor.kghost.engine.toInfo
 import com.enderthor.kghost.engine.AGG_MIN_LAPS
 import com.enderthor.kghost.engine.CorridorSeeder
 import com.enderthor.kghost.engine.GhostCheckpoint
+import com.enderthor.kghost.engine.VpOrigin
+import com.enderthor.kghost.engine.startVpOrigin
+import com.enderthor.kghost.engine.vpRaceGap
 import com.enderthor.kghost.engine.raceCheckpoint
 import com.enderthor.kghost.engine.GhostIntegrator
 import com.enderthor.kghost.engine.GradePace
@@ -305,6 +308,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          *  proximity that lets a resumed ride (continuous distance) restore even when the process died
          *  and minted a fresh recordingStartedEpoch (a genuinely new ride starts near 0 → rejected). */
         private const val GHOST_CHECKPOINT_FILE = "ghost-checkpoint.json"
+        // Persisted Ghost-Pace race origin (see VpOrigin) — same lifecycle as the ghost checkpoint.
+        private const val VP_ORIGIN_FILE = "vp-origin.json"
         private const val CHECKPOINT_INTERVAL_MS = 5_000L
         // A checkpoint older than this (wall-clock) is not a resume candidate — bounds cross-ride false hits.
         private const val CHECKPOINT_MAX_AGE_MS = 6 * 60 * 60 * 1000L
@@ -549,6 +554,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     @Volatile private var firstMoveElapsedS: Double? = null
     // ① Ghost-Pace clock origin — set ONCE per ride, NEVER re-nulled on a route change.
     @Volatile private var vpFirstMoveElapsedS: Double? = null
+    // Odometer captured WITH vpFirstMoveElapsedS — the VP race measures distance from here, so an adopted
+    // (or late-speed) origin never counts metres ridden before it as lead.
+    @Volatile private var vpStartDistM: Double = 0.0
+    // Latest VP origin snapshot (origin fixed, continuity evidence refreshed) + its write throttle.
+    @Volatile private var pendingVpOrigin: VpOrigin? = null
+    @Volatile private var lastVpOriginSaveMs: Long = 0L
     // Consecutive MOVING ticks off the windowed line — arms the unambiguous global marker re-acquire.
     @Volatile private var emptyWindowTicks: Int = 0
     // The rider's last TRUSTWORTHY route distance (the monotone rail) + the odometer captured with it.
@@ -648,6 +659,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         projectorPolyline = null
         firstMoveElapsedS = null
         vpFirstMoveElapsedS = null
+        vpStartDistM = 0.0
+        pendingVpOrigin = null
+        lastVpOriginSaveMs = 0L
         emptyWindowTicks = 0
         lastGoodRouteDistM = null
         distMAtLastGoodM = null
@@ -705,6 +719,24 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     /** Deletes the checkpoint at a clean ride end so the next ride starts fresh. */
     private fun deleteGhostCheckpoint() {
         runCatching { ghostCheckpointFile.delete() }
+    }
+
+    // ---- VP origin (Ghost-Pace race clock + start odometer) — same pattern as the ghost checkpoint.
+    private val vpOriginFile: File get() = File(applicationContext.filesDir, VP_ORIGIN_FILE)
+
+    private fun loadVpOrigin(): VpOrigin? = runCatching {
+        val f = vpOriginFile
+        if (!f.exists()) null else jsonForStorage.decodeFromString(VpOrigin.serializer(), f.readText())
+    }.getOrNull()
+
+    /** Flushes the latest tick-built [pendingVpOrigin] atomically. Suspends; call on IO. */
+    private suspend fun flushVpOrigin() {
+        val o = pendingVpOrigin ?: return
+        checkpointMutex.withLock {
+            runCatching {
+                atomicWriteText(vpOriginFile, jsonForStorage.encodeToString(VpOrigin.serializer(), o), fsync = false)
+            }.onFailure { Timber.w(it, "VP origin write failed") }
+        }
     }
 
     // Wall-clock epoch captured when the current Recording started. Used as the recorded track's
@@ -1221,7 +1253,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // A checkpoint left by a ride that really ended while we were dead stays behind; the
                     // restore gates (6 h age, routeKey, pick, GhostCheckpoint.continuesRide's odometer + ride
                     // clock continuity) keep a new ride from taking it.
-                    if (sawActiveRide) deleteGhostCheckpoint()
+                    if (sawActiveRide) {
+                        deleteGhostCheckpoint()
+                        runCatching { vpOriginFile.delete() }
+                    }
                     else Timber.i("KVP Idle before any active ride in this process — checkpoint kept for a resume")
                     GapStateHolder.clear()
                     SegmentInfoHolder.clear()
@@ -2433,8 +2468,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             cachedCurve = GhostPaceSource(target).curve()
                             cachedTargetMs = target
                         }
-                        return GapCalculator.compute(
-                            coast.effectiveDistanceM, raceElapsedS, cachedCurve!!,
+                        return vpRaceGap(
+                            coast.effectiveDistanceM, vpStartDistM, raceElapsedS, cachedCurve!!,
                             fresh = coast.quality != CoastQuality.LONG_LOSS,
                         )
                     }
@@ -2467,8 +2502,41 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     }
                     // The VP race clock is set ONCE per ride and never re-nulled (see its declaration).
                     if (vpFirstMoveElapsedS == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS) {
-                        vpFirstMoveElapsedS = elapsedS
+                        // A fresh process mid-ride (ride-app restart, power-off) lands here with the whole-ride
+                        // odometer: ADOPT the persisted origin iff recent + same ride (the ghost checkpoint's
+                        // rule), else start fresh here. Tiny file read, once per ride (as loadGhostCheckpoint).
+                        val distNow = coast.effectiveDistanceM
+                        val saved = loadVpOrigin()
+                        val origin = startVpOrigin(
+                            saved, recordingStartedEpoch, elapsedS, distNow, System.currentTimeMillis(), CHECKPOINT_MAX_AGE_MS,
+                        )
+                        vpFirstMoveElapsedS = origin.originElapsedS
+                        vpStartDistM = origin.startDistM
+                        if (saved != null) {
+                            val recent = saved.isRecent(System.currentTimeMillis(), CHECKPOINT_MAX_AGE_MS)
+                            val continuous = saved.continues(recordingStartedEpoch, distNow, elapsedS)
+                            Timber.i(
+                                "KVP VP origin ${if (recent && continuous) "ADOPTED" else "REJECTED"}: " +
+                                    "recent=$recent continuous=$continuous epochMatch=${saved.rideEpoch == recordingStartedEpoch} " +
+                                    "origin=${"%.0f".format(saved.originElapsedS)}s/${"%.0f".format(saved.startDistM)}m " +
+                                    "(ΔdistM=${"%.0f".format(distNow - saved.lastDist)} " +
+                                    "cpElapsed=${"%.0f".format(saved.rideElapsedS)}s elapsedNow=${"%.0f".format(elapsedS)}s)",
+                            )
+                        }
+                        pendingVpOrigin = origin
+                        lastVpOriginSaveMs = SystemClock.elapsedRealtime()
+                        scope.launch(Dispatchers.IO) { flushVpOrigin() }
                         gpsHealth.onRaceStart(SystemClock.elapsedRealtime())
+                    }
+                    // Refresh the VP origin's continuity evidence in BOTH modes (a route-mode ride must still
+                    // resume its VP race after a restart). Origin fields stay fixed.
+                    pendingVpOrigin?.let { o ->
+                        val nowMs = SystemClock.elapsedRealtime()
+                        if (nowMs - lastVpOriginSaveMs >= CHECKPOINT_INTERVAL_MS) {
+                            lastVpOriginSaveMs = nowMs
+                            pendingVpOrigin = o.withEvidence(coast.effectiveDistanceM, elapsedS, System.currentTimeMillis())
+                            scope.launch(Dispatchers.IO) { flushVpOrigin() }
+                        }
                     }
 
                     // --- mode select: ② route mode vs ① Ghost Pace ---------------------

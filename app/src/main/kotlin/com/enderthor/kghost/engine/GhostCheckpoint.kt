@@ -1,7 +1,6 @@
 package com.enderthor.kghost.engine
 
 import kotlinx.serialization.Serializable
-import kotlin.math.abs
 
 /** Odometer proximity that lets a resume across a FRESH process (power-off, ride-app restart: new epoch,
  *  continuous distance) restore. Also the floor below which such a resume is refused: a checkpoint cut in
@@ -63,13 +62,7 @@ data class GhostCheckpoint(
      *  KGhost was dead. Residual: a new ride on the same route, within 6 h, whose route loads near the old
      *  cut at a later clock — then the lead is from the same stretch. */
     fun continuesRide(rideEpoch: Long, riderDistNow: Double, elapsedNowS: Double): Boolean =
-        this.rideEpoch == rideEpoch || (
-            rideElapsedS >= 0.0 &&
-                lastRiderDist > CHECKPOINT_RESUME_MARGIN_M &&
-                riderDistNow > CHECKPOINT_RESUME_MARGIN_M &&
-                abs(riderDistNow - lastRiderDist) <= CHECKPOINT_RESUME_MARGIN_M &&
-                elapsedNowS >= rideElapsedS - CHECKPOINT_ELAPSED_SLACK_S
-            )
+        rideContinues(this.rideEpoch, lastRiderDist, rideElapsedS, rideEpoch, riderDistNow, elapsedNowS)
 }
 
 /** The ONE way the race tick builds a checkpoint. [comparator] and [historyVerdictSeen] are REQUIRED here
