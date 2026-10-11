@@ -3,6 +3,8 @@ package com.enderthor.kghost.geo
 import com.enderthor.kghost.engine.GhostPick
 import com.enderthor.kghost.engine.GradePace
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
@@ -40,6 +42,19 @@ class GradePaceStoreTest {
         val dir = tmp.newFolder()
         File(dir, "gradepace.json").writeText("""{"schemaVersion":0,"bins":[]}""")
         assertNull(GradePaceStore(dir).load())
+    }
+
+    @Test fun `a schema-1 model is still served while a rebuild is owed`() {
+        // v1 -> v2 changed the INPUT SET only; the DTO is byte-compatible, so the ghost keeps its GradePace
+        // until the (possibly long, cancellable) whole-history rebuild finishes.
+        val dir = tmp.newFolder()
+        val v1 = """{"schemaVersion":1,"bins":[{"bin":0,"meanTpm":0.2,"minTpm":0.2,"lastTpm":0.2,"metres":1000.0,"count":1}]}"""
+        File(dir, "gradepace.json").writeText(v1)
+        val store = GradePaceStore(dir)
+        assertEquals(0.2, store.load()!!.pace(0.0, GhostPick.AVERAGE)!!, 1e-9)
+        assertFalse(store.isCurrent())
+        store.save(model())
+        assertTrue(store.isCurrent())
     }
 
     @Test fun `a corrupt file is discarded instead of crashing the ride`() {

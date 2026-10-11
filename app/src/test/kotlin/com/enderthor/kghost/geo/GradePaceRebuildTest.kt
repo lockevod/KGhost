@@ -130,6 +130,28 @@ class GradePaceRebuildTest {
         assertEquals(setOf(0L, 50L), survivors(entry("A", 0, 60, 3000.0), entry("B", 20, 90, 2000.0), entry("C", 50, 110, 1000.0)))
     }
 
+    // An implausible interval (a FIT whose wall clock jumped forward, e.g. the FIT-replay simulator moving the
+    // system clock; or backward, end < start) is exempt from rule (b) in BOTH directions, like epoch 0.
+    @Test fun `a fold spanning months never suppresses the real rides inside its span`() {
+        val dayMin = 24 * 60L
+        val sim = entry("sim", 0, 140 * dayMin, 50_000.0)
+        val real = (1..5).map { entry("real$it", it * 10 * dayMin, it * 10 * dayMin + 60, 1000.0 + it) }
+        val r = GradePaceStore.dedupe(listOf(sim) + real)
+        assertEquals(6, r.first.size)
+        assertEquals(0, r.second)
+    }
+
+    @Test fun `a fold spanning more than a day is never suppressed`() {
+        // A = 20 h, most metres; S = 30 h starting with it: overlap 20 h > half of S's 30 h.
+        assertEquals(setOf(0L, 1L), survivors(entry("A", 0, 20 * 60, 3000.0), entry("S", 1, 30 * 60 + 1, 1000.0)))
+    }
+
+    @Test fun `a backward clock jump - end before start - neither suppresses nor is suppressed`() {
+        // B's end lies before its start; it sits on top of A whichever of the two has more metres.
+        assertEquals(setOf(0L, 1L), survivors(entry("A", 0, 60, 3000.0), entry("B", 1, -60, 1000.0)))
+        assertEquals(setOf(0L, 1L), survivors(entry("A", 0, 60, 1000.0), entry("B", 1, -60, 3000.0)))
+    }
+
     // --- archive included ----------------------------------------------------------------------------
 
     @Test fun `a pruned ride still counts - four rides give the same model before and after the sweep`() {
@@ -192,6 +214,52 @@ class GradePaceRebuildTest {
         val r = GradePaceStore(dir).rebuild()
         assertEquals(fresh(rides[0], rides[2]).toDto(), r.model.toDto())
         assertFalse(File(dir, GradePaceStore.FOLDS_FILE_NAME).readText().contains("\"r1\""))
+    }
+
+    /** A checkCancel that throws on its [n]th call (it runs once per track file, before the file). */
+    private fun cancelAt(n: Int): () -> Unit {
+        var calls = 0
+        return { if (++calls >= n) throw java.util.concurrent.CancellationException("ride started") }
+    }
+
+    @Test fun `a cancelled rebuild keeps what it parsed - the rerun parses only the remainder`() {
+        val dir = tmp.newFolder()
+        val rides = (0 until 4).map { ride("r$it", t0 + it * day, speed = 5.0 + it) }.onEach { write(dir, it) }
+        assertTrue(runCatching { GradePaceStore(dir).rebuild(cancelAt(3)) }.isFailure) // 2 parsed, then cut
+        // A second cut before any file must not wipe the first one's progress.
+        assertTrue(runCatching { GradePaceStore(dir).rebuild(cancelAt(1)) }.isFailure)
+        val r = GradePaceStore(dir).rebuild()
+        assertEquals(2, r.parsed)
+        assertEquals(2, r.cached)
+        assertEquals(fresh(*rides.toTypedArray()).toDto(), r.model.toDto())
+    }
+
+    @Test fun `a rebuild is complete without an archive dir and incomplete when a file or dir cannot be read`() {
+        val dir = tmp.newFolder()
+        threeRides(dir)
+        assertTrue("no archive/ is not a failure", GradePaceStore(dir).rebuild().complete)
+
+        val f = File(dir, "r1.json")
+        assertTrue(f.setLastModified(f.lastModified() - 10_000)) // force a re-read
+        assertTrue(f.setReadable(false))
+        try { assertFalse(GradePaceStore(dir).rebuild().complete) } finally { f.setReadable(true) }
+
+        val archive = archiveDir(dir).apply { mkdirs() }
+        write(archive, ride("old", t0 - day))
+        assertTrue(archive.setReadable(false)) // listFiles() == null on a dir that exists
+        try { assertFalse(GradePaceStore(dir).rebuild().complete) } finally { archive.setReadable(true) }
+        assertTrue(GradePaceStore(dir).rebuild().complete)
+    }
+
+    @Test fun `a cache built under other fold constants is recomputed`() {
+        val dir = tmp.newFolder()
+        threeRides(dir)
+        GradePaceStore(dir).rebuild()
+        val cache = File(dir, GradePaceStore.FOLDS_FILE_NAME)
+        val sig = "\"foldSignature\":\"" + com.enderthor.kghost.engine.GRADE_FOLD_SIGNATURE + "\""
+        assertTrue(cache.readText().contains(sig))
+        cache.writeText(cache.readText().replace(sig, "\"foldSignature\":\"win=50.0\""))
+        assertEquals(3, GradePaceStore(dir).rebuild().parsed)
     }
 
     @Test fun `a corrupt cache is recomputed`() {

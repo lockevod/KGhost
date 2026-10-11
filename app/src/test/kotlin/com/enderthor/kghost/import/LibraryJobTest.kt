@@ -237,6 +237,21 @@ class LibraryJobTest {
         assertFalse(fx.cfg.value.gradeModelDirty)
     }
 
+    @Test fun `an incomplete rebuild saves what it has but stays owed - a zero-work retry includes the file`() = runTest {
+        val fx = fixture()
+        TrackStore(fx.tracksDir).add(fx.ride("r1", ele = true))
+        val f = File(fx.tracksDir, "r1.json")
+        assertTrue(f.setReadable(false)) // a transient read failure
+        try { run(fx.deps()).getOrThrow() } finally { f.setReadable(true) }
+        assertTrue("the partial model is still saved", File(fx.tracksDir, GradePaceStore.FILE_NAME).isFile)
+        assertEquals(0.0, GradePaceStore(fx.tracksDir).load()!!.coveredM, 0.0)
+        assertTrue("an incomplete rebuild must not clear the debt", fx.cfg.value.gradeModelDirty)
+
+        run(fx.deps()).getOrThrow()
+        assertTrue(GradePaceStore(fx.tracksDir).load()!!.coveredM > 0)
+        assertFalse(fx.cfg.value.gradeModelDirty)
+    }
+
     @Test fun `a stale-schema model is rebuilt once after the upgrade`() = runTest {
         val fx = fixture()
         val f = File(fx.tracksDir, GradePaceStore.FILE_NAME)

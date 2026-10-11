@@ -112,13 +112,19 @@ private suspend fun dischargeDebts(deps: LibraryDeps) {
     val ctx = currentCoroutineContext()
     val checkCancel = { ctx.ensureActive() }
     val gradeStore = GradePaceStore(deps.tracksDir)
-    // A missing or stale-schema model is owed too: that is how a schema bump makes the first run after an
-    // upgrade rebuild once over the whole archive. No loop: save() writes even an empty model.
-    if (cfg.gradeModelDirty || gradeStore.load() == null) {
+    // A missing or older-schema model is owed too: that is how a schema bump makes the first run after an
+    // upgrade rebuild once over the whole archive (an older but servable model keeps serving meanwhile).
+    // No loop: save() writes even an empty model.
+    if (cfg.gradeModelDirty || !gradeStore.isCurrent()) {
         try {
             // STREAMED, one track file at a time (live + archive, cached per file): the library in heap OOMs a Karoo.
             val r = gradeStore.rebuild(checkCancel)
-            if (r.saved && deps.updateConfig { it.copy(gradeModelDirty = false) }) {
+            if (r.saved && !r.complete) {
+                // A partial model beats none, but it is OWED: set the debt (the model is current-schema now, so
+                // nothing else would retry); the fold cache makes the retry cheap.
+                deps.updateConfig { it.copy(gradeModelDirty = true) }
+                Timber.w("grade-pace model rebuilt from a partial read; the debt stays for the next run")
+            } else if (r.saved && deps.updateConfig { it.copy(gradeModelDirty = false) }) {
                 Timber.i("grade-pace model rebuilt: coveredM=%.0f", r.model.coveredM)
             } else {
                 Timber.w("grade-pace model not persisted; the debt stays for the next run")
