@@ -3105,8 +3105,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // Re-enabled with no route: consume the gate interstitial HERE (the first active tick),
                         // else it survives and a later route load REANCHORs over this VP stretch, discarding
                         // what integAfterVp lets it earn. Translate the race across the disabled stretch only
-                        // and align the route clock/odometer with it, as the route branch's REANCHOR does.
-                        if (gateInterstitial) {
+                        // and align the route clock/odometer with it, as the route branch's REANCHOR does — and,
+                        // like it, only once no pending interval straddles the gate (else its settled metres are
+                        // charged after a route reload); until then the flag stays for a later tick to consume.
+                        if (gateResume(gateInterstitial, coast.pendingHold) == GateResume.REANCHOR) {
                             val ms = firstMoveElapsedS
                             if (ms != null) {
                                 integrator?.rebase(coast.effectiveDistanceM, elapsedS - ms)

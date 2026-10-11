@@ -51,8 +51,9 @@ class GateInterstitialPipelineTest {
             }
             if (moveStart == null && speed != null && speed > StalenessLogic.MIN_MOVING_MS) moveStart = t
             if (!routeLoaded) {
-                // VP branch: consumes the interstitial (mirror of production), then hands off via afterVp.
-                if (gateInterstitial) {
+                // VP branch: consumes the interstitial once no pending interval straddles the gate (mirror of
+                // production, same gateResume decision), then hands off via afterVp.
+                if (gateResume(gateInterstitial, coast.pendingHold) == GateResume.REANCHOR) {
                     moveStart?.let { m ->
                         g.rebase(coast.effectiveDistanceM, t - m)
                         integLast = coast.effectiveDistanceM
@@ -290,6 +291,23 @@ class GateInterstitialPipelineTest {
         r.ride(1, 6.0, null) // route reloads: VP stretch + this tick charged at the target (+0.5 s), not re-anchored away
         assertEquals(GateResume.NORMAL, r.lastDecision)
         assertEquals(before + 50.0, r.lead, 1e-6)
+    }
+
+    @Test fun `a pending interval straddling the gate settles in VP and is not charged on route reload`() {
+        val r = Rig(RaceComparator.TARGET) // target speed 4 m/s = 0.25 s/m
+        r.ride(100, 6.0, null)
+        val before = r.lead
+        t += 1.0; r.tick(d, t, 6.0, null) // raw lags: pending sample opens on the last active tick
+        assertTrue(r.coast.pendingHold)
+        r.stop(40, null, active = false) // stops inside the interval — the hold persists
+        r.routeLoaded = false
+        r.stop(5, null) // re-enabled with no route, hold unresolved: VP must NOT consume the interstitial yet
+        assertTrue(r.coast.pendingHold)
+        d += 12.0; t += 1.0; r.tick(d, t, 0.0, null) // the delayed sample settles (12 m) while in VP
+        assertTrue(r.coast.settledPending)
+        r.routeLoaded = true
+        r.stop(5, null) // route reloads while stopped
+        assertEquals("the straddling 12 m are excluded (+0 s, not 3 s)", before, r.lead, 1e-9)
     }
 
     @Test fun `a HISTORY race with no verdict stays blank while waiting`() {
