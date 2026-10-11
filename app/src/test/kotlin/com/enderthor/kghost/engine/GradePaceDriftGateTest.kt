@@ -56,6 +56,28 @@ class GradePaceDriftGateTest {
             radiusM * cos(a) to radiusM * sin(a)
         }
 
+    /** A path of [stepM] chords whose heading changes by each of [turnsDeg] in turn (all to the left). */
+    private fun turning(turnsDeg: List<Double>, stepM: Double = 20.0): List<Pair<Double, Double>> {
+        var x = 0.0; var y = 0.0; var h = 0.0
+        val out = arrayListOf(x to y)
+        for (k in 0..turnsDeg.size) {
+            if (k > 0) h += turnsDeg[k - 1]
+            x += stepM * sin(Math.toRadians(h)); y += stepM * cos(Math.toRadians(h))
+            out += x to y
+        }
+        return out
+    }
+
+    @Test fun `an even number of turns takes the true median - ten at 10 deg and ten at 40 deg is 25 deg, kept`() {
+        // The upper middle value would be 40 deg and gate it.
+        assertFalse(GradePace.foldOf(track(ridden(turning(List(10) { 10.0 } + List(10) { 40.0 })))).isEmpty)
+    }
+
+    @Test fun `the footprint centre is the true median - two points 2 km apart have a 1 km footprint`() {
+        val f = GradePace.robustFootprintM(track(listOf(P(0.0, 0.0, 0.0, 0.0), P(0.0, 2000.0, 2000.0, 400.0))).points)
+        assertEquals(1000.0, f, 1.0)
+    }
+
     @Test fun `a Karoo left on at home for an hour - jitter within 100 m - yields an empty fold`() {
         val rnd = Random(42)
         val pts = drift(360, rnd).mapIndexed { i, xy -> i to xy }.let { l ->

@@ -265,7 +265,7 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                 if (!lastBearing.isNaN()) turns += Polyline.bearingDiffDeg(lastBearing, bearing)
                 lastBearing = bearing
             }
-            if (turns.size < DRIFT_MIN_PAIRS || turns.sorted()[turns.size / 2] <= DRIFT_MAX_TURN_DEG) return false
+            if (turns.size < DRIFT_MIN_PAIRS || median(turns) <= DRIFT_MAX_TURN_DEG) return false
             return robustFootprintM(pts) < DRIFT_FOOTPRINT_M
         }
 
@@ -310,9 +310,16 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
         /** 95th-percentile haversine distance of [pts] from their per-axis median point. */
         internal fun robustFootprintM(pts: List<TrackPointDto>): Double {
             if (pts.isEmpty()) return 0.0
-            val centre = LatLng(pts.map { it.lat }.sorted()[pts.size / 2], pts.map { it.lng }.sorted()[pts.size / 2])
+            val centre = LatLng(median(pts.map { it.lat }), median(pts.map { it.lng }))
             val d = pts.map { Polyline.haversineM(centre, LatLng(it.lat, it.lng)) }.sorted()
             return d[ceil(0.95 * d.size).toInt() - 1]
+        }
+
+        /** The true median: the mean of the two central values for an even count. */
+        private fun median(v: List<Double>): Double {
+            val s = v.sorted()
+            val m = s.size / 2
+            return if (s.size % 2 == 0) (s[m - 1] + s[m]) / 2.0 else s[m]
         }
 
         /**
