@@ -115,6 +115,40 @@ class GateInterstitialPipelineTest {
         assertEquals(GateResume.REANCHOR, gateResume(gateInterstitial = true, pendingHold = false))
     }
 
+    @Test fun `inactive tick - keeps what exists resumable, starts nothing`() {
+        assertEquals(InactiveTick(snapshot = true, refreshVpEvidence = true, refreshCheckpoint = true),
+            inactiveTick(gateInterstitial = false, hasIntegrator = true, hasVpOrigin = true, hasRoute = true))
+        // Snapshot once per stretch; refreshes every (throttled) tick.
+        assertEquals(InactiveTick(snapshot = false, refreshVpEvidence = true, refreshCheckpoint = true),
+            inactiveTick(gateInterstitial = true, hasIntegrator = true, hasVpOrigin = true, hasRoute = true))
+        // No route: the checkpoint has no routeKey to carry — VP evidence only.
+        assertEquals(InactiveTick(snapshot = true, refreshVpEvidence = true, refreshCheckpoint = false),
+            inactiveTick(gateInterstitial = false, hasIntegrator = true, hasVpOrigin = true, hasRoute = false))
+        // Nothing started yet: nothing to refresh, nothing to start.
+        assertEquals(InactiveTick(snapshot = false, refreshVpEvidence = false, refreshCheckpoint = false),
+            inactiveTick(gateInterstitial = false, hasIntegrator = false, hasVpOrigin = false, hasRoute = true))
+    }
+
+    @Test fun `a checkpoint refreshed while disabled resumes after a restart past the margin`() {
+        val r = Rig(RaceComparator.HISTORY)
+        r.ride(100, 6.0, 0.2)
+        val lead = r.lead
+        val stale = raceCheckpoint(1L, lead, r.coast.effectiveDistanceM, GhostPick.AVERAGE, 0.3, 0L, "k", t,
+            RaceComparator.HISTORY, true)
+        r.ride(200, 6.0, 0.4, active = false) // 1200 m disabled
+        // The inactive tick's write: the race's lead re-anchored at the CURRENT odometer and clock.
+        val refreshed = raceCheckpoint(1L, r.lead, r.coast.effectiveDistanceM, GhostPick.AVERAGE, 0.3, 0L, "k", t,
+            RaceComparator.HISTORY, true)
+        val distNow = r.coast.effectiveDistanceM - 100.0 // restart: odometer back a little, clock carried on
+        val elapsedNow = t + 60.0
+        assertFalse("pre-disable evidence is 1200 m stale", stale.continuesRide(2L, distNow, elapsedNow))
+        assertTrue(refreshed.continuesRide(2L, distNow, elapsedNow))
+        val g = GhostIntegrator(GhostPick.AVERAGE, vpTimePerM = 0.3)
+        g.restore(refreshed.leadS, refreshed.lastRiderDist)
+        g.onTick(distNow, 0.0, 0.0, 90.0, 5.0) { _, _, _ -> 0.4 }
+        assertEquals("lead resumes, the disabled stretch charged nothing", lead, g.gapTimeS, 1e-9)
+    }
+
     @Test fun `HISTORY - the disabled stretch is neither earned nor lost`() {
         val r = Rig(RaceComparator.HISTORY)
         r.ride(100, 6.0, 0.2)

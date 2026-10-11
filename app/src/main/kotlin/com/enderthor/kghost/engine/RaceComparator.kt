@@ -127,3 +127,16 @@ fun gateResume(gateInterstitial: Boolean, pendingHold: Boolean): GateResume = wh
     pendingHold -> GateResume.WAIT_REPUBLISH
     else -> GateResume.REANCHOR
 }
+
+/** What a gate-INACTIVE tick still does before returning. It never STARTS anything (no race, no VP origin)
+ *  — it only keeps what already exists resumable: a process restart after riding past
+ *  [CHECKPOINT_RESUME_MARGIN_M] disabled must not reject the VP origin or the ghost checkpoint on stale
+ *  continuity evidence. The checkpoint needs a route (its routeKey); the snapshot is taken once per stretch. */
+data class InactiveTick(val snapshot: Boolean, val refreshVpEvidence: Boolean, val refreshCheckpoint: Boolean)
+
+fun inactiveTick(gateInterstitial: Boolean, hasIntegrator: Boolean, hasVpOrigin: Boolean, hasRoute: Boolean) =
+    InactiveTick(
+        snapshot = !gateInterstitial && hasIntegrator,
+        refreshVpEvidence = hasVpOrigin,
+        refreshCheckpoint = hasIntegrator && hasRoute,
+    )

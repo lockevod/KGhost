@@ -45,6 +45,7 @@ import com.enderthor.kghost.engine.GhostCheckpoint
 import com.enderthor.kghost.engine.VpOrigin
 import com.enderthor.kghost.engine.startVpOrigin
 import com.enderthor.kghost.engine.vpOriginCoherent
+import com.enderthor.kghost.engine.inactiveTick
 import com.enderthor.kghost.engine.vpRaceGap
 import com.enderthor.kghost.engine.raceCheckpoint
 import com.enderthor.kghost.engine.GhostIntegrator
@@ -2374,10 +2375,53 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         lastGateLog = gateLog
                         Timber.i("KVP gate: $gateLog")
                     }
+                    // Throttled persistence of the resume evidence, shared by the active ticks and the inert
+                    // branch below (which must keep both fresh — see [inactiveTick]).
+                    fun refreshVpOriginEvidence() {
+                        val o = pendingVpOrigin ?: return
+                        val nowMs = SystemClock.elapsedRealtime()
+                        if (nowMs - lastVpOriginSaveMs >= CHECKPOINT_INTERVAL_MS) {
+                            lastVpOriginSaveMs = nowMs
+                            pendingVpOrigin = o.withEvidence(coast.effectiveDistanceM, elapsedS, System.currentTimeMillis())
+                            scope.launch(Dispatchers.IO) { flushVpOrigin() }
+                        }
+                    }
+                    // The snapshot is built HERE (tick thread) so the IO writer never reads the integrator's
+                    // non-volatile scalars cross-thread; the actual write is off-thread + serialized.
+                    fun persistRaceCheckpoint(integ: GhostIntegrator, rm: RouteMode, cmp: RaceComparator, lastRiderDist: Double) {
+                        val pick = integPick ?: return
+                        val nowCp = SystemClock.elapsedRealtime()
+                        if (nowCp - lastCheckpointMs >= CHECKPOINT_INTERVAL_MS) {
+                            lastCheckpointMs = nowCp
+                            pendingCheckpoint = raceCheckpoint(
+                                rideEpoch = recordingStartedEpoch,
+                                leadS = integ.gapTimeS,
+                                lastRiderDist = lastRiderDist,
+                                pick = pick,
+                                vpTimePerM = integVpTpm,
+                                savedAtEpoch = System.currentTimeMillis(),
+                                routeKey = routeKeyOf(rm.routeName, rm.path.totalM),
+                                rideElapsedS = elapsedS,
+                                comparator = cmp,
+                                historyVerdictSeen = historyVerdictSeen,
+                            )
+                            scope.launch(Dispatchers.IO) { flushGhostCheckpoint() }
+                        }
+                    }
                     if (!eff.active) {
-                        if (!gateInterstitial && integrator != null) {
+                        val integ0 = integrator
+                        val rm0 = routeMode
+                        val cmp0 = integComparator
+                        val todo = inactiveTick(gateInterstitial, integ0 != null, pendingVpOrigin != null, rm0 != null && cmp0 != null)
+                        if (todo.snapshot) {
                             gateSnapshot = GapStateHolder.state.value.takeIf { integPublished && it.active }
                             gateInterstitial = true
+                        }
+                        if (todo.refreshVpEvidence) refreshVpOriginEvidence()
+                        // Lead re-anchored at the CURRENT odometer and clock — what the gate re-anchor does on
+                        // re-enable — so a restart after riding past the margin disabled still continues the ride.
+                        if (todo.refreshCheckpoint && integ0 != null && rm0 != null && cmp0 != null) {
+                            persistRaceCheckpoint(integ0, rm0, cmp0, coast.effectiveDistanceM)
                         }
                         GapStateHolder.clear()
                         SegmentInfoHolder.clear()
@@ -2550,14 +2594,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     }
                     // Refresh the VP origin's continuity evidence in BOTH modes (a route-mode ride must still
                     // resume its VP race after a restart). Origin fields stay fixed.
-                    pendingVpOrigin?.let { o ->
-                        val nowMs = SystemClock.elapsedRealtime()
-                        if (nowMs - lastVpOriginSaveMs >= CHECKPOINT_INTERVAL_MS) {
-                            lastVpOriginSaveMs = nowMs
-                            pendingVpOrigin = o.withEvidence(coast.effectiveDistanceM, elapsedS, System.currentTimeMillis())
-                            scope.launch(Dispatchers.IO) { flushVpOrigin() }
-                        }
-                    }
+                    refreshVpOriginEvidence()
 
                     // --- mode select: ② route mode vs ① Ghost Pace ---------------------
                     // Read the route-mode snapshot ONCE per tick so path + segments stay consistent
@@ -2823,28 +2860,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // crash resumes with the LEAD (integ.gapTimeS), not the raw ghostTime. The snapshot is
                         // built HERE (Main) so the IO writer never reads the integrator's non-volatile scalars
                         // cross-thread; the actual write is off-Main + serialized.
-                        run {
-                            val nowCp = SystemClock.elapsedRealtime()
-                            // A pick-only repick preserves the integrator; keep checkpoint metadata
-                            // aligned with the live settings so restart can restore the preserved lead.
-                            integPick = eff.ghostPick
-                            if (nowCp - lastCheckpointMs >= CHECKPOINT_INTERVAL_MS && integPick != null) {
-                                lastCheckpointMs = nowCp
-                                pendingCheckpoint = raceCheckpoint(
-                                    rideEpoch = recordingStartedEpoch,
-                                    leadS = integ.gapTimeS,
-                                    lastRiderDist = integLastRiderDist,
-                                    pick = integPick!!,
-                                    vpTimePerM = integVpTpm,
-                                    savedAtEpoch = System.currentTimeMillis(),
-                                    routeKey = routeKeyOf(rm.routeName, rm.path.totalM),
-                                    rideElapsedS = elapsedS,
-                                    comparator = raceCmp,
-                                    historyVerdictSeen = historyVerdictSeen,
-                                )
-                                scope.launch(Dispatchers.IO) { flushGhostCheckpoint() }
-                            }
-                        }
+                        // A pick-only repick preserves the integrator; keep checkpoint metadata
+                        // aligned with the live settings so restart can restore the preserved lead.
+                        integPick = eff.ghostPick
+                        persistRaceCheckpoint(integ, rm, raceCmp, integLastRiderDist)
                         // Rider ROUTE position R — anchors the map marker AND triggers the finish freeze; the
                         // NUMBER never touches it (stays teleport-proof). PRIMARY per-tick projection is a small
                         // odometer-propagated WINDOW (route-distance space, so a loop's two passes sit far apart →
