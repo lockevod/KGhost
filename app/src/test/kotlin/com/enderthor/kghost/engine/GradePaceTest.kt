@@ -367,4 +367,67 @@ class GradePaceTest {
         assertTrue("a second build() must be refused, not silently double-count", second.isFailure)
         assertTrue("the first build must still be a real model", first.coveredM > 0.0)
     }
+
+    // --- BEST from qualifying rides only (>= GRADE_MIN_BIN_M of a ride in the bin) ------------------------
+    // A flat n-point track folds (n - 5) * 20 m into bin 0: the first GRADE_WINDOW_M only fills the window.
+    private fun slowFlat() = track("slow", n = 201, stepM = 20.0, gradePct = 0.0, speedMs = 4.0)          // 3920 m @ 0.25
+    private fun dto0(g: GradePace) = g.toDto().bins.single { it.bin == 0 }
+
+    @Test fun `a short fast fragment under GRADE_MIN_BIN_M in the bin does not set BEST`() {
+        // 380 m at 12 m/s: under the floor, so it votes in the mean and the count but cannot own BEST.
+        val g = GradePace.build(listOf(slowFlat(), track("frag", n = 24, stepM = 20.0, gradePct = 0.0, speedMs = 12.0, startEpoch = 2L)))
+        assertEquals(3920.0 + 380.0, dto0(g).metres, 1e-6)
+        val avg = g.pace(0.0, GhostPick.AVERAGE)!!
+        assertEquals((0.25 * 3920 + 380.0 / 12.0) / 4300.0, avg, 1e-9) // mean unchanged: every metre counts
+        assertEquals(2, dto0(g).count)                                    // count unchanged: every ride counts
+        // The only qualifying ride is slower than the mean, so BEST == AVERAGE (never slower than it).
+        assertEquals(avg, g.pace(0.0, GhostPick.BEST)!!, 1e-12)
+    }
+
+    @Test fun `a ride with GRADE_MIN_BIN_M in the bin does set BEST`() {
+        // Exactly 400 m at 8 m/s qualifies (>=).
+        val g = GradePace.build(listOf(slowFlat(), track("fast", n = 25, stepM = 20.0, gradePct = 0.0, speedMs = 8.0, startEpoch = 2L)))
+        assertEquals(0.125, g.pace(0.0, GhostPick.BEST)!!, 1e-9)
+        assertEquals(0.125, dto0(g).minTpm, 1e-9)
+    }
+
+    @Test fun `no qualifying ride in a bin makes BEST equal AVERAGE, persisted as a finite minTpm`() {
+        // Two 380 m rides: the bin clears the trust floor (760 m) but neither ride alone does.
+        val g = GradePace.build(
+            listOf(
+                track("a", n = 24, stepM = 20.0, gradePct = 0.0, speedMs = 4.0),
+                track("b", n = 24, stepM = 20.0, gradePct = 0.0, speedMs = 8.0, startEpoch = 2L),
+            )
+        )
+        val avg = g.pace(0.0, GhostPick.AVERAGE)!!
+        assertEquals((0.25 + 0.125) / 2, avg, 1e-9)
+        assertEquals(avg, g.pace(0.0, GhostPick.BEST)!!, 1e-12)
+        assertEquals(dto0(g).meanTpm, dto0(g).minTpm, 0.0)
+        assertEquals(2, dto0(g).count)
+    }
+
+    @Test fun `Codex counterexample - a slow qualifying ride plus fast short ones gives BEST == AVERAGE, not the slow ride`() {
+        // One 400 m ride at 0.5 s/m qualifies; four 200 m rides at 0.2 s/m do not. Mean = (200 + 4*40)/1200 = 0.3.
+        // The qualifying minimum (0.5) is SLOWER than the mean: BEST must not be slower than AVERAGE.
+        val folds = listOf(GradePace.Fold(1L, mapOf(0 to 200.0), mapOf(0 to 400.0))) +
+            (2L..5L).map { GradePace.Fold(it, mapOf(0 to 40.0), mapOf(0 to 200.0)) }
+        val g = GradePace.reduce(folds)
+        assertEquals(0.3, g.pace(0.0, GhostPick.AVERAGE)!!, 1e-12)
+        assertEquals(0.3, g.pace(0.0, GhostPick.BEST)!!, 1e-12)
+        assertEquals(5, dto0(g).count)
+        assertEquals(1200.0, dto0(g).metres, 1e-9)
+    }
+
+    @Test fun `the json round-trip carries no non-finite value when no ride qualifies`() {
+        val folds = (1L..3L).map { GradePace.Fold(it, mapOf(0 to 40.0, 5 to 60.0), mapOf(0 to 200.0, 5 to 150.0)) }
+        val g = GradePace.reduce(folds)
+        val json = com.enderthor.kghost.extension.jsonForStorage.encodeToString(GradePaceDto.serializer(), g.toDto())
+        assertFalse(json, json.contains("NaN") || json.contains("Infinity"))
+        for (b in g.toDto().bins) {
+            assertTrue("$b", listOf(b.meanTpm, b.minTpm, b.lastTpm, b.metres).all { it.isFinite() && it > 0.0 })
+        }
+        val back = GradePace.fromDto(com.enderthor.kghost.extension.jsonForStorage.decodeFromString(GradePaceDto.serializer(), json))
+        for (pick in GhostPick.entries) assertEquals(pick.name, g.pace(0.0, pick)!!, back.pace(0.0, pick)!!, 0.0)
+        assertEquals(g.toDto(), back.toDto())
+    }
 }
