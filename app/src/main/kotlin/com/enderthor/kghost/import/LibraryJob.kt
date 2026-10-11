@@ -2,10 +2,8 @@ package com.enderthor.kghost.import_
 
 import com.enderthor.kghost.data.KGhostConfig
 import com.enderthor.kghost.data.reconcileOwed
-import com.enderthor.kghost.engine.GradePace
 import com.enderthor.kghost.geo.GradePaceStore
 import com.enderthor.kghost.geo.RecordedTrack
-import com.enderthor.kghost.geo.TrackStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
@@ -113,14 +111,15 @@ private suspend fun dischargeDebts(deps: LibraryDeps) {
     val cfg = deps.config()
     val ctx = currentCoroutineContext()
     val checkCancel = { ctx.ensureActive() }
-    if (cfg.gradeModelDirty) {
+    val gradeStore = GradePaceStore(deps.tracksDir)
+    // A missing or stale-schema model is owed too: that is how a schema bump makes the first run after an
+    // upgrade rebuild once over the whole archive. No loop: save() writes even an empty model.
+    if (cfg.gradeModelDirty || gradeStore.load() == null) {
         try {
-            // STREAMED, one track at a time: the whole library in heap OOMs a Karoo.
-            val builder = GradePace.Builder()
-            TrackStore(deps.tracksDir).forEachTrack(checkCancel, builder::add)
-            val model = builder.build()
-            if (GradePaceStore(deps.tracksDir).save(model) && deps.updateConfig { it.copy(gradeModelDirty = false) }) {
-                Timber.i("grade-pace model rebuilt: coveredM=%.0f", model.coveredM)
+            // STREAMED, one track file at a time (live + archive, cached per file): the library in heap OOMs a Karoo.
+            val r = gradeStore.rebuild(checkCancel)
+            if (r.saved && deps.updateConfig { it.copy(gradeModelDirty = false) }) {
+                Timber.i("grade-pace model rebuilt: coveredM=%.0f", r.model.coveredM)
             } else {
                 Timber.w("grade-pace model not persisted; the debt stays for the next run")
             }

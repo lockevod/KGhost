@@ -62,10 +62,8 @@ class TrackStore(private val dir: File) {
     fun allTrackIds(): List<String> {
         val files = dir.listFiles() ?: return emptyList()
         return files
-            .filter {
-                it.isFile && it.name.endsWith(JSON_SUFFIX) && it.name !in BOOKKEEPING_FILES
-            }
-            .map { it.name.removeSuffix(JSON_SUFFIX) }
+            .filter(::isTrackFile)
+            .map(::trackIdOf)
     }
 
     /**
@@ -685,7 +683,7 @@ class TrackStore(private val dir: File) {
                 continue
             }
             for (f in files) {
-                if (!f.isFile || !f.name.endsWith(JSON_SUFFIX) || f.name in BOOKKEEPING_FILES) continue
+                if (!isTrackFile(f)) continue
                 val text = runCatching { f.readText() }.getOrNull()
                 if (text == null) {
                     complete = false
@@ -752,10 +750,18 @@ class TrackStore(private val dir: File) {
          * Files in [dir] that are bookkeeping, not `<id>.json` tracks. [GradePaceStore.FILE_NAME] is
          * written into this SAME dir by `HistoryImportRunner` after any import that stored anything —
          * so leaving it out made "stored rides" read one too high from the first successful import
-         * onward, exactly when the rider is counting to check a rebuild lost nothing.
+         * onward, exactly when the rider is counting to check a rebuild lost nothing. The grade model's
+         * per-file fold cache ([GradePaceStore.FOLDS_FILE_NAME]) lives there too.
          */
         private val BOOKKEEPING_FILES =
-            setOf(INDEX_FILE, SOURCEKEYS_FILE, LEDGER_FILE, GradePaceStore.FILE_NAME)
+            setOf(INDEX_FILE, SOURCEKEYS_FILE, LEDGER_FILE, GradePaceStore.FILE_NAME, GradePaceStore.FOLDS_FILE_NAME)
+
+        /** Is [f] an `<id>.json` track (live or archived), not a bookkeeping file? */
+        internal fun isTrackFile(f: File): Boolean =
+            f.isFile && f.name.endsWith(JSON_SUFFIX) && f.name !in BOOKKEEPING_FILES
+
+        /** The track id of a file accepted by [isTrackFile]. */
+        internal fun trackIdOf(f: File): String = f.name.removeSuffix(JSON_SUFFIX)
 
         /** Subdirectory holding archived (pruned) tracks; excluded from listing/index/matching. */
         const val ARCHIVE_SUBDIR = "archive"

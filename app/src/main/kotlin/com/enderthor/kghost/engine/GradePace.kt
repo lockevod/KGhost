@@ -5,10 +5,11 @@ import kotlinx.serialization.Serializable
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** Persisted-model schema version. Bump when the binning or the reducer layout changes so an old blob is
- *  discarded and rebuilt instead of mis-read. Still 1 after the `ema` -> `meanTpm` rename: nothing has ever
- *  been persisted, so there is no old blob in the field to discard. */
-const val GRADE_SCHEMA_VERSION = 1
+/** Persisted-model schema version. Bump when the binning, the reducer layout or the INPUT SET changes so an
+ *  old blob (and the per-file fold cache, which carries the same version) is discarded and rebuilt instead
+ *  of mis-read. 2: the model counts the archive too, one contribution per physical ride — the bump makes
+ *  the first run after the upgrade rebuild once over the whole archive (the one-time history recovery). */
+const val GRADE_SCHEMA_VERSION = 2
 
 /** Gradient bin width (%). 1% is finer than the noise floor of a smoothed barometric profile and keeps the
  *  table at 41 entries. */
@@ -36,6 +37,9 @@ const val GRADE_MIN_BIN_M = 400.0
  *
  * The tier below `PacePatch` and above the neutral fill:
  *   `PacePatch(here) ?: GradePace(gradient now) ?: neutral`
+ *
+ * "ALL-TIME" means every track file with altitude in the live dir AND `archive/`, one contribution per
+ * physical ride (see `GradePaceStore.rebuild` for the duplicate suppression and its accepted residuals).
  *
  * AVERAGE here is the rider's ALL-TIME, METRE-WEIGHTED pace at that gradient — every metre ever ridden in
  * the bin counts the same, no matter how old. There is deliberately NO recency weighting: recency is what
@@ -114,29 +118,12 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
          */
         fun build(tracks: List<RecordedTrack>): GradePace =
             Builder().apply { tracks.forEach { add(it) } }.build()
-    }
 
-    /**
-     * STREAMING builder: [add] one track at a time and [build] at the end, so a whole-library rebuild
-     * never has to hold the library in heap (1500 rides x ~3000 points is hundreds of MB — an OOM on a
-     * Karoo). All [add] keeps per track is its epoch plus its per-bin (seconds, metres) totals — at most
-     * 41 bins, i.e. kilobytes for the whole library — because the final fold must run OLDEST-FIRST for
-     * `lastTpm` to mean the most recent ride, and files are not listed in epoch order.
-     *
-     * Not thread-safe; drive it from one coroutine (the import job).
-     */
-    class Builder {
-        private class Fold(val epoch: Long, val sumDt: Map<Int, Double>, val sumDd: Map<Int, Double>)
-
-        private val folds = ArrayList<Fold>()
-        private var built = false
-
-        fun add(track: RecordedTrack) {
-            check(!built) { "GradePace.Builder is single-use; add() after build() would be ignored" }
+        /** One track's per-bin (seconds, metres) totals; empty maps when it carries no usable altitude. */
+        fun foldOf(track: RecordedTrack): Fold {
             val pts = track.points
-            if (pts.size < 2) return
-            // Per-bin totals for THIS track: seconds and metres, so [build]'s fold emits one
-            // metre-weighted sample per bin.
+            // Per-bin totals for THIS track: seconds and metres, so [reduce] emits one metre-weighted
+            // sample per bin.
             val sumDt = HashMap<Int, Double>()
             val sumDd = HashMap<Int, Double>()
             var j = 0 // trailing index of the gradient window
@@ -193,20 +180,17 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                 sumDt[bin] = (sumDt[bin] ?: 0.0) + stepT
                 sumDd[bin] = (sumDd[bin] ?: 0.0) + stepM
             }
-            if (sumDd.isNotEmpty()) folds.add(Fold(track.startedAtEpoch, sumDt, sumDd))
+            return Fold(track.startedAtEpoch, sumDt, sumDd)
         }
 
         /**
-         * SINGLE-USE: the folds are not consumed by the fold below, so a second call on the same builder
-         * would count every track twice (doubling `count`, halving nothing else) and silently produce a
-         * model that claims twice the rides it has. Build a fresh [Builder] instead.
+         * THE reduce — the only one: [Builder.build] and the cached whole-history rebuild
+         * (`GradePaceStore.rebuild`) both end here, so the two paths cannot drift. Folds run OLDEST-FIRST
+         * for `lastTpm` to mean the most recent ride; `sortedBy` is stable, so folds sharing an epoch keep
+         * the caller's order.
          */
-        fun build(): GradePace {
-            check(!built) { "GradePace.Builder is single-use; create a new Builder for another model" }
-            built = true
+        fun reduce(folds: List<Fold>): GradePace {
             val map = HashMap<Int, Reducer>()
-            // `sortedBy` is stable, so tracks sharing an epoch keep their add order — same as the old
-            // list-based build, which sorted the caller's list the same way.
             for (fold in folds.sortedBy { it.epoch }) {
                 for ((bin, dd) in fold.sumDd) {
                     if (dd <= 0.0) continue
@@ -224,6 +208,43 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                 }
             }
             return GradePace(map)
+        }
+    }
+
+    /** One ride's contribution: its epoch plus its per-bin (seconds, metres) totals (at most 41 bins). */
+    class Fold(val epoch: Long, val sumDt: Map<Int, Double>, val sumDd: Map<Int, Double>) {
+        val isEmpty: Boolean get() = sumDd.isEmpty()
+        val totalM: Double get() = sumDd.values.sum()
+    }
+
+    /**
+     * STREAMING builder: [add] one track at a time and [build] at the end, so a whole-library rebuild
+     * never has to hold the library in heap (1500 rides x ~3000 points is hundreds of MB — an OOM on a
+     * Karoo). All [add] keeps per track is its epoch plus its per-bin (seconds, metres) totals — at most
+     * 41 bins, i.e. kilobytes for the whole library — because the final fold must run OLDEST-FIRST for
+     * `lastTpm` to mean the most recent ride, and files are not listed in epoch order.
+     *
+     * Not thread-safe; drive it from one coroutine (the import job).
+     */
+    class Builder {
+        private val folds = ArrayList<Fold>()
+        private var built = false
+
+        fun add(track: RecordedTrack) {
+            check(!built) { "GradePace.Builder is single-use; add() after build() would be ignored" }
+            val fold = foldOf(track)
+            if (!fold.isEmpty) folds.add(fold)
+        }
+
+        /**
+         * SINGLE-USE: the folds are not consumed by the fold below, so a second call on the same builder
+         * would count every track twice (doubling `count`, halving nothing else) and silently produce a
+         * model that claims twice the rides it has. Build a fresh [Builder] instead.
+         */
+        fun build(): GradePace {
+            check(!built) { "GradePace.Builder is single-use; create a new Builder for another model" }
+            built = true
+            return reduce(folds)
         }
     }
 }
