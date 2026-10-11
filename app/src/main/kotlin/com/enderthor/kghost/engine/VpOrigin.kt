@@ -43,6 +43,13 @@ data class VpOrigin(
         rideContinues(rideEpoch, lastDist, rideElapsedS, epochNow, distNow, elapsedNow)
 }
 
+/** Can ([distM], [elapsedS]) be one ride's real state? A distance no bicycle covers in that clock
+ *  ([AGG_MAX_SPEED_MS], plus the resume margin's slack) is a replayed/stale sample — a fresh subscription
+ *  replaying the previous ride's odometer at elapsed≈0, or a resumed process whose ELAPSED_TIME has not
+ *  caught up yet. The VP origin must not be stamped from one: wait for a coherent tick. */
+fun vpOriginCoherent(distM: Double, elapsedS: Double): Boolean =
+    distM <= elapsedS * AGG_MAX_SPEED_MS + CHECKPOINT_RESUME_MARGIN_M
+
 /** The origin a VP race starting NOW takes: [saved]'s (re-keyed to [rideEpoch], evidence refreshed) iff it is
  *  recent and the same ride, else a fresh one at ([elapsedS], [distM]). */
 fun startVpOrigin(saved: VpOrigin?, rideEpoch: Long, elapsedS: Double, distM: Double, nowEpoch: Long, maxAgeMs: Long): VpOrigin =

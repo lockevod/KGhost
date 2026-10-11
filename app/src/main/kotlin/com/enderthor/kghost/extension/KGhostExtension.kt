@@ -44,6 +44,7 @@ import com.enderthor.kghost.engine.CorridorSeeder
 import com.enderthor.kghost.engine.GhostCheckpoint
 import com.enderthor.kghost.engine.VpOrigin
 import com.enderthor.kghost.engine.startVpOrigin
+import com.enderthor.kghost.engine.vpOriginCoherent
 import com.enderthor.kghost.engine.vpRaceGap
 import com.enderthor.kghost.engine.raceCheckpoint
 import com.enderthor.kghost.engine.GhostIntegrator
@@ -2515,7 +2516,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         firstMoveElapsedS = elapsedS
                     }
                     // The VP race clock is set ONCE per ride and never re-nulled (see its declaration).
-                    if (vpFirstMoveElapsedS == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS) {
+                    // Never stamped from an incoherent sample (odometer impossible for the clock: a replayed
+                    // previous-ride DISTANCE at elapsed≈0, or a resumed ELAPSED_TIME not caught up yet) — that
+                    // would reject a valid saved origin or race from a phantom 40 km start. Keep waiting.
+                    if (vpFirstMoveElapsedS == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS &&
+                        vpOriginCoherent(coast.effectiveDistanceM, elapsedS)
+                    ) {
                         // A fresh process mid-ride (ride-app restart, power-off) lands here with the whole-ride
                         // odometer: ADOPT the persisted origin iff recent + same ride (the ghost checkpoint's
                         // rule), else start fresh here. Tiny file read, once per ride (as loadGhostCheckpoint).

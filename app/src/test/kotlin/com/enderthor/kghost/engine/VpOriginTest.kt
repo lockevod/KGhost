@@ -96,6 +96,35 @@ class VpOriginTest {
         assertEquals(3277.0, start(atStart, 2L, elapsed = 3277.0, dist = 4831.0).originElapsedS, 0.0)
     }
 
+    /** The extension's stamping loop: on each moving tick, stamp once iff the sample is coherent. */
+    private fun firstStamp(saved: VpOrigin?, epoch: Long, ticks: List<Pair<Double, Double>>): VpOrigin? {
+        for ((dist, elapsed) in ticks) if (vpOriginCoherent(dist, elapsed)) return start(saved, epoch, elapsed, dist)
+        return null
+    }
+
+    @Test fun `coherence - a distance the clock cannot explain is not a real state`() {
+        assertFalse(vpOriginCoherent(5000.0, 0.0))
+        assertFalse(vpOriginCoherent(40_000.0, 0.5))
+        assertTrue(vpOriginCoherent(3.0, 1.5))
+        assertTrue(vpOriginCoherent(CHECKPOINT_RESUME_MARGIN_M, 0.0))
+        assertTrue(vpOriginCoherent(4831.0, 3277.0))
+    }
+
+    @Test fun `resume with a stale elapsed defers, then adopts the saved origin`() {
+        // Fresh process: the first moving tick carries the whole-ride odometer at a not-yet-restored clock.
+        val o = firstStamp(saved(), 2L, listOf(5000.0 to 0.0, 5005.0 to 3280.0))!!
+        assertEquals(100.0, o.originElapsedS, 0.0)
+        assertEquals(50.0, o.startDistM, 0.0)
+    }
+
+    @Test fun `replayed previous-ride odometer defers, then mints fresh at the corrected low odometer`() {
+        val prevRide = saved(epoch = 1L, lastDist = 40_000.0, rideElapsed = 5000.0)
+        val o = firstStamp(prevRide, 2L, listOf(40_000.0 to 0.5, 3.0 to 1.5))!!
+        assertEquals(1.5, o.originElapsedS, 0.0)
+        assertEquals(3.0, o.startDistM, 0.0)
+        assertEquals(o, firstStamp(null, 2L, listOf(40_000.0 to 0.5, 3.0 to 1.5)))
+    }
+
     @Test fun `VP gap measures distance from the start distance`() {
         val curve = GhostPaceSource(5.0).curve()
         // Adopted origin: 4781 m ridden over 3177 s at a 5 m/s target ≈ 15885 m → far BEHIND, not 4831 m AHEAD.
