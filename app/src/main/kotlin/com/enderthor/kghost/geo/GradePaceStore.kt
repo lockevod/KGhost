@@ -60,6 +60,8 @@ class GradePaceStore(private val dir: File) {
         val suppressed: Int,
         val liveFiles: Int,
         val archiveFiles: Int,
+        /** False when a track file or an existing dir could not be read: the model is partial, retry it. */
+        val complete: Boolean,
     )
 
     /**
@@ -101,10 +103,13 @@ class GradePaceStore(private val dir: File) {
         var cached = 0
         var liveFiles = 0
         var archiveFiles = 0
+        var complete = true
         try {
             for (where in listOf(LIVE, ARCHIVE)) {
                 val d = if (where == LIVE) dir else File(dir, TrackStore.ARCHIVE_SUBDIR)
-                for (f in d.listFiles().orEmpty()) {
+                // An absent dir (no archive yet) is empty; an existing one that cannot be listed is a failure.
+                val files = d.listFiles() ?: emptyArray<File>().also { if (d.exists()) complete = false }
+                for (f in files) {
                     if (!TrackStore.isTrackFile(f)) continue
                     checkCancel()
                     if (where == LIVE) liveFiles++ else archiveFiles++
@@ -123,6 +128,7 @@ class GradePaceStore(private val dir: File) {
                     // undecodable one is cached as empty (it is not a track) until its size/mtime change.
                     val text = runCatching { f.readText() }.getOrElse {
                         Timber.w(it, "grade-pace rebuild: could not read %s", f.name)
+                        complete = false
                         null
                     } ?: continue
                     parsed++
@@ -149,7 +155,7 @@ class GradePaceStore(private val dir: File) {
             (System.nanoTime() - t0) / 1_000_000, liveFiles, archiveFiles, parsed, cached, folds.size, suppressed,
             model.coveredM,
         )
-        return RebuildResult(model, saved, parsed, cached, suppressed, liveFiles, archiveFiles)
+        return RebuildResult(model, saved, parsed, cached, suppressed, liveFiles, archiveFiles, complete)
     }
 
     private val foldsFile: File get() = File(dir, FOLDS_FILE_NAME)

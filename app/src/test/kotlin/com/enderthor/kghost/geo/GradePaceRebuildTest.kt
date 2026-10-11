@@ -234,6 +234,23 @@ class GradePaceRebuildTest {
         assertEquals(fresh(*rides.toTypedArray()).toDto(), r.model.toDto())
     }
 
+    @Test fun `a rebuild is complete without an archive dir and incomplete when a file or dir cannot be read`() {
+        val dir = tmp.newFolder()
+        threeRides(dir)
+        assertTrue("no archive/ is not a failure", GradePaceStore(dir).rebuild().complete)
+
+        val f = File(dir, "r1.json")
+        assertTrue(f.setLastModified(f.lastModified() - 10_000)) // force a re-read
+        assertTrue(f.setReadable(false))
+        try { assertFalse(GradePaceStore(dir).rebuild().complete) } finally { f.setReadable(true) }
+
+        val archive = archiveDir(dir).apply { mkdirs() }
+        write(archive, ride("old", t0 - day))
+        assertTrue(archive.setReadable(false)) // listFiles() == null on a dir that exists
+        try { assertFalse(GradePaceStore(dir).rebuild().complete) } finally { archive.setReadable(true) }
+        assertTrue(GradePaceStore(dir).rebuild().complete)
+    }
+
     @Test fun `a corrupt cache is recomputed`() {
         val dir = tmp.newFolder()
         val rides = threeRides(dir)
