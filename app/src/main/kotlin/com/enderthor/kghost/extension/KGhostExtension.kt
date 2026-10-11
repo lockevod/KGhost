@@ -2666,9 +2666,13 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             }
                             GateResume.REANCHOR -> {
                                 integrator?.rebase(riderDist, elapsedS - moveStart0)
+                                // Redundant today (prevTickElapsedS = elapsedS skips this tick's freeze check and the
+                                // onTick below re-sets it) — kept so the baseline never reads the pre-disable odometer.
                                 integLastRiderDist = riderDist
                                 prevTickElapsedS = elapsedS // this tick must not freeze the race clock either
-                                integInitialised = false // forces the re-anchor tick through the guard
+                                // No integInitialised reset: rebase leaves no re-anchor pending, and REANCHOR implies
+                                // !pendingHold (gateResume), so the onTick guard passes anyway (rig + `pure decision`).
+                                // Redundant too (publication can't HOLD with !pendingHold); kept as a belt.
                                 integPublished = false
                                 gateInterstitial = false
                                 gateSnapshot = null

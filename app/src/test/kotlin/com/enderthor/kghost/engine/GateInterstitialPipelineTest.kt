@@ -78,8 +78,8 @@ class GateInterstitialPipelineTest {
                 GateResume.REANCHOR -> {
                     g.rebase(riderDist, t - ms)
                     integLast = riderDist
-                    prevEl = t
-                    integInit = false
+                    prevEl = t // load-bearing: without it the re-enable tick freezes/counts the whole stretch
+                    // No integInit reset (production dropped it): REANCHOR ⇒ !pendingHold, the guard passes.
                     published = false
                     gateInterstitial = false
                     snapshot = null
