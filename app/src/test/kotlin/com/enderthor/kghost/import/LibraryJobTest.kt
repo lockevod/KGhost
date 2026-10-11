@@ -252,34 +252,52 @@ class LibraryJobTest {
         assertFalse(fx.cfg.value.gradeModelDirty)
     }
 
-    // Schema-1 model on disk, debt flag clear, one unreadable track: the upgrade rebuild is partial. Whatever
-    // happens to the config write AFTER the current-schema save, the next zero-work run must still rebuild.
-    private suspend fun partialUpgradeThenRetry(firstRunUpdate: (LibraryFixture) -> suspend ((KGhostConfig) -> KGhostConfig) -> Boolean) {
+    // Schema-1 model on disk, debt flag clear: the first run after an upgrade owes a rebuild. Its config writes
+    // fail ([cancel] false) or are cancelled ([cancel] true) once a current-schema model is on disk, i.e. AFTER
+    // the save. Whatever happens there, the debt must already be durable and the next zero-work run must pay it.
+    private suspend fun upgradeWithPostSaveFault(partial: Boolean, cancel: Boolean) {
         val fx = fixture()
         File(fx.tracksDir, GradePaceStore.FILE_NAME).writeText("""{"schemaVersion":1,"bins":[]}""")
         TrackStore(fx.tracksDir).add(fx.ride("r1", ele = true))
         val f = File(fx.tracksDir, "r1.json")
-        assertTrue(f.setReadable(false))
-        try { run(fx.deps().copy(updateConfig = firstRunUpdate(fx))) } finally { f.setReadable(true) }
+        var postSaveWrites = 0
+        val faulty: suspend ((KGhostConfig) -> KGhostConfig) -> Boolean = { t ->
+            if (GradePaceStore(fx.tracksDir).isCurrent()) {
+                postSaveWrites++
+                if (cancel) throw CancellationException("cut after the save")
+                false
+            } else { fx.cfg.update(t); true }
+        }
+        if (partial) assertTrue(f.setReadable(false))
+        try { run(fx.deps().copy(updateConfig = faulty)) } finally { f.setReadable(true) }
+        if (!partial) {
+            // A complete rebuild's only post-save write is the one that clears the debt: the fault must hit it.
+            assertTrue("the fault must reach the post-save debt clear", postSaveWrites > 0)
+        }
+        // A partial rebuild makes NO post-save write since the debt went down first; before that fix it wrote
+        // the debt there, after the save, so the injected fault lost it (schema 2 + dirty=false, never retried).
+        assertTrue("the debt is durable before the save", fx.cfg.value.gradeModelDirty)
+        assertTrue(GradePaceStore(fx.tracksDir).isCurrent())
 
         run(fx.deps()).getOrThrow()
         assertTrue("the owed rebuild is retried", GradePaceStore(fx.tracksDir).load()!!.coveredM > 0)
         assertFalse(fx.cfg.value.gradeModelDirty)
     }
 
-    @Test fun `an upgrade rebuild stays owed when the post-save config write fails`() = runTest {
-        partialUpgradeThenRetry { fx ->
-            { t -> if (GradePaceStore(fx.tracksDir).isCurrent()) false else { fx.cfg.update(t); true } }
-        }
+    @Test fun `a partial upgrade rebuild stays owed when the post-save config write fails`() = runTest {
+        upgradeWithPostSaveFault(partial = true, cancel = false)
     }
 
-    @Test fun `an upgrade rebuild stays owed when cancelled after the save`() = runTest {
-        partialUpgradeThenRetry { fx ->
-            { t ->
-                if (GradePaceStore(fx.tracksDir).isCurrent()) throw CancellationException("cut after the save")
-                fx.cfg.update(t); true
-            }
-        }
+    @Test fun `a partial upgrade rebuild stays owed when cancelled after the save`() = runTest {
+        upgradeWithPostSaveFault(partial = true, cancel = true)
+    }
+
+    @Test fun `a complete upgrade rebuild stays owed when its post-save debt clear fails`() = runTest {
+        upgradeWithPostSaveFault(partial = false, cancel = false)
+    }
+
+    @Test fun `a complete upgrade rebuild stays owed when cancelled at its post-save debt clear`() = runTest {
+        upgradeWithPostSaveFault(partial = false, cancel = true)
     }
 
     @Test fun `a stale-schema model is rebuilt once after the upgrade`() = runTest {
