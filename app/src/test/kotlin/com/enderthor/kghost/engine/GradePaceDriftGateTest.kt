@@ -1,6 +1,7 @@
 package com.enderthor.kghost.engine
 
 import com.enderthor.kghost.geo.RecordedTrack
+import com.enderthor.kghost.geo.TrackDecimator
 import com.enderthor.kghost.geo.TrackPointDto
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -35,17 +36,18 @@ class GradePaceDriftGateTest {
         }
     }
 
-    /** GPS jitter around home: a point every 10 s, uniformly inside a 100 m disc, altitude wobbling ±0.5 m. */
+    /** GPS jitter around home: a point every 10 s, uniformly inside a 25 m disc, altitude wobbling ±0.5 m. Real
+     *  stored drift has 13-18 m median chords (the 20 m decimation of accumulated jitter distance). */
     private fun drift(n: Int, rnd: Random = Random(42), offset: Pair<Double, Double> = 0.0 to 0.0): List<Pair<Double, Double>> =
         List(n) {
-            val r = 100.0 * kotlin.math.sqrt(rnd.nextDouble())
+            val r = 25.0 * kotlin.math.sqrt(rnd.nextDouble())
             val a = rnd.nextDouble() * 2 * Math.PI
             offset.first + r * cos(a) to offset.second + r * sin(a)
         }
 
-    /** Deterministic jitter whose every step is a qualifying (>= 37 m) chord with a big heading change. */
+    /** Deterministic jitter within 25 m whose every step is a qualifying (>= 18 m) chord turning > 3.7 deg/m. */
     private fun golden(n: Int) = List(n) { i ->
-        val r = 20.0 + (i * 37 % 80)
+        val r = (20.0 + (i * 37 % 80)) / 4.0
         val a = Math.toRadians(i * 137.5)
         r * cos(a) to r * sin(a)
     }
@@ -78,7 +80,7 @@ class GradePaceDriftGateTest {
         assertEquals(1000.0, f, 1.0)
     }
 
-    @Test fun `a Karoo left on at home for an hour - jitter within 100 m - yields an empty fold`() {
+    @Test fun `a Karoo left on at home for an hour - jitter within 25 m - yields an empty fold`() {
         val rnd = Random(42)
         val pts = drift(360, rnd).mapIndexed { i, xy -> i to xy }.let { l ->
             var d = 0.0
@@ -108,6 +110,40 @@ class GradePaceDriftGateTest {
         assertFalse(want.isEmpty)
         assertEquals(want.sumDd, got.sumDd)
         assertEquals(want.sumDt, got.sumDt)
+    }
+
+    /** [lengthM] ridden at [kmh] along [path] (arc length -> east/north metres), sampled at 1 Hz and stored
+     *  through the PRODUCTION decimator, as TrackRecorder does: steps are 20-29 m depending on the speed. */
+    private fun decimated(kmh: Double, lengthM: Double = 3000.0, path: (Double) -> Pair<Double, Double>): List<P> {
+        val v = kmh / 3.6
+        val dec = TrackDecimator(20.0)
+        return (0..(lengthM / v).toInt()).mapNotNull { t ->
+            val d = v * t
+            if (!dec.shouldKeep(d)) null else path(d).let { (x, y) -> P(x, y, d, t.toDouble()) }
+        }
+    }
+
+    private fun round(r: Double): (Double) -> Pair<Double, Double> = { s -> r * cos(s / r) to r * sin(s / r) }
+
+    /** The 400 m athletics oval: 84.39 m straights, 36.5 m bends. */
+    private val oval: (Double) -> Pair<Double, Double> = { s0 ->
+        val r = 36.5; val l = 84.39
+        var s = s0 % (2 * l + 2 * Math.PI * r)
+        when {
+            s < l -> s to -r
+            s < l + Math.PI * r -> { s -= l; val a = -Math.PI / 2 + s / r; l + r * cos(a) to r * sin(a) }
+            s < 2 * l + Math.PI * r -> { s -= l + Math.PI * r; l - s to r }
+            else -> { s -= 2 * l + Math.PI * r; val a = Math.PI / 2 + s / r; r * cos(a) to r * sin(a) }
+        }
+    }
+
+    @Test fun `circling is judged by curvature, not per-step turn - the speed of the decimated steps does not matter`() {
+        for (kmh in listOf(20.0, 30.0, 35.0)) {
+            assertFalse("R 45 m at $kmh km/h kept", GradePace.foldOf(track(decimated(kmh, path = round(45.0)))).isEmpty)
+            assertTrue("R 30 m at $kmh km/h excluded", GradePace.foldOf(track(decimated(kmh, path = round(30.0)))).isEmpty)
+        }
+        assertFalse("R 55 m at 35 km/h kept", GradePace.foldOf(track(decimated(35.0, path = round(55.0)))).isEmpty)
+        assertFalse("the 400 m oval at 35 km/h kept", GradePace.foldOf(track(decimated(35.0, 6000.0, oval))).isEmpty)
     }
 
     @Test fun `a 50 m radius circuit sampled every 20 m - 23 deg turns - ridden 3 km is kept`() {
@@ -147,7 +183,7 @@ class GradePaceDriftGateTest {
     }
 
     /** Three straight 10-step sections (27 zero-turn pairs) and 30 lone steps, each in its own direction, inside
-     *  a 200 m area, joined by a step of [joinM] metres over [joinS] seconds. Pairing headings across the joins
+     *  ~225 m of home, joined by a step of [joinM] metres over [joinS] seconds. Pairing headings across the joins
      *  would add ~64 big turns and flip the median; reset at every join, only the 27 straight pairs count. */
     private fun sections(joinM: Double, joinS: Double): RecordedTrack {
         val pts = ArrayList<P>()

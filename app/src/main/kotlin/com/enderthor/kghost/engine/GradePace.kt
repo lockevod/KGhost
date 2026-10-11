@@ -25,7 +25,7 @@ const val GRADE_SCHEMA_VERSION = 3
 internal val GRADE_FOLD_SIGNATURE: String =
     "bin=$GRADE_BIN_PCT max=$GRADE_MAX_PCT win=$GRADE_WINDOW_M gap=${TrackSamples.DROPOUT_GAP_M} " +
         "v=$AGG_MIN_SPEED_MS..$AGG_MAX_SPEED_MS " +
-        "drift=$DRIFT_FOOTPRINT_M/$DRIFT_MAX_TURN_DEG/$DRIFT_MIN_CHORD_M/$DRIFT_MIN_PAIRS " +
+        "drift=$DRIFT_FOOTPRINT_M/r$DRIFT_MIN_RADIUS_M/$DRIFT_MIN_CHORD_M/$DRIFT_MIN_PAIRS " +
         "motor=$MOTOR_MIN_SPEED_MS/$MOTOR_MIN_GRADE_PCT/$MOTOR_MIN_S/$MOTOR_MIN_SHARE"
 
 /** Motorised gate ([GradePace.isMotorised]): a step is car evidence above this speed (54 km/h)... */
@@ -44,9 +44,10 @@ const val MOTOR_MIN_SHARE = 0.05
  *  points from their per-axis median point) is under this many metres may be drift... */
 const val DRIFT_FOOTPRINT_M = 1000.0
 
-/** ...and IS drift when the median turn between consecutive qualifying steps exceeds this. Genuine rides
- *  measured on the real library: median turn p50 8 deg, max 12 deg; drift sessions p50 63 deg. */
-const val DRIFT_MAX_TURN_DEG = 30.0
+/** ...and IS drift when its median turn RATE (|Δbearing| per metre of chord) is sharper than a circle of this
+ *  radius (180/π/40 ≈ 1.43 deg/m). A curvature, not a per-step turn: the stored step is 20-29 m depending on
+ *  the speed, so a per-step threshold excluded a 45 m-radius loop at 30 km/h but not at 20. */
+const val DRIFT_MIN_RADIUS_M = 40.0
 
 /** A step only carries a heading when its GEOGRAPHIC chord is at least this long (shorter is GPS noise). */
 const val DRIFT_MIN_CHORD_M = 5.0
@@ -227,22 +228,23 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
          * step to step, jitter points anywhere. A track is drift iff BOTH:
          *  1. its robust footprint (95th-percentile haversine distance of its points from the per-axis
          *     MEDIAN point) is under [DRIFT_FOOTPRINT_M] — robust, so one far-off fix cannot hide it; and
-         *  2. the median |Δbearing| between consecutive QUALIFYING steps (geographic chord >=
-         *     [DRIFT_MIN_CHORD_M]) exceeds [DRIFT_MAX_TURN_DEG]. Headings are never paired across a
+         *  2. the median TURN RATE over consecutive QUALIFYING steps (geographic chord >= [DRIFT_MIN_CHORD_M]),
+         *     |Δbearing| / (mean of the two chords) in deg/m, is sharper than a circle of radius
+         *     [DRIFT_MIN_RADIUS_M] — speed-independent, unlike a per-step turn. Headings are never paired across a
          *     faulty step ([isStepFault]: dropout, spike, non-positive distance or time) — the pairing
          *     restarts after it. A DWELL step (< [AGG_MIN_SPEED_MS]), which [foldOf] also drops, still
          *     carries a heading on purpose: drift IS dwell-speed jitter, and on the real library resetting at
          *     dwells cleared 28 of 46 drift sessions, pouring ~45 km of jitter into the fold
          *     (bin 0 AVERAGE 11.85 -> 10.07 km/h). Fewer than
          *     [DRIFT_MIN_PAIRS] pairs: no verdict, kept.
-         * Accepted residuals (user decision 2026-10-11): a session circling a loop smaller than ~80 m across
-         * (radius < ~40 m at the 20 m stored decimation -> a > 30 deg turn per chord), e.g. a very compact
-         * pump track, is excluded. Coherent back-and-forth drift along a line is NOT caught (no worse than
+         * Accepted residuals (user decision 2026-10-11): a session circling a loop of radius < ~40 m, e.g. a
+         * very compact pump track, is excluded regardless of speed. Coherent back-and-forth drift along a line is NOT caught (no worse than
          * before the gate).
          */
         internal fun isHomeDrift(pts: List<TrackPointDto>): Boolean {
-            val turns = ArrayList<Double>()
+            val rates = ArrayList<Double>()
             var lastBearing = Double.NaN
+            var lastChord = 0.0
             for (i in 1 until pts.size) {
                 val a = pts[i - 1]
                 val b = pts[i]
@@ -252,12 +254,14 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                 }
                 val la = LatLng(a.lat, a.lng)
                 val lb = LatLng(b.lat, b.lng)
-                if (Polyline.haversineM(la, lb) < DRIFT_MIN_CHORD_M) continue
+                val chord = Polyline.haversineM(la, lb)
+                if (chord < DRIFT_MIN_CHORD_M) continue
                 val bearing = Polyline.bearingDeg(la, lb)
-                if (!lastBearing.isNaN()) turns += Polyline.bearingDiffDeg(lastBearing, bearing)
+                if (!lastBearing.isNaN()) rates += Polyline.bearingDiffDeg(lastBearing, bearing) / ((lastChord + chord) / 2.0)
                 lastBearing = bearing
+                lastChord = chord
             }
-            if (turns.size < DRIFT_MIN_PAIRS || median(turns) <= DRIFT_MAX_TURN_DEG) return false
+            if (rates.size < DRIFT_MIN_PAIRS || median(rates) <= Math.toDegrees(1.0 / DRIFT_MIN_RADIUS_M)) return false
             return robustFootprintM(pts) < DRIFT_FOOTPRINT_M
         }
 

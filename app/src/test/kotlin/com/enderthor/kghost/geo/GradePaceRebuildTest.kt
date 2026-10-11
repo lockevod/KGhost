@@ -282,11 +282,11 @@ class GradePaceRebuildTest {
 
     @Test fun `a drift fold cached before the drift gate is recomputed - and comes back empty`() {
         val dir = tmp.newFolder()
-        // GPS jitter at home: a point every 10 s, golden-angle scattered within 100 m, flat.
+        // GPS jitter at home: a point every 10 s, golden-angle scattered within 25 m, flat.
         var d = 0.0
         var prev: Pair<Double, Double>? = null
         val pts = (0 until 360).map { i ->
-            val r = 20.0 + (i * 37 % 80)
+            val r = (20.0 + (i * 37 % 80)) / 4.0
             val a = Math.toRadians(i * 137.5)
             val xy = r * kotlin.math.cos(a) to r * kotlin.math.sin(a)
             prev?.let { d += kotlin.math.hypot(xy.first - it.first, xy.second - it.second) }
