@@ -445,7 +445,9 @@ class TrackStore(private val dir: File) {
      * ride is always the most recent → always a survivor. Serialized by [tidyLock]. Returns the count
      * archived.
      */
-    fun tidyGroup(newTrack: RecordedTrack): Int = synchronized(tidyLock) {
+    fun tidyGroup(newTrack: RecordedTrack, lockWaitMs: Long = -1): Int = synchronized(tidyLock) {
+        val t0 = System.nanoTime()
+        val heap0 = heapUsedMb()
         val coarseCells = SpatialIndex(INDEX_PRECISION)
             .cellsForPath(newTrack.points.map { LatLng(it.lat, it.lng) })
         val candidateIds = synchronized(indexLock) {
@@ -455,6 +457,11 @@ class TrackStore(private val dir: File) {
         val metas = candidateIds.mapNotNull { id -> loadTrack(id)?.let { trackMetaOf(it) } }
         val toArchive = selectArchivable(metas)
         archive(toArchive)
+        Timber.i(
+            "KVP lib: tidyGroup cand=%d archived=%d wait=%dms work=%dms heap=%d->%d/%dMB",
+            candidateIds.size, toArchive.size, lockWaitMs, (System.nanoTime() - t0) / 1_000_000,
+            heap0, heapUsedMb(), heapMaxMb(),
+        )
         toArchive.size
     }
 
@@ -468,7 +475,13 @@ class TrackStore(private val dir: File) {
      * The caller must be able to tell those apart: a skip that reads as "completed, archived 0" would
      * let the one-shot upgrade sweep stamp itself done on exactly the libraries it never examined.
      */
-    fun sweep(maxTracks: Int = sweepMaxDefault, checkCancel: () -> Unit = {}): Int? = synchronized(tidyLock) {
+    fun sweep(
+        maxTracks: Int = sweepMaxDefault,
+        checkCancel: () -> Unit = {},
+        label: String = "sweep",
+    ): Int? = synchronized(tidyLock) {
+        val t0 = System.nanoTime()
+        val heap0 = heapUsedMb()
         val ids = allTrackIds()
         if (ids.size > maxTracks) {
             Timber.i("KVP tidy: sweep skipped (%d tracks > cap %d)", ids.size, maxTracks)
@@ -479,7 +492,12 @@ class TrackStore(private val dir: File) {
             loadTrack(id)?.let { trackMetaOf(it) }
         }
         // archive()'s return, not toArchive.size: report what moved, not what we intended to move.
-        archive(selectArchivable(metas))
+        archive(selectArchivable(metas)).also { archived ->
+            Timber.i(
+                "KVP lib: %s examined=%d archived=%d %dms heap=%d->%d/%dMB",
+                label, ids.size, archived, (System.nanoTime() - t0) / 1_000_000, heap0, heapUsedMb(), heapMaxMb(),
+            )
+        }
     }
 
     /**

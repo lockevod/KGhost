@@ -1064,7 +1064,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 // Stamp ONLY a sweep that completed. runCatching swallows Throwable, so an
                 // OutOfMemoryError on a big library would otherwise be recorded as "swept, archived 0"
                 // and never retried — marking done exactly the libraries that most need the pass.
-                runCatching { trackStore().sweep() }
+                runCatching { trackStore().sweep(label = "backlog") }
                     .onSuccess { archived ->
                         // null = skipped over the track cap. Not a completed pass, so it must NOT be
                         // stamped: the library that was too big to examine is exactly the one that needs
@@ -3371,8 +3371,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         }
                         // Auto-clean: archive near-duplicate rides of this route so BEST/LAST stay solid.
                         if (activeConfig.value.autoTidy) {
+                            val lockT0 = SystemClock.elapsedRealtime()
                             val archived = LibraryLock.mutex.withLock {
-                                runCatching { store.tidyGroup(track) }.getOrElse { e ->
+                                val waitMs = SystemClock.elapsedRealtime() - lockT0
+                                runCatching { store.tidyGroup(track, waitMs) }.getOrElse { e ->
                                     Timber.w(e, "KVP tidy: tidyGroup failed for ${track.id}"); 0
                                 }
                             }

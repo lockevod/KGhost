@@ -99,6 +99,7 @@ class GradePaceStore(private val dir: File) {
      */
     fun rebuild(checkCancel: () -> Unit = {}): RebuildResult {
         val t0 = System.nanoTime()
+        val heap0 = heapUsedMb()
         val old = loadFolds()
         val entries = ArrayList<FoldEntry>()
         var parsed = 0
@@ -153,9 +154,10 @@ class GradePaceStore(private val dir: File) {
         val saved = save(model)
         if (!writeFolds(entries)) Timber.w("grade-pace fold cache not persisted; the next rebuild re-parses")
         Timber.i(
-            "grade-pace rebuild: %d ms, files live=%d archive=%d, parsed=%d cached=%d, rides=%d suppressed=%d, coveredM=%.0f",
+            "KVP lib: grade-pace rebuild: %d ms, files live=%d archive=%d, parsed=%d cached=%d, rides=%d suppressed=%d, " +
+                "coveredM=%.0f heap=%d->%d/%dMB",
             (System.nanoTime() - t0) / 1_000_000, liveFiles, archiveFiles, parsed, cached, folds.size, suppressed,
-            model.coveredM,
+            model.coveredM, heap0, heapUsedMb(), heapMaxMb(),
         )
         return RebuildResult(model, saved, parsed, cached, suppressed, liveFiles, archiveFiles, complete)
     }
