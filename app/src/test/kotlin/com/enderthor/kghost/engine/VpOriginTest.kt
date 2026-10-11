@@ -7,6 +7,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RideContinuesTest {
+    @Test fun `savedRecently accepts a negative age and rejects one past the max`() {
+        assertTrue(savedRecently(savedAtEpoch = 10_000L, nowEpoch = 4_000L, maxAgeMs = 1_000L)) // clock was behind at save
+        assertTrue(savedRecently(savedAtEpoch = 10_000L, nowEpoch = 11_000L, maxAgeMs = 1_000L)) // exactly max
+        assertFalse(savedRecently(savedAtEpoch = 10_000L, nowEpoch = 11_001L, maxAgeMs = 1_000L))
+    }
+
     @Test fun `same epoch always continues`() {
         assertTrue(rideContinues(1L, 0.0, -1.0, epochNow = 1L, distNow = 0.0, elapsedNow = 0.0))
     }

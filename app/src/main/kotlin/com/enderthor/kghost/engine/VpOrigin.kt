@@ -21,6 +21,11 @@ fun rideContinues(
             elapsedNow >= cpRideElapsedS - CHECKPOINT_ELAPSED_SLACK_S
         )
 
+/** Is a persisted resume state young enough to consider? The ONE age rule for [VpOrigin] and the route ghost
+ *  checkpoint. Upper-bounded only: a negative age is a wall clock that was behind at the save (cached pre-GPS
+ *  time after a reboot, corrected later), not a different ride — [rideContinues] is the strong gate. */
+fun savedRecently(savedAtEpoch: Long, nowEpoch: Long, maxAgeMs: Long): Boolean = nowEpoch - savedAtEpoch <= maxAgeMs
+
 /** The Ghost-Pace (VP) race origin, persisted so a fresh process mid-ride resumes the race instead of
  *  re-stamping it at the current elapsed against the whole-ride odometer (field log e7fef4: D=4831m AHEAD).
  *  [originElapsedS]/[startDistM] are fixed once set; [lastDist]/[rideElapsedS]/[savedAtEpoch] are the
@@ -37,9 +42,7 @@ data class VpOrigin(
     fun withEvidence(lastDist: Double, rideElapsedS: Double, savedAtEpoch: Long) =
         copy(lastDist = lastDist, rideElapsedS = rideElapsedS, savedAtEpoch = savedAtEpoch)
 
-    /** Upper-bounded only: a negative age is a wall clock that was behind at the save (cached pre-GPS time
-     *  after a reboot, corrected later), not a different ride — [continues] is the strong gate. */
-    fun isRecent(nowEpoch: Long, maxAgeMs: Long) = nowEpoch - savedAtEpoch <= maxAgeMs
+    fun isRecent(nowEpoch: Long, maxAgeMs: Long) = savedRecently(savedAtEpoch, nowEpoch, maxAgeMs)
 
     fun continues(epochNow: Long, distNow: Double, elapsedNow: Double) =
         rideContinues(rideEpoch, lastDist, rideElapsedS, epochNow, distNow, elapsedNow)

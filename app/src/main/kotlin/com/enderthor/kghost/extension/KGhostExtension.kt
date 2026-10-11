@@ -47,6 +47,7 @@ import com.enderthor.kghost.engine.startVpOrigin
 import com.enderthor.kghost.engine.VpOriginDecision
 import com.enderthor.kghost.engine.vpOriginDecision
 import com.enderthor.kghost.engine.vpOriginCoherent
+import com.enderthor.kghost.engine.savedRecently
 import com.enderthor.kghost.engine.inactiveTick
 import com.enderthor.kghost.engine.vpRaceGap
 import com.enderthor.kghost.engine.raceCheckpoint
@@ -2768,7 +2769,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             // lead onto a new one (rideEpoch is unchanged across a route change), with no dependence
                             // on delete ordering; the stable name+length key also survives a host polyline re-encode.
                             if (cp != null) {
-                                val recent = System.currentTimeMillis() - cp.savedAtEpoch in 0..CHECKPOINT_MAX_AGE_MS
+                                val recent = savedRecently(cp.savedAtEpoch, System.currentTimeMillis(), CHECKPOINT_MAX_AGE_MS)
                                 val keyMatch = cp.routeKey == curKey
                                 // vpTimePerM is deliberately NOT part of this gate: since the neutral-fill change
                                 // it no longer influences the accrued gap, so gating resume on it only cost riders
