@@ -114,12 +114,14 @@ class GradePaceDriftGateTest {
 
     /** [lengthM] ridden at [kmh] along [path] (arc length -> east/north metres), sampled at 1 Hz and stored
      *  through the PRODUCTION decimator, as TrackRecorder does: steps are 20-29 m depending on the speed. */
-    private fun decimated(kmh: Double, lengthM: Double = 3000.0, path: (Double) -> Pair<Double, Double>): List<P> {
+    private fun decimated(
+        kmh: Double, lengthM: Double = 3000.0, ele: (Double) -> Double = { 0.0 }, path: (Double) -> Pair<Double, Double>,
+    ): List<P> {
         val v = kmh / 3.6
         val dec = TrackDecimator(20.0)
         return (0..(lengthM / v).toInt()).mapNotNull { t ->
             val d = v * t
-            if (!dec.shouldKeep(d)) null else path(d).let { (x, y) -> P(x, y, d, t.toDouble()) }
+            if (!dec.shouldKeep(d)) null else path(d).let { (x, y) -> P(x, y, d, t.toDouble(), ele(d)) }
         }
     }
 
@@ -143,7 +145,7 @@ class GradePaceDriftGateTest {
             assertTrue("R 30 m at $kmh km/h excluded", GradePace.foldOf(track(decimated(kmh, path = round(30.0)))).isEmpty)
         }
         assertFalse("R 55 m at 35 km/h kept", GradePace.foldOf(track(decimated(35.0, path = round(55.0)))).isEmpty)
-        assertFalse("the 400 m oval at 35 km/h kept", GradePace.foldOf(track(decimated(35.0, 6000.0, oval))).isEmpty)
+        assertFalse("the 400 m oval at 35 km/h kept", GradePace.foldOf(track(decimated(35.0, 6000.0, path = oval))).isEmpty)
     }
 
     @Test fun `a 50 m radius circuit sampled every 20 m - 23 deg turns - ridden 3 km is kept`() {
@@ -222,5 +224,67 @@ class GradePaceDriftGateTest {
             P(x, y, d, t)
         }
         assertTrue(GradePace.foldOf(track(pts)).isEmpty)
+    }
+
+    // --- climbing corroboration: drift is (nearly) flat per metre, climbing is not ------------------------
+
+    /** Tight switchbacks: [legs] legs of [legM] m, hairpins [pitchM] m apart, climbed and descended at [gradePct]
+     *  along the path, [laps] times. Arc length -> east/north metres; [climbM] is one way. */
+    private val legM = 35.0; private val pitchM = 8.0; private val legs = 12
+    private val climbM = legs * (legM + pitchM)
+    private val switchbacks: (Double) -> Pair<Double, Double> = { s0 ->
+        val m = s0 % (2 * climbM)
+        val s = if (m < climbM) m else 2 * climbM - m
+        val k = (s / (legM + pitchM)).toInt().coerceAtMost(legs - 1)
+        val r = s - k * (legM + pitchM)
+        if (r < legM) (if (k % 2 == 0) r else legM - r) to k * pitchM
+        else (if (k % 2 == 0) legM else 0.0) to k * pitchM + (r - legM)
+    }
+    private fun alongClimb(s0: Double): Double { val m = s0 % (2 * climbM); return if (m < climbM) m else 2 * climbM - m }
+
+    @Test fun `tight switchback hill repeats - 35 m legs at 10 pct, footprint under 1 km - are kept`() {
+        val pts = decimated(10.0, 8 * 2 * climbM, ele = { 100.0 + alongClimb(it) * 0.10 }, path = switchbacks)
+        assertTrue("footprint", GradePace.robustFootprintM(track(pts).points) < DRIFT_FOOTPRINT_M)
+        // Without altitude it circles like drift: only the climbing corroboration keeps it.
+        assertTrue("the same path flat is drift", GradePace.isHomeDrift(track(pts.map { it.copy(e = 100.0) }).points))
+        val f = GradePace.foldOf(track(pts))
+        assertFalse("kept: ${f.sumDd}", f.isEmpty)
+        assertTrue("climb folded: ${f.sumDd}", (f.sumDd[10] ?: 0.0) > 2000.0)
+    }
+
+    @Test fun `home drift with a slow baro drift - 146 m over 42 h - is still excluded`() {
+        val n = 42 * 360
+        val xy = drift(n, Random(7))
+        val rnd = Random(8)
+        var d = 0.0
+        val pts = xy.mapIndexed { i, (x, y) ->
+            if (i > 0) d += hypot(x - xy[i - 1].first, y - xy[i - 1].second)
+            P(x, y, d, i * 10.0, 50.0 + 146.0 * i / n + rnd.nextDouble() - 0.5)
+        }
+        assertTrue(GradePace.foldOf(track(pts)).isEmpty)
+    }
+
+    @Test fun `a 30 m radius flat circuit with altitude is still excluded - the documented residual`() {
+        assertTrue(GradePace.isHomeDrift(track(decimated(20.0, ele = { 100.0 }, path = round(30.0))).points))
+    }
+
+    @Test fun `a few climbing steps while the barometer settles do not veto drift - fewer than DRIFT_MIN_PAIRS`() {
+        // Field fit-1735819644000: power-on, 11 graded steps at ~4 % while the baro settles, then hours parked.
+        val xy = drift(400, Random(11))
+        var d = 0.0
+        var t = 0.0
+        val pts = xy.mapIndexed { i, (x, y) ->
+            if (i > 0) {
+                d += hypot(x - xy[i - 1].first, y - xy[i - 1].second)
+                t += if (i <= 14) 10.0 else 120.0 // moving while it settles, then dwell-speed jitter
+            }
+            P(x, y, d, t, if (i <= 14) 50.0 + 0.04 * d else 58.0)
+        }
+        assertTrue(GradePace.isHomeDrift(track(pts).points))
+    }
+
+    @Test fun `drift with no altitude at all is still drift - no gradient never blocks the verdict`() {
+        val pts = track(ridden(golden(80))).points.map { it.copy(eleM = null) }
+        assertTrue(GradePace.isHomeDrift(pts))
     }
 }

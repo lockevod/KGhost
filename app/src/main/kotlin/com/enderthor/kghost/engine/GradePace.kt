@@ -27,7 +27,7 @@ const val GRADE_SCHEMA_VERSION = 3
 internal val GRADE_FOLD_SIGNATURE: String =
     "bin=$GRADE_BIN_PCT max=$GRADE_MAX_PCT win=$GRADE_WINDOW_M gap=${TrackSamples.DROPOUT_GAP_M} " +
         "v=$AGG_MIN_SPEED_MS..$AGG_MAX_SPEED_MS " +
-        "drift=$DRIFT_FOOTPRINT_M/r$DRIFT_MIN_RADIUS_M/$DRIFT_MIN_CHORD_M/$DRIFT_MIN_PAIRS " +
+        "drift=$DRIFT_FOOTPRINT_M/r$DRIFT_MIN_RADIUS_M/$DRIFT_MIN_CHORD_M/$DRIFT_MIN_PAIRS/g$DRIFT_MAX_GRADE_PCT " +
         "motor=$MOTOR_MIN_SPEED_MS/$MOTOR_MIN_GRADE_PCT/$MOTOR_MIN_S/$MOTOR_MIN_SHARE/$MOTOR_UPHILL_PCT/$MOTOR_UPHILL_MIN_S"
 
 /** Motorised gate ([GradePace.isMotorised]): a step is car evidence above this speed (54 km/h)... */
@@ -62,6 +62,10 @@ const val DRIFT_MIN_CHORD_M = 5.0
 
 /** Below this many qualifying heading pairs there is no verdict, and the track is kept. */
 const val DRIFT_MIN_PAIRS = 20
+
+/** ...and a circling track is drift only while the median |trailing gradient| of its folded steps is under this
+ *  (%): home drift barely changes altitude per metre, tight switchback climbing does. */
+const val DRIFT_MAX_GRADE_PCT = 2.0
 
 /** Gradient bin width (%). 1% is finer than the noise floor of a smoothed barometric profile and keeps the
  *  table at 41 entries. */
@@ -187,6 +191,17 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
             // sample per bin.
             val sumDt = HashMap<Int, Double>()
             val sumDd = HashMap<Int, Double>()
+            forEachGradedStep(pts) { gradePct, stepT, stepM ->
+                val bin = binOf(gradePct)
+                sumDt[bin] = (sumDt[bin] ?: 0.0) + stepT
+                sumDd[bin] = (sumDd[bin] ?: 0.0) + stepM
+            }
+            return Fold(track.startedAtEpoch, sumDt, sumDd)
+        }
+
+        /** Every step [foldOf] folds, with its trailing gradient (finite, within +-[GRADE_MAX_PCT]), seconds and
+         *  metres. THE step/gradient rule: [foldOf] and the drift gate's climbing corroboration both read it. */
+        private inline fun forEachGradedStep(pts: List<TrackPointDto>, emit: (gradePct: Double, stepT: Double, stepM: Double) -> Unit) {
             var j = 0 // trailing index of the gradient window
             for (i in 1 until pts.size) {
                 val here = pts[i]
@@ -227,11 +242,8 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                 // glitch with a genuine 20% wall. The lookup-side clamp in binOf stays — a live 25%
                 // reading legitimately maps to bin 20.
                 if (!gradePct.isFinite() || kotlin.math.abs(gradePct) > GRADE_MAX_PCT) continue
-                val bin = binOf(gradePct)
-                sumDt[bin] = (sumDt[bin] ?: 0.0) + stepT
-                sumDd[bin] = (sumDd[bin] ?: 0.0) + stepM
+                emit(gradePct, stepT, stepM)
             }
-            return Fold(track.startedAtEpoch, sumDt, sumDd)
         }
 
         /**
@@ -239,7 +251,7 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
          * stream turns into kilometres of "riding" at plausible speeds, flat — it inflated the flat bin's
          * metres and could become LAST. Speed, footprint or altitude alone cannot tell it from slow riding;
          * HEADING COHERENCE can: riding — a small circuit, hill repeats, a velodrome — turns a little from
-         * step to step, jitter points anywhere. A track is drift iff BOTH:
+         * step to step, jitter points anywhere. A track is drift iff ALL THREE:
          *  1. its robust footprint (95th-percentile haversine distance of its points from the per-axis
          *     MEDIAN point) is under [DRIFT_FOOTPRINT_M] — robust, so one far-off fix cannot hide it; and
          *  2. the median TURN RATE over consecutive QUALIFYING steps (geographic chord >= [DRIFT_MIN_CHORD_M]),
@@ -250,9 +262,15 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
          *     carries a heading on purpose: drift IS dwell-speed jitter, and on the real library resetting at
          *     dwells cleared 28 of 46 drift sessions, pouring ~45 km of jitter into the fold
          *     (bin 0 AVERAGE 11.85 -> 10.07 km/h). Fewer than
-         *     [DRIFT_MIN_PAIRS] pairs: no verdict, kept.
+         *     [DRIFT_MIN_PAIRS] pairs: no verdict, kept; and
+         *  3. it does not CLIMB: the true median of |trailing gradient| over exactly the steps [foldOf] folds
+         *     ([forEachGradedStep]: same step validity, gap restarts and window) is under [DRIFT_MAX_GRADE_PCT].
+         *     Tight switchback hill repeats (35 m legs at 10 %, footprint < 1 km) turn like drift but climb. No
+         *     such step (no altitude) does not block the verdict — such a track folds to nothing anyway — and
+         *     neither do fewer than [DRIFT_MIN_PAIRS] graded steps (a barometer settling after power-on).
          * Accepted residuals (user decision 2026-10-11): a session circling a loop of radius < ~40 m, e.g. a
-         * very compact pump track, is excluded regardless of speed. Coherent back-and-forth drift along a line is NOT caught (no worse than
+         * very compact pump track, is excluded regardless of speed unless it climbs (a flat one stays excluded);
+         * alternating short climbs and descents can cancel within the [GRADE_WINDOW_M] window and read flat. Coherent back-and-forth drift along a line is NOT caught (no worse than
          * before the gate).
          */
         internal fun isHomeDrift(pts: List<TrackPointDto>): Boolean {
@@ -276,7 +294,12 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                 lastChord = chord
             }
             if (rates.size < DRIFT_MIN_PAIRS || median(rates) <= Math.toDegrees(1.0 / DRIFT_MIN_RADIUS_M)) return false
-            return robustFootprintM(pts) < DRIFT_FOOTPRINT_M
+            if (robustFootprintM(pts) >= DRIFT_FOOTPRINT_M) return false
+            val grades = ArrayList<Double>()
+            forEachGradedStep(pts) { g, _, _ -> grades += kotlin.math.abs(g) }
+            // Fewer graded steps than heading pairs needed → too little evidence of climbing to veto (field:
+            // fit-1735819644000, 11 steps of a barometer settling after power-on, median 4.3 %, otherwise drift).
+            return grades.size < DRIFT_MIN_PAIRS || median(grades) < DRIFT_MAX_GRADE_PCT
         }
 
         /**
