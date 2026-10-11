@@ -110,9 +110,9 @@ class GradePaceRebuildTest {
 
     // A=[08:00,09:00], B=[08:30,10:30], C=[10:00,11:00] (minutes from 08:00). A and C never overlap; B
     // overlaps exactly 50 % of each one's own duration.
-    @Test fun `A-B-C with B largest - B overlaps half of A and half of C directly, so both go`() {
-        // Not chaining: each is >= 50 % inside B on its own. This is the rule's documented boundary.
-        assertEquals(setOf(30L), survivors(entry("A", 0, 60, 1000.0), entry("B", 30, 150, 3000.0), entry("C", 120, 180, 900.0)))
+    @Test fun `A-B-C with B largest - exactly half inside B is not a duplicate, all three survive`() {
+        // The rule is STRICTLY more than 50 %: a real duplicate overlaps ~100 %, two rides sharing half an hour don't.
+        assertEquals(setOf(0L, 30L, 120L), survivors(entry("A", 0, 60, 1000.0), entry("B", 30, 150, 3000.0), entry("C", 120, 180, 900.0)))
     }
 
     @Test fun `A-B-C with A then C largest - all three survive`() {
@@ -120,14 +120,14 @@ class GradePaceRebuildTest {
         assertEquals(setOf(0L, 30L, 120L), survivors(entry("A", 0, 60, 3000.0), entry("B", 30, 150, 1000.0), entry("C", 120, 180, 2000.0)))
     }
 
-    @Test fun `A-B-C with A then B largest - C is lost to B only, A stays`() {
-        assertEquals(setOf(0L, 30L), survivors(entry("A", 0, 60, 3000.0), entry("B", 30, 150, 2000.0), entry("C", 120, 180, 1000.0)))
+    @Test fun `A-B-C with A then B largest - all three survive at the 50 % boundary`() {
+        assertEquals(setOf(0L, 30L, 120L), survivors(entry("A", 0, 60, 3000.0), entry("B", 30, 150, 2000.0), entry("C", 120, 180, 1000.0)))
     }
 
     @Test fun `a candidate suppressed by an accepted ride cannot suppress a third - no transitive chain`() {
-        // A=[0,60] accepted; B=[30,90] is 50 % inside A -> suppressed; C=[60,120] is 50 % inside B but 0 % inside
+        // A=[0,60] accepted; B=[20,90] is 57 % inside A -> suppressed; C=[50,110] is 67 % inside B but 17 % inside
         // A. A cluster/chain rule would lose C through B; pairwise-against-ACCEPTED keeps it.
-        assertEquals(setOf(0L, 60L), survivors(entry("A", 0, 60, 3000.0), entry("B", 30, 90, 2000.0), entry("C", 60, 120, 1000.0)))
+        assertEquals(setOf(0L, 50L), survivors(entry("A", 0, 60, 3000.0), entry("B", 20, 90, 2000.0), entry("C", 50, 110, 1000.0)))
     }
 
     // --- archive included ----------------------------------------------------------------------------

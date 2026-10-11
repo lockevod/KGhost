@@ -72,7 +72,7 @@ class GradePaceStore(private val dir: File) {
      * One contribution per PHYSICAL ride ([dedupe]):
      *  a. the same id live AND archived (a rebuildAll re-decode) is one candidate — the fold with more metres;
      *  b. candidates in descending total metres (tie: lowest id) are accepted unless their own interval
-     *     `[startedAtEpoch, startedAtEpoch + lastPoint.timeS]` overlaps an already-ACCEPTED one by >= 50 %
+     *     `[startedAtEpoch, startedAtEpoch + lastPoint.timeS]` overlaps an already-ACCEPTED one by MORE than 50 %
      *     of their OWN duration. Pairwise against accepted folds only — no transitive clusters, so a long
      *     ride B straddling A and C cannot chain A and C into one. `startedAtEpoch <= 0` is never
      *     suppressed by (b).
@@ -82,7 +82,7 @@ class GradePaceStore(private val dir: File) {
      *  - a ride split across two partial files keeps only the larger part;
      *  - a clock-shifted re-export of the same ride counts twice (as before);
      *  - an altitude-bearing RECORDED track's interval uses ELAPSED time (shorter, same start), so its FIT
-     *    twin still overlaps it by >= 50 % of its own duration and one of them is suppressed.
+     *    twin still overlaps it by more than 50 % of its own duration and one of them is suppressed.
      *
      * The cache is written atomically AFTER the model save; a cache write failure only costs a re-parse.
      */
@@ -193,7 +193,7 @@ class GradePaceStore(private val dir: File) {
                 val dur = c.endEpoch - c.startEpoch
                 val dup = c.startEpoch > 0 && dur > 0 && accepted.any { a ->
                     a.startEpoch > 0 &&
-                        minOf(a.endEpoch, c.endEpoch) - maxOf(a.startEpoch, c.startEpoch) >= dur / 2.0
+                        minOf(a.endEpoch, c.endEpoch) - maxOf(a.startEpoch, c.startEpoch) > dur / 2.0
                 }
                 if (dup) suppressed++ else accepted += c
             }
