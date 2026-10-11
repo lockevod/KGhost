@@ -52,6 +52,29 @@ data class VpOrigin(
 fun vpOriginCoherent(distM: Double, elapsedS: Double): Boolean =
     distM <= elapsedS * AGG_MAX_SPEED_MS + CHECKPOINT_RESUME_MARGIN_M
 
+/** How long a resumed process may wait for ELAPSED_TIME to catch up with a saved origin's evidence. */
+const val VP_ORIGIN_DEFER_MAX_MS = 60_000L
+
+enum class VpOriginDecision { ADOPT, FRESH, DEFER }
+
+/** What to do with [saved] on the first coherent moving sample. ADOPT/FRESH as [startVpOrigin]. DEFER (stamp
+ *  nothing yet): [saved] is recent and the ODOMETER carries on, but the ride clock is behind its evidence — a
+ *  resumed ELAPSED_TIME replaying stale, not a new ride. Minting fresh would lose the valid origin forever, so
+ *  wait for the clock — at most [VP_ORIGIN_DEFER_MAX_MS] of monotonic [deferredMs] (time since the first
+ *  DEFER), then FRESH. */
+fun vpOriginDecision(
+    saved: VpOrigin?, rideEpoch: Long, elapsedS: Double, distM: Double, nowEpoch: Long, maxAgeMs: Long, deferredMs: Long,
+): VpOriginDecision {
+    if (saved == null || !saved.isRecent(nowEpoch, maxAgeMs)) return VpOriginDecision.FRESH
+    if (saved.continues(rideEpoch, distM, elapsedS)) return VpOriginDecision.ADOPT
+    val odometerCarriesOn = saved.rideElapsedS >= 0.0 &&
+        saved.lastDist > CHECKPOINT_RESUME_MARGIN_M && distM > CHECKPOINT_RESUME_MARGIN_M &&
+        abs(distM - saved.lastDist) <= CHECKPOINT_RESUME_MARGIN_M
+    val clockBehind = elapsedS < saved.rideElapsedS - CHECKPOINT_ELAPSED_SLACK_S
+    return if (odometerCarriesOn && clockBehind && deferredMs < VP_ORIGIN_DEFER_MAX_MS) VpOriginDecision.DEFER
+    else VpOriginDecision.FRESH
+}
+
 /** The origin a VP race starting NOW takes: [saved]'s (re-keyed to [rideEpoch], evidence refreshed) iff it is
  *  recent and the same ride, else a fresh one at ([elapsedS], [distM]). */
 fun startVpOrigin(saved: VpOrigin?, rideEpoch: Long, elapsedS: Double, distM: Double, nowEpoch: Long, maxAgeMs: Long): VpOrigin =

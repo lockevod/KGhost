@@ -44,6 +44,8 @@ import com.enderthor.kghost.engine.CorridorSeeder
 import com.enderthor.kghost.engine.GhostCheckpoint
 import com.enderthor.kghost.engine.VpOrigin
 import com.enderthor.kghost.engine.startVpOrigin
+import com.enderthor.kghost.engine.VpOriginDecision
+import com.enderthor.kghost.engine.vpOriginDecision
 import com.enderthor.kghost.engine.vpOriginCoherent
 import com.enderthor.kghost.engine.inactiveTick
 import com.enderthor.kghost.engine.vpRaceGap
@@ -564,6 +566,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // Latest VP origin snapshot (origin fixed, continuity evidence refreshed) + its write throttle.
     @Volatile private var pendingVpOrigin: VpOrigin? = null
     @Volatile private var lastVpOriginSaveMs: Long = 0L
+    // A VP origin stamp DEFERRED while a resumed ELAPSED_TIME catches up (see vpOriginDecision): monotonic
+    // start of the wait + the saved origin read at its start (no file read per tick). Null = not deferring.
+    @Volatile private var vpOriginDeferSinceMs: Long? = null
+    @Volatile private var vpOriginDeferSaved: VpOrigin? = null
     // Consecutive MOVING ticks off the windowed line — arms the unambiguous global marker re-acquire.
     @Volatile private var emptyWindowTicks: Int = 0
     // The rider's last TRUSTWORTHY route distance (the monotone rail) + the odometer captured with it.
@@ -672,6 +678,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         vpStartDistM = 0.0
         pendingVpOrigin = null
         lastVpOriginSaveMs = 0L
+        vpOriginDeferSinceMs = null
+        vpOriginDeferSaved = null
         emptyWindowTicks = 0
         lastGoodRouteDistM = null
         distMAtLastGoodM = null
@@ -2568,29 +2576,49 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     ) {
                         // A fresh process mid-ride (ride-app restart, power-off) lands here with the whole-ride
                         // odometer: ADOPT the persisted origin iff recent + same ride (the ghost checkpoint's
-                        // rule), else start fresh here. Tiny file read, once per ride (as loadGhostCheckpoint).
+                        // rule), else start fresh here. Tiny file read, once per ride (as loadGhostCheckpoint) —
+                        // a DEFER (odometer carries on, ELAPSED_TIME still stale) keeps the read and waits, bounded.
                         val distNow = coast.effectiveDistanceM
-                        val saved = loadVpOrigin()
-                        val origin = startVpOrigin(
+                        val nowMono = SystemClock.elapsedRealtime()
+                        val deferSince = vpOriginDeferSinceMs
+                        val saved = if (deferSince != null) vpOriginDeferSaved else loadVpOrigin()
+                        val decision = vpOriginDecision(
                             saved, recordingStartedEpoch, elapsedS, distNow, System.currentTimeMillis(), CHECKPOINT_MAX_AGE_MS,
+                            deferredMs = if (deferSince == null) 0L else nowMono - deferSince,
                         )
-                        vpFirstMoveElapsedS = origin.originElapsedS
-                        vpStartDistM = origin.startDistM
-                        if (saved != null) {
-                            val recent = saved.isRecent(System.currentTimeMillis(), CHECKPOINT_MAX_AGE_MS)
-                            val continuous = saved.continues(recordingStartedEpoch, distNow, elapsedS)
-                            Timber.i(
-                                "KVP VP origin ${if (recent && continuous) "ADOPTED" else "REJECTED"}: " +
-                                    "recent=$recent continuous=$continuous epochMatch=${saved.rideEpoch == recordingStartedEpoch} " +
-                                    "origin=${"%.0f".format(saved.originElapsedS)}s/${"%.0f".format(saved.startDistM)}m " +
-                                    "(ΔdistM=${"%.0f".format(distNow - saved.lastDist)} " +
-                                    "cpElapsed=${"%.0f".format(saved.rideElapsedS)}s elapsedNow=${"%.0f".format(elapsedS)}s)",
+                        if (decision == VpOriginDecision.DEFER) {
+                            if (deferSince == null) {
+                                vpOriginDeferSinceMs = nowMono
+                                vpOriginDeferSaved = saved
+                                Timber.i(
+                                    "KVP VP origin DEFERRED: odometer continues (${"%.0f".format(distNow)}m) but " +
+                                        "elapsedNow=${"%.0f".format(elapsedS)}s < cpElapsed=${"%.0f".format(saved!!.rideElapsedS)}s",
+                                )
+                            }
+                        } else {
+                            vpOriginDeferSinceMs = null
+                            vpOriginDeferSaved = null
+                            val origin = startVpOrigin(
+                                saved, recordingStartedEpoch, elapsedS, distNow, System.currentTimeMillis(), CHECKPOINT_MAX_AGE_MS,
                             )
+                            vpFirstMoveElapsedS = origin.originElapsedS
+                            vpStartDistM = origin.startDistM
+                            if (saved != null) {
+                                val recent = saved.isRecent(System.currentTimeMillis(), CHECKPOINT_MAX_AGE_MS)
+                                val continuous = saved.continues(recordingStartedEpoch, distNow, elapsedS)
+                                Timber.i(
+                                    "KVP VP origin ${if (recent && continuous) "ADOPTED" else "REJECTED"}: " +
+                                        "recent=$recent continuous=$continuous epochMatch=${saved.rideEpoch == recordingStartedEpoch} " +
+                                        "origin=${"%.0f".format(saved.originElapsedS)}s/${"%.0f".format(saved.startDistM)}m " +
+                                        "(ΔdistM=${"%.0f".format(distNow - saved.lastDist)} " +
+                                        "cpElapsed=${"%.0f".format(saved.rideElapsedS)}s elapsedNow=${"%.0f".format(elapsedS)}s)",
+                                )
+                            }
+                            pendingVpOrigin = origin
+                            lastVpOriginSaveMs = SystemClock.elapsedRealtime()
+                            scope.launch(Dispatchers.IO) { flushVpOrigin() }
+                            gpsHealth.onRaceStart(SystemClock.elapsedRealtime())
                         }
-                        pendingVpOrigin = origin
-                        lastVpOriginSaveMs = SystemClock.elapsedRealtime()
-                        scope.launch(Dispatchers.IO) { flushVpOrigin() }
-                        gpsHealth.onRaceStart(SystemClock.elapsedRealtime())
                     }
                     // Refresh the VP origin's continuity evidence in BOTH modes (a route-mode ride must still
                     // resume its VP race after a restart). Origin fields stay fixed.

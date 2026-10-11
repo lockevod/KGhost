@@ -138,3 +138,35 @@ class VpOriginTest {
         assertFalse(g.ahead)
     }
 }
+
+class VpOriginDecisionTest {
+    private val now = 10_000_000L
+    private val maxAge = 6 * 60 * 60 * 1000L
+    // Evidence 5000 m / 3000 s, from a previous process (epoch 1).
+    private val saved = VpOrigin(rideEpoch = 1L, originElapsedS = 100.0, startDistM = 50.0,
+        lastDist = 5000.0, rideElapsedS = 3000.0, savedAtEpoch = now - 60_000L)
+
+    private fun decide(elapsed: Double, dist: Double, deferredMs: Long) =
+        vpOriginDecision(saved, 2L, elapsed, dist, now, maxAge, deferredMs)
+
+    @Test fun `stale elapsed replay defers, then adopts once the clock catches up`() {
+        assertTrue(vpOriginCoherent(5000.0, 200.0)) // the sample passes the coherence gate
+        assertEquals(VpOriginDecision.DEFER, decide(elapsed = 200.0, dist = 5000.0, deferredMs = 0L))
+        assertEquals(VpOriginDecision.ADOPT, decide(elapsed = 3001.0, dist = 5005.0, deferredMs = 5_000L))
+    }
+
+    @Test fun `deferral is bounded - expiry mints fresh`() {
+        assertEquals(VpOriginDecision.DEFER, decide(elapsed = 200.0, dist = 5000.0, deferredMs = VP_ORIGIN_DEFER_MAX_MS - 1))
+        assertEquals(VpOriginDecision.FRESH, decide(elapsed = 200.0, dist = 5000.0, deferredMs = VP_ORIGIN_DEFER_MAX_MS))
+    }
+
+    @Test fun `a new ride near 0 is fresh immediately`() {
+        assertEquals(VpOriginDecision.FRESH, decide(elapsed = 10.0, dist = 40.0, deferredMs = 0L))
+    }
+
+    @Test fun `no or stale saved origin is fresh`() {
+        assertEquals(VpOriginDecision.FRESH, vpOriginDecision(null, 2L, 200.0, 5000.0, now, maxAge, 0L))
+        assertEquals(VpOriginDecision.FRESH,
+            vpOriginDecision(saved.copy(savedAtEpoch = now - maxAge - 1), 2L, 200.0, 5000.0, now, maxAge, 0L))
+    }
+}
