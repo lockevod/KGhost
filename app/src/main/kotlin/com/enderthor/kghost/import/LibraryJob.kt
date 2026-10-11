@@ -115,14 +115,18 @@ private suspend fun dischargeDebts(deps: LibraryDeps) {
     // A missing or older-schema model is owed too: that is how a schema bump makes the first run after an
     // upgrade rebuild once over the whole archive (an older but servable model keeps serving meanwhile).
     // No loop: save() writes even an empty model.
-    if (cfg.gradeModelDirty || !gradeStore.isCurrent()) {
+    // The debt goes down BEFORE the rebuild: once a current-schema model is saved, nothing but the flag would
+    // retry a partial one, so a post-save write that fails or is cancelled must not be what records it.
+    // If the debt can't be persisted, skip the rebuild this run (the stale schema keeps it owed).
+    if (cfg.gradeModelDirty || (!gradeStore.isCurrent() &&
+            withContext(NonCancellable) { deps.updateConfig { it.copy(gradeModelDirty = true) } })
+    ) {
         try {
             // STREAMED, one track file at a time (live + archive, cached per file): the library in heap OOMs a Karoo.
             val r = gradeStore.rebuild(checkCancel)
             if (r.saved && !r.complete) {
-                // A partial model beats none, but it is OWED: set the debt (the model is current-schema now, so
-                // nothing else would retry); the fold cache makes the retry cheap.
-                deps.updateConfig { it.copy(gradeModelDirty = true) }
+                // A partial model beats none, but it is OWED: the debt set above stays; the fold cache makes
+                // the retry cheap.
                 Timber.w("grade-pace model rebuilt from a partial read; the debt stays for the next run")
             } else if (r.saved && deps.updateConfig { it.copy(gradeModelDirty = false) }) {
                 Timber.i("grade-pace model rebuilt: coveredM=%.0f", r.model.coveredM)

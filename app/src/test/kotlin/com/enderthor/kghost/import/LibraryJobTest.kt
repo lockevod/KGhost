@@ -252,6 +252,36 @@ class LibraryJobTest {
         assertFalse(fx.cfg.value.gradeModelDirty)
     }
 
+    // Schema-1 model on disk, debt flag clear, one unreadable track: the upgrade rebuild is partial. Whatever
+    // happens to the config write AFTER the current-schema save, the next zero-work run must still rebuild.
+    private suspend fun partialUpgradeThenRetry(firstRunUpdate: (LibraryFixture) -> suspend ((KGhostConfig) -> KGhostConfig) -> Boolean) {
+        val fx = fixture()
+        File(fx.tracksDir, GradePaceStore.FILE_NAME).writeText("""{"schemaVersion":1,"bins":[]}""")
+        TrackStore(fx.tracksDir).add(fx.ride("r1", ele = true))
+        val f = File(fx.tracksDir, "r1.json")
+        assertTrue(f.setReadable(false))
+        try { run(fx.deps().copy(updateConfig = firstRunUpdate(fx))) } finally { f.setReadable(true) }
+
+        run(fx.deps()).getOrThrow()
+        assertTrue("the owed rebuild is retried", GradePaceStore(fx.tracksDir).load()!!.coveredM > 0)
+        assertFalse(fx.cfg.value.gradeModelDirty)
+    }
+
+    @Test fun `an upgrade rebuild stays owed when the post-save config write fails`() = runTest {
+        partialUpgradeThenRetry { fx ->
+            { t -> if (GradePaceStore(fx.tracksDir).isCurrent()) false else { fx.cfg.update(t); true } }
+        }
+    }
+
+    @Test fun `an upgrade rebuild stays owed when cancelled after the save`() = runTest {
+        partialUpgradeThenRetry { fx ->
+            { t ->
+                if (GradePaceStore(fx.tracksDir).isCurrent()) throw CancellationException("cut after the save")
+                fx.cfg.update(t); true
+            }
+        }
+    }
+
     @Test fun `a stale-schema model is rebuilt once after the upgrade`() = runTest {
         val fx = fixture()
         val f = File(fx.tracksDir, GradePaceStore.FILE_NAME)
