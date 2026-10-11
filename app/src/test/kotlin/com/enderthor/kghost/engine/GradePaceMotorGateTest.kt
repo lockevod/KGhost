@@ -58,14 +58,24 @@ class GradePaceMotorGateTest {
         assertTrue(kept(Seg(30.0, 102.0), Seg(57.6, 18.0)))
     }
 
+    @Test fun `32-43 s of fast uphill evidence is kept, 47 s is not - the 45 s minimum alone decides`() {
+        // A slow +4 % lead-in so every fast step's window is all +4 %: uphill >= 30 s and share >= 5 % both hold.
+        for (durS in listOf(33.0, 37.0, 44.0)) {
+            assertTrue("$durS s kept", kept(Seg(30.0, 300.0), Seg(20.0, 60.0, 4.0), Seg(60.0, durS, 4.0)))
+        }
+        assertFalse("47 s gated", kept(Seg(30.0, 300.0), Seg(20.0, 60.0, 4.0), Seg(60.0, 47.0, 4.0)))
+    }
+
     @Test fun `a 20 min climb at 5 km h with 18 s fast is kept`() {
         assertTrue(kept(Seg(5.0, 1200.0, 6.0), Seg(57.6, 18.0)))
     }
 
     @Test fun `slow 14 s steps count as moving time - 55 s fast after a 20 min climb is under 5 pct`() {
         // The dt-cap trap: a 20 m decimated 5 km/h climb is 14.4 s per step. Dropping steps over 10 s from the
-        // moving time would leave ~55 s of it, all fast -> 100 % -> a genuine ride excluded.
-        assertTrue(kept(Seg(5.0, 1200.0, 6.0), Seg(57.6, 55.0)))
+        // moving time would leave ~55 s of it, all fast -> 100 % -> a genuine ride excluded. The fast segment
+        // stays on the +6 %, so >= 45 s and the uphill corroboration both hold: ONLY the share keeps it
+        // (55 s of 1250 s moving = 4.4 %).
+        assertTrue(kept(Seg(5.0, 1200.0, 6.0), Seg(57.6, 55.0, 6.0)))
     }
 
     @Test fun `a 1 h road ride at 45-50 km h is kept`() {
@@ -94,8 +104,15 @@ class GradePaceMotorGateTest {
     }
 
     @Test fun `a gap step - 1000 m over 60 s - does not count as fast`() {
-        // Two dropouts = 120 s "at 60 km/h" against 600 s of riding: 17 %, if they counted.
-        assertTrue(kept(Seg(15.0, 300.0), Seg(0.0, 60.0, gapM = 1000.0), Seg(15.0, 300.0), Seg(0.0, 60.0, gapM = 1000.0), Seg(15.0, 300.0)))
+        // Two dropouts = 120 s "at 60 km/h" against ~1000 s of riding, if they counted. 35 s of genuinely fast
+        // uphill (after a slow +4 % lead-in) satisfies the uphill corroboration on its own but is under 45 s:
+        // ONLY the gap rule keeps it.
+        assertTrue(
+            kept(
+                Seg(15.0, 300.0), Seg(0.0, 60.0, gapM = 1000.0), Seg(15.0, 300.0), Seg(0.0, 60.0, gapM = 1000.0), Seg(15.0, 300.0),
+                Seg(20.0, 60.0, 4.0), Seg(60.0, 35.0, 4.0),
+            )
+        )
     }
 
     @Test fun `unknown gradient never counts as flat - fast steps with no altitude are no evidence`() {

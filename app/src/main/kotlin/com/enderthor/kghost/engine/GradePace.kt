@@ -295,7 +295,10 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
          * dropping those would leave only the fast steps in the denominator).
          * Measured on the real library: cars 13.2-23.8 % / 64-677 s; bikes max 0.5 % / 6 s.
          * Documented limits: a car that never goes fast uphill is not caught (one 8-min city session in the
-         * real library); a sustained run above [AGG_MAX_SPEED_MS] counts only its steps with a known window.
+         * real library); a sustained run above [AGG_MAX_SPEED_MS] counts only its steps with a known window; an
+         * imported FIT from a device WITHOUT a barometer (GPS-only altitude, noise sigma >~ 4 m) can make a fast
+         * genuine descent read as uphill over the [GRADE_WINDOW_M] window and be gated. Karoo recordings are
+         * barometric and not affected (closest real bike session: 8 s of fast evidence).
          */
         internal fun isMotorised(pts: List<TrackPointDto>): Boolean {
             var movingS = 0.0
