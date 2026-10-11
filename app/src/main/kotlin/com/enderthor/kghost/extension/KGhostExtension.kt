@@ -3070,6 +3070,20 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // missing target blanks — EXCEPT after a sustained (~3 min) loss, where
                         // handleGpsLoss() gives up and we blank rather than show a wild extrapolation.
                         publishSegment(null, fireExit = false)
+                        // Re-enabled with no route: consume the gate interstitial HERE (the first active tick),
+                        // else it survives and a later route load REANCHORs over this VP stretch, discarding
+                        // what integAfterVp lets it earn. Translate the race across the disabled stretch only
+                        // and align the route clock/odometer with it, as the route branch's REANCHOR does.
+                        if (gateInterstitial) {
+                            val ms = firstMoveElapsedS
+                            if (ms != null) {
+                                integrator?.rebase(coast.effectiveDistanceM, elapsedS - ms)
+                                integLastRiderDist = coast.effectiveDistanceM
+                                prevTickElapsedS = elapsedS
+                            }
+                            gateInterstitial = false
+                            gateSnapshot = null
+                        }
                         // The VP branch now owns the holder: a route that loads next (the integrator survives
                         // the interstitial) must publish before its hold may freeze anything, else this VP
                         // number stays on screen for a whole stop (pendingHold persists while stationary).
