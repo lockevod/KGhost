@@ -1,5 +1,6 @@
 package com.enderthor.kghost.geo
 
+import com.enderthor.kghost.engine.GRADE_FOLD_SIGNATURE
 import com.enderthor.kghost.engine.GRADE_SCHEMA_VERSION
 import com.enderthor.kghost.engine.GradePace
 import com.enderthor.kghost.engine.GradePaceDto
@@ -161,16 +162,17 @@ class GradePaceStore(private val dir: File) {
     private val foldsFile: File get() = File(dir, FOLDS_FILE_NAME)
 
     private fun writeFolds(entries: List<FoldEntry>): Boolean = runCatching {
-        atomicWriteText(foldsFile, jsonForStorage.encodeToString(FoldCacheDto(GRADE_SCHEMA_VERSION, entries)))
+        val dto = FoldCacheDto(GRADE_SCHEMA_VERSION, GRADE_FOLD_SIGNATURE, entries)
+        atomicWriteText(foldsFile, jsonForStorage.encodeToString(dto))
     }.getOrDefault(false)
 
-    /** The previous run's folds; empty (= full recompute) when missing, corrupt or of another schema. */
+    /** The previous run's folds; empty (= full recompute) when missing, corrupt, of another schema or fold signature. */
     private fun loadFolds(): Map<Pair<String, String>, FoldEntry> {
         val f = foldsFile
         if (!f.isFile) return emptyMap()
         return runCatching {
             jsonWithUnknownKeys.decodeFromString<FoldCacheDto>(f.readText())
-                .takeIf { it.schemaVersion == GRADE_SCHEMA_VERSION }
+                .takeIf { it.schemaVersion == GRADE_SCHEMA_VERSION && it.foldSignature == GRADE_FOLD_SIGNATURE }
                 ?.entries?.associateBy { it.where to it.id }
         }.getOrNull() ?: emptyMap()
     }
@@ -194,7 +196,7 @@ class GradePaceStore(private val dir: File) {
     }
 
     @Serializable
-    internal data class FoldCacheDto(val schemaVersion: Int, val entries: List<FoldEntry>)
+    internal data class FoldCacheDto(val schemaVersion: Int, val foldSignature: String, val entries: List<FoldEntry>)
 
     companion object {
         const val FILE_NAME = "gradepace.json"

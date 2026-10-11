@@ -251,6 +251,17 @@ class GradePaceRebuildTest {
         assertTrue(GradePaceStore(dir).rebuild().complete)
     }
 
+    @Test fun `a cache built under other fold constants is recomputed`() {
+        val dir = tmp.newFolder()
+        threeRides(dir)
+        GradePaceStore(dir).rebuild()
+        val cache = File(dir, GradePaceStore.FOLDS_FILE_NAME)
+        val sig = "\"foldSignature\":\"" + com.enderthor.kghost.engine.GRADE_FOLD_SIGNATURE + "\""
+        assertTrue(cache.readText().contains(sig))
+        cache.writeText(cache.readText().replace(sig, "\"foldSignature\":\"win=50.0\""))
+        assertEquals(3, GradePaceStore(dir).rebuild().parsed)
+    }
+
     @Test fun `a corrupt cache is recomputed`() {
         val dir = tmp.newFolder()
         val rides = threeRides(dir)

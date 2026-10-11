@@ -5,11 +5,20 @@ import kotlinx.serialization.Serializable
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** Persisted-model schema version. Bump when the binning, the reducer layout or the INPUT SET changes so an
- *  old blob (and the per-file fold cache, which carries the same version) is discarded and rebuilt instead
- *  of mis-read. 2: the model counts the archive too, one contribution per physical ride — the bump makes
- *  the first run after the upgrade rebuild once over the whole archive (the one-time history recovery). */
+/** Persisted-model schema version. Bump when the binning, the reducer layout, the INPUT SET or any constant
+ *  [GradePace.foldOf] reads changes, so the next import run owes a rebuild (`GradePaceStore.isCurrent`); an
+ *  older model keeps being served meanwhile only down to `GradePaceStore.MIN_SERVABLE_SCHEMA` (raise that
+ *  when the DTO or a field's meaning changes). The per-file fold cache carries this version AND
+ *  [GRADE_FOLD_SIGNATURE], so a changed fold constant invalidates cached folds even without a bump.
+ *  2: the model counts the archive too, one contribution per physical ride — the bump makes the first run
+ *  after the upgrade rebuild once over the whole archive (the one-time history recovery). */
 const val GRADE_SCHEMA_VERSION = 2
+
+/** Every constant [GradePace.foldOf] reads, stamped into the fold cache: change one and every cached fold is
+ *  recomputed. Add any new foldOf input here. */
+internal val GRADE_FOLD_SIGNATURE: String =
+    "bin=$GRADE_BIN_PCT max=$GRADE_MAX_PCT win=$GRADE_WINDOW_M gap=${TrackSamples.DROPOUT_GAP_M} " +
+        "v=$AGG_MIN_SPEED_MS..$AGG_MAX_SPEED_MS"
 
 /** Gradient bin width (%). 1% is finer than the noise floor of a smoothed barometric profile and keeps the
  *  table at 41 entries. */
