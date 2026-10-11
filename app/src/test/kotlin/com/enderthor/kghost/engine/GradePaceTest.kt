@@ -88,18 +88,19 @@ class GradePaceTest {
     }
 
     @Test fun `BEST is clamped so it can never be more than BEST_MAX_SPEEDUP faster than the average`() {
-        // 5 m/s (0.2 s/m) then 25 m/s (0.04 s/m) — both under AGG_MAX_SPEED_MS, so BOTH rides land in bin 0
-        // and the raw min (0.04) really is more than BEST_MAX_SPEEDUP faster than the average (0.12).
+        // 2 m/s (0.5 s/m) then 14 m/s (1/14 s/m) — both under AGG_MAX_SPEED_MS and not above the motorised
+        // gate's MOTOR_MIN_SPEED_MS, so BOTH rides land in bin 0 and the raw min (0.0714) really is more than
+        // BEST_MAX_SPEEDUP faster than the average (0.2857).
         val g = GradePace.build(
             listOf(
-                track("slow", n = 201, stepM = 20.0, gradePct = 0.0, speedMs = 5.0),
-                track("fast", n = 201, stepM = 20.0, gradePct = 0.0, speedMs = 25.0, startEpoch = 2L),
+                track("slow", n = 201, stepM = 20.0, gradePct = 0.0, speedMs = 2.0),
+                track("fast", n = 201, stepM = 20.0, gradePct = 0.0, speedMs = 14.0, startEpoch = 2L),
             )
         )
         val avg = g.pace(0.0, GhostPick.AVERAGE)!!
         val best = g.pace(0.0, GhostPick.BEST)!!
-        // Metre-weighted mean of the two rides: (0.2*3920 + 0.04*3920) / 7840 = 0.12.
-        assertEquals(0.12, avg, 1e-9)
+        // Metre-weighted mean of the two rides (same metres each): (0.5 + 1/14) / 2.
+        assertEquals((0.5 + 1.0 / 14.0) / 2, avg, 1e-9)
         assertEquals(avg / BEST_MAX_SPEEDUP, best, 1e-9)   // the clamp binds, exactly
     }
 

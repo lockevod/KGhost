@@ -307,6 +307,29 @@ class GradePaceRebuildTest {
         assertEquals(0.0, r.model.coveredM, 0.0)
     }
 
+    @Test fun `a car fold cached before the motorised gate is recomputed - and comes back empty`() {
+        val dir = tmp.newFolder()
+        // 20 min at 40 km/h then 4 min at 72 km/h, flat: a car.
+        val car = ride("car", t0, durS = 1200.0, speed = 11.0).let { slow ->
+            val last = slow.points.last()
+            slow.copy(points = slow.points + (1..240).map { i ->
+                val d = last.distanceM + i * 20.0
+                TrackPointDto(41.0, 2.0 + d / 83_000.0, d, last.timeS + i * 1.0, 0.0)
+            })
+        }
+        write(dir, car)
+        val f = File(dir, "car.json")
+        // The cache the drift-gate build (schema 3, its signature) left: this car folded as flat road.
+        val stale = GradePaceStore.FoldCacheDto(
+            3, "bin=1.0 max=20.0 win=100.0 gap=200.0 v=0.5..30.0 drift=1000.0/30.0/5.0/20",
+            listOf(GradePaceStore.FoldEntry(GradePaceStore.LIVE, "car", f.length(), f.lastModified(), t0, t0 + 1_440_000L, mapOf(0 to 1440.0), mapOf(0 to 30_000.0))),
+        )
+        File(dir, GradePaceStore.FOLDS_FILE_NAME).writeText(jsonForStorage.encodeToString(stale))
+        val r = GradePaceStore(dir).rebuild()
+        assertEquals(1, r.parsed)
+        assertEquals(0.0, r.model.coveredM, 0.0)
+    }
+
     @Test fun `a corrupt cache is recomputed`() {
         val dir = tmp.newFolder()
         val rides = threeRides(dir)

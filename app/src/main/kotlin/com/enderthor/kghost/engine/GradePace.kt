@@ -16,7 +16,8 @@ import kotlin.math.roundToInt
  *  [GRADE_FOLD_SIGNATURE], so a changed fold constant invalidates cached folds even without a bump.
  *  2: the model counts the archive too, one contribution per physical ride — the bump makes the first run
  *  after the upgrade rebuild once over the whole archive (the one-time history recovery).
- *  3: the home-drift gate ([GradePace.isHomeDrift]) empties drift sessions; the DTO is unchanged. */
+ *  3: the home-drift gate ([GradePace.isHomeDrift]) and the motorised gate ([GradePace.isMotorised]) empty
+ *  drift and car sessions; the DTO is unchanged. */
 const val GRADE_SCHEMA_VERSION = 3
 
 /** Every constant [GradePace.foldOf] reads, stamped into the fold cache: change one and every cached fold is
@@ -24,7 +25,20 @@ const val GRADE_SCHEMA_VERSION = 3
 internal val GRADE_FOLD_SIGNATURE: String =
     "bin=$GRADE_BIN_PCT max=$GRADE_MAX_PCT win=$GRADE_WINDOW_M gap=${TrackSamples.DROPOUT_GAP_M} " +
         "v=$AGG_MIN_SPEED_MS..$AGG_MAX_SPEED_MS " +
-        "drift=$DRIFT_FOOTPRINT_M/$DRIFT_MAX_TURN_DEG/$DRIFT_MIN_CHORD_M/$DRIFT_MIN_PAIRS"
+        "drift=$DRIFT_FOOTPRINT_M/$DRIFT_MAX_TURN_DEG/$DRIFT_MIN_CHORD_M/$DRIFT_MIN_PAIRS " +
+        "motor=$MOTOR_MIN_SPEED_MS/$MOTOR_MIN_GRADE_PCT/$MOTOR_MIN_S/$MOTOR_MIN_SHARE"
+
+/** Motorised gate ([GradePace.isMotorised]): a step is car evidence above this speed (54 km/h)... */
+const val MOTOR_MIN_SPEED_MS = 15.0
+
+/** ...on a KNOWN trailing gradient at least this (flat or uphill: only a descent takes a bike there). */
+const val MOTOR_MIN_GRADE_PCT = -1.0
+
+/** A session is motorised when its evidence lasts at least this many seconds (an 18 s sprint cannot)... */
+const val MOTOR_MIN_S = 45.0
+
+/** ...AND is at least this share of its moving time. */
+const val MOTOR_MIN_SHARE = 0.05
 
 /** Home-drift gate ([GradePace.isHomeDrift]): a track whose robust footprint (95th-percentile distance of its
  *  points from their per-axis median point) is under this many metres may be drift... */
@@ -149,10 +163,11 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
             Builder().apply { tracks.forEach { add(it) } }.build()
 
         /** One track's per-bin (seconds, metres) totals; empty maps when it carries no usable altitude or is
-         *  home drift ([isHomeDrift]) — gated HERE so the per-file fold cache stores the empty result. */
+         *  home drift ([isHomeDrift]) or motorised ([isMotorised]) — gated HERE so the per-file fold cache
+         *  stores the empty result. */
         fun foldOf(track: RecordedTrack): Fold {
             val pts = track.points
-            if (isHomeDrift(pts)) return Fold(track.startedAtEpoch, emptyMap(), emptyMap())
+            if (isHomeDrift(pts) || isMotorised(pts)) return Fold(track.startedAtEpoch, emptyMap(), emptyMap())
             // Per-bin totals for THIS track: seconds and metres, so [reduce] emits one metre-weighted
             // sample per bin.
             val sumDt = HashMap<Int, Double>()
@@ -252,6 +267,44 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
             }
             if (turns.size < DRIFT_MIN_PAIRS || turns.sorted()[turns.size / 2] <= DRIFT_MAX_TURN_DEG) return false
             return robustFootprintM(pts) < DRIFT_FOOTPRINT_M
+        }
+
+        /**
+         * MOTORISED: a session recorded in a car (5-6 in the real library) inflated AVERAGE at +-1 % by ~1 km/h
+         * and BEST on descents by up to 50 %. The rider rides MTB and does not record car shuttles, so the
+         * WHOLE session is excluded — a mixed shuttle day loses its riding too (accepted, user decision).
+         *
+         * Evidence = seconds spent above [MOTOR_MIN_SPEED_MS] on a KNOWN trailing gradient (window >=
+         * [GRADE_WINDOW_M], restarted after a dropout like [foldOf]'s; no altitude in the window = unknown,
+         * never flat) >= [MOTOR_MIN_GRADE_PCT]. A track is motorised iff evidence >= [MOTOR_MIN_S] AND >=
+         * [MOTOR_MIN_SHARE] of its moving time. Steps counted: [foldOf]'s gap rule only (0 < dd <=
+         * DROPOUT_GAP_M, dt > 0), moving (v >= [AGG_MIN_SPEED_MS]); deliberately NO speed cap (a step above
+         * [AGG_MAX_SPEED_MS] is still evidence) and NO dt cap (20 m decimation makes slow climbing ~14 s/step;
+         * dropping those would leave only the fast steps in the denominator).
+         * Measured on the real library: cars 13.2-23.8 % / 64-677 s; bikes max 0.5 % / 6 s.
+         * Documented limits: a car that only goes fast downhill is not caught; motor-paced cycling for >= 45 s
+         * above 54 km/h on the flat is excluded.
+         */
+        internal fun isMotorised(pts: List<TrackPointDto>): Boolean {
+            var movingS = 0.0
+            var fastS = 0.0
+            var j = 0
+            for (i in 1 until pts.size) {
+                val here = pts[i]
+                while (j < i - 1 && here.distanceM - pts[j + 1].distanceM >= GRADE_WINDOW_M) j++
+                val stepM = here.distanceM - pts[i - 1].distanceM
+                val stepT = here.timeS - pts[i - 1].timeS
+                if (stepM > TrackSamples.DROPOUT_GAP_M) { j = i; continue }
+                if (stepM <= 0.0 || stepT <= 0.0 || stepM / stepT < AGG_MIN_SPEED_MS) continue
+                movingS += stepT
+                if (stepM / stepT <= MOTOR_MIN_SPEED_MS) continue
+                val ele = here.eleM ?: continue
+                val back = pts[j]
+                val backEle = back.eleM ?: continue
+                val dd = here.distanceM - back.distanceM
+                if (dd >= GRADE_WINDOW_M && (ele - backEle) / dd * 100.0 >= MOTOR_MIN_GRADE_PCT) fastS += stepT
+            }
+            return fastS >= MOTOR_MIN_S && fastS >= MOTOR_MIN_SHARE * movingS
         }
 
         /** 95th-percentile haversine distance of [pts] from their per-axis median point. */
