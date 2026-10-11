@@ -74,8 +74,10 @@ class GradePaceStore(private val dir: File) {
      *  b. candidates in descending total metres (tie: lowest id) are accepted unless their own interval
      *     `[startedAtEpoch, startedAtEpoch + lastPoint.timeS]` overlaps an already-ACCEPTED one by MORE than 50 %
      *     of their OWN duration. Pairwise against accepted folds only — no transitive clusters, so a long
-     *     ride B straddling A and C cannot chain A and C into one. `startedAtEpoch <= 0` is never
-     *     suppressed by (b).
+     *     ride B straddling A and C cannot chain A and C into one. An UNDATABLE interval — `startedAtEpoch
+     *     <= 0`, end <= start (a backward clock jump) or longer than [MAX_RIDE_SPAN_MS] (a forward jump, e.g.
+     *     the FIT-replay simulator moving the system clock) — is exempt from (b) both ways: it never
+     *     suppresses and is never suppressed, so a months-long bogus span cannot swallow the real rides in it.
      * Accepted residuals (deliberately NOT handled):
      *  - a friend's overlapping FIT imported by hand replaces the owner's fold when it has more metres
      *    (before, both counted);
@@ -166,6 +168,9 @@ class GradePaceStore(private val dir: File) {
         val sumDd: Map<Int, Double>,
     ) {
         val totalM: Double get() = sumDd.values.sum()
+
+        /** A plausible ride interval; only these take part in rule (b) of [rebuild]. */
+        val datable: Boolean get() = startEpoch > 0 && endEpoch > startEpoch && endEpoch - startEpoch <= MAX_RIDE_SPAN_MS
     }
 
     @Serializable
@@ -176,6 +181,9 @@ class GradePaceStore(private val dir: File) {
         const val FOLDS_FILE_NAME = "gradepace-folds.json"
         internal const val LIVE = "live"
         internal const val ARCHIVE = "archive"
+
+        /** Longest interval rule (b) believes. Real rides, ultras included, fit; a clock-jumped FIT does not. */
+        internal const val MAX_RIDE_SPAN_MS = 24 * 3_600_000L
 
         /**
          * The duplicate suppression of [rebuild] (rules a and b there). Pure. Returns the surviving folds
@@ -191,9 +199,8 @@ class GradePaceStore(private val dir: File) {
             val accepted = ArrayList<FoldEntry>()
             for (c in byId.sortedWith(compareByDescending<FoldEntry> { it.totalM }.thenBy { it.id })) {
                 val dur = c.endEpoch - c.startEpoch
-                val dup = c.startEpoch > 0 && dur > 0 && accepted.any { a ->
-                    a.startEpoch > 0 &&
-                        minOf(a.endEpoch, c.endEpoch) - maxOf(a.startEpoch, c.startEpoch) > dur / 2.0
+                val dup = c.datable && accepted.any { a ->
+                    a.datable && minOf(a.endEpoch, c.endEpoch) - maxOf(a.startEpoch, c.startEpoch) > dur / 2.0
                 }
                 if (dup) suppressed++ else accepted += c
             }
