@@ -124,6 +124,27 @@ class GhostIntegrator(
         bcDist.clear(); bcTime.clear(); bcLat.clear(); bcLng.clear()
     }
 
+    /** Translate the race in place across an UN-RACED interval (the per-profile/master gate kept the tick
+     *  inert): the rider moved Δd metres and the race clock Δt seconds that must count for nothing. The
+     *  breadcrumbs, ghostTime and the baselines all shift by (Δd, Δt), so gapTimeS AND gapDistM are
+     *  unchanged — unlike [restore], which drops the crumbs and collapses gapDistM to 0 while AHEAD until
+     *  the lead re-accrues. [raceElapsedS] is in the race clock onTick receives. place() is not re-run:
+     *  its inputs are all differences, which a translation leaves identical (and it would need a live fix).
+     *  No prior tick (or a restore still pending) → falls back to [restore] semantics. */
+    fun rebase(riderDist: Double, raceElapsedS: Double) {
+        val pending = pendingResumeLead
+        if (pending != null || lastRiderDist.isNaN() || prevElapsedS.isNaN()) {
+            restore(pending ?: gapTimeS, riderDist)
+            return
+        }
+        val dd = riderDist - lastRiderDist
+        val dt = raceElapsedS - prevElapsedS
+        for (i in bcDist.indices) { bcDist[i] += dd; bcTime[i] += dt }
+        ghostTime += dt
+        lastRiderDist = riderDist
+        prevElapsedS = raceElapsedS
+    }
+
     private fun push(dist: Double, lat: Double, lng: Double) {
         bcDist.add(dist); bcTime.add(ghostTime); bcLat.add(lat); bcLng.add(lng)
     }

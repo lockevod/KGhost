@@ -2653,8 +2653,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         }
                         val riderDist = coast.effectiveDistanceM
                         // Back from a gate-inactive stretch: the integrator got no ticks, so its next dd would
-                        // charge the whole stretch at one endpoint pace — re-anchor instead (lead kept, nothing
-                        // earned or lost), but only once no pending interval straddles the gate.
+                        // charge the whole stretch at one endpoint pace — re-anchor instead (lead kept in seconds
+                        // AND metres: rebase translates the race across the stretch, nothing earned or lost), but
+                        // only once no pending interval straddles the gate.
                         when (gateResume(gateInterstitial, coast.pendingHold)) {
                             GateResume.WAIT_REPUBLISH -> {
                                 prevTickElapsedS = elapsedS
@@ -2664,10 +2665,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 return@runCatching
                             }
                             GateResume.REANCHOR -> {
-                                integrator?.let { it.restore(it.gapTimeS, riderDist) }
+                                integrator?.rebase(riderDist, elapsedS - moveStart0)
                                 integLastRiderDist = riderDist
                                 prevTickElapsedS = elapsedS // this tick must not freeze the race clock either
-                                integInitialised = false // forces the restore's re-anchor through the guard
+                                integInitialised = false // forces the re-anchor tick through the guard
                                 integPublished = false
                                 gateInterstitial = false
                                 gateSnapshot = null

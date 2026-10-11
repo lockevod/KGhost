@@ -57,7 +57,7 @@ class GateInterstitialPipelineTest {
                     return
                 }
                 GateResume.REANCHOR -> {
-                    g.restore(g.gapTimeS, riderDist)
+                    g.rebase(riderDist, t - ms)
                     integLast = riderDist
                     prevEl = t
                     integInit = false
@@ -153,12 +153,15 @@ class GateInterstitialPipelineTest {
         val r = Rig(RaceComparator.HISTORY)
         r.ride(100, 6.0, 0.2)
         val before = r.lead
+        val beforeM = r.shown.gapDistanceM
         assertEquals(20.0, before, 1.0)
+        assertTrue(beforeM > 50.0)
         r.ride(200, 6.0, 0.4, active = false) // 1200 m while disabled, slow-history road at the far end
         r.ride(1, 6.0, 0.4) // re-enable tick
         assertEquals(GateResume.REANCHOR, r.lastDecision)
         assertEquals("checkpoint lead after the re-anchor tick", before, r.lead, 1e-9)
         assertEquals("displayed seconds", before, r.shown.gapTimeS, 1e-9)
+        assertEquals("displayed metres (restore() collapsed them to 0)", beforeM, r.shown.gapDistanceM, 1e-9)
         // and the race carries on normally from there: 10 s at 6 m/s on a 0.4 s/m road = +14 s
         r.ride(10, 6.0, 0.4)
         assertEquals(before + 14.0, r.lead, 1e-6)
@@ -168,11 +171,14 @@ class GateInterstitialPipelineTest {
         val r = Rig(RaceComparator.TARGET, target = 4.0)
         r.ride(100, 6.0, null)
         val before = r.lead
+        val beforeM = r.shown.gapDistanceM
         assertTrue(before > 10.0)
+        assertTrue(beforeM > 50.0)
         r.ride(200, 6.0, null, active = false)
         r.ride(1, 6.0, null)
         assertEquals(before, r.lead, 1e-9)
         assertEquals(before, r.shown.gapTimeS, 1e-9)
+        assertEquals(beforeM, r.shown.gapDistanceM, 1e-9)
     }
 
     @Test fun `forward distance jump during the gap is excluded`() {
