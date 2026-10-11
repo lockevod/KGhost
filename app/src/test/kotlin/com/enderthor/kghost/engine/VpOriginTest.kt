@@ -67,8 +67,13 @@ class VpOriginTest {
         assertEquals(4831.0, o.startDistM, 0.0)
     }
 
-    @Test fun `a saved-at in the future rejects`() {
-        assertEquals(3277.0, start(saved(savedAt = now + 1), 2L, 3277.0, 4831.0).originElapsedS, 0.0)
+    // A saved-at in the "future" is a wall clock that was behind when the origin was written (a reboot
+    // serves a cached pre-GPS time, corrected later) — not evidence of a different ride. The odometer +
+    // ride-clock continuity is the strong gate, so a negative age adopts; only the upper bound is age-gated.
+    @Test fun `a saved-at in the future still adopts - continuity is the gate`() {
+        assertEquals(100.0, start(saved(savedAt = now + 3 * 24 * 3600_000L), 2L, 3277.0, 4831.0).originElapsedS, 0.0)
+        // ...but continuity still decides: a new ride near 0 with a future saved-at rejects.
+        assertEquals(10.0, start(saved(savedAt = now + 1), 2L, elapsed = 10.0, dist = 40.0).originElapsedS, 0.0)
     }
 
     @Test fun `new ride near 0 rejects`() {

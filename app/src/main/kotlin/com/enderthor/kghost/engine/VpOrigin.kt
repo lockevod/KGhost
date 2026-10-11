@@ -37,7 +37,9 @@ data class VpOrigin(
     fun withEvidence(lastDist: Double, rideElapsedS: Double, savedAtEpoch: Long) =
         copy(lastDist = lastDist, rideElapsedS = rideElapsedS, savedAtEpoch = savedAtEpoch)
 
-    fun isRecent(nowEpoch: Long, maxAgeMs: Long) = nowEpoch - savedAtEpoch in 0..maxAgeMs
+    /** Upper-bounded only: a negative age is a wall clock that was behind at the save (cached pre-GPS time
+     *  after a reboot, corrected later), not a different ride — [continues] is the strong gate. */
+    fun isRecent(nowEpoch: Long, maxAgeMs: Long) = nowEpoch - savedAtEpoch <= maxAgeMs
 
     fun continues(epochNow: Long, distNow: Double, elapsedNow: Double) =
         rideContinues(rideEpoch, lastDist, rideElapsedS, epochNow, distNow, elapsedNow)
