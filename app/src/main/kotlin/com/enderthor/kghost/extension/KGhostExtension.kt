@@ -122,6 +122,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
@@ -300,6 +302,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          *    (genuinely off-route) → don't trust the projection, fall back to the Karoo value.
          */
         private const val GPS_FIX_FRESH_MS = 5_000L
+        private val REPLAY_GRADE_TYPE = DataType.dataTypeId("ride-replay", "grade")
         private const val ROUTE_PROJ_BACK_M = 120.0
         private const val ROUTE_PROJ_FWD_M = 300.0
         private const val ROUTE_PROJ_FWD_MAX_M = 400.0
@@ -2001,7 +2004,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun configSummary(c: KGhostConfig): String =
         "raceEnabled=${c.raceEnabled} target=${"%.1f".format(c.targetMs())}m/s pick=${c.ghostPick} " +
             "showMap=${c.showGhostOnMap} icon=${c.ghostIcon} entryAlert=${c.segmentEntryAlert} " +
-            "exitAlert=${c.segmentExitAlert} autoRecord=${c.autoRecord}"
+            "exitAlert=${c.segmentExitAlert} autoRecord=${c.autoRecord} replayGrade=${c.replayGrade}"
 
     /**
      * On ride start, if all-files access is missing (and the master switch is on), fire the decaying
@@ -2172,15 +2175,38 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // stall waiting for a gradient sample, and an absent gradient is a legitimate state (the model is
         // simply not asked). Cancelled with the other stream jobs on reconnect/stop.
         if (gradeJob?.isActive != true) {
-            gradeJob = karooSystem.streamDataFlow(DataType.Type.ELEVATION_GRADE).onEach { state ->
-                val v = (state as? StreamState.Streaming)?.dataPoint?.values?.get(DataType.Field.ELEVATION_GRADE)
+            // BENCH TESTING ONLY: Ride Replay can't mock the barometer, so on the bench the Karoo's own grade
+            // reads ~0 on a replayed climb. Ride Replay publishes the recorded grade as its own data type
+            // (percent, under SINGLE); while a replay is open it wins over the Karoo's, otherwise it reports
+            // NotAvailable and the Karoo's grade is used. Opened only when the rider turns on the settings
+            // switch (off by default); read once per ride, so a change applies from the next ride.
+            val karooGrade = karooSystem.streamDataFlow(DataType.Type.ELEVATION_GRADE).map { false to it }
+            val grades = if (activeConfig.value.replayGrade) {
+                // A dead Ride Replay ends its stream without a final NotAvailable; synthesise one so the Karoo's
+                // grade takes over again instead of being dropped for the rest of the ride.
+                val replay = karooSystem.streamDataFlow(REPLAY_GRADE_TYPE)
+                    .onCompletion { cause -> if (cause == null) emit(StreamState.NotAvailable) }
+                    .map { true to it }
+                merge(karooGrade, replay)
+            } else {
+                karooGrade
+            }
+            var replayOpen = false
+            gradeJob = grades.onEach { (fromReplay, state) ->
+                if (fromReplay && replayOpen != (state !is StreamState.NotAvailable)) {
+                    replayOpen = !replayOpen
+                    Timber.i("KVP grade source: %s", if (replayOpen) "ride-replay" else "karoo")
+                }
+                if (fromReplay != replayOpen) return@onEach // the other source owns the gradient
+                val field = if (fromReplay) DataType.Field.SINGLE else DataType.Field.ELEVATION_GRADE
+                val v = (state as? StreamState.Streaming)?.dataPoint?.values?.get(field)
                 // UNIT: assumed already a percentage. If a field log shows ratios (0.06 on a 6% ramp),
                 // multiply by 100 HERE — the one place that knows the unit — never at the lookup site.
                 lastGradePct = v?.takeIf { it.isFinite() }
                 lastGradeMs = SystemClock.elapsedRealtime()
                 if (!gradeUnitLogged) {
                     gradeUnitLogged = true
-                    Timber.i("KVP grade sample: raw=%s", v?.toString() ?: "null")
+                    Timber.i("KVP grade sample: raw=%s replay=%s", v?.toString() ?: "null", fromReplay)
                 }
             }.launchIn(scope)
         }
