@@ -2191,29 +2191,31 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             } else {
                 karooGrade
             }
-            var replayOpen = false
+            val gate = GradeSourceGate()
             gradeJob = grades.onEach { (fromReplay, state) ->
-                // Only a value opens the replay: Searching/Idle (a missing or restarting Ride Replay) must
-                // never silence the Karoo's grade on a real ride.
-                if (fromReplay && replayOpen != (state is StreamState.Streaming)) {
-                    replayOpen = !replayOpen
-                    Timber.i("KVP grade source: %s", if (replayOpen) "ride-replay" else "karoo")
+                val wasOpen = gate.replayOpen
+                val action = gate.onEvent(fromReplay, state)
+                if (gate.replayOpen != wasOpen) {
+                    Timber.i("KVP grade source: %s", if (gate.replayOpen) "ride-replay" else "karoo")
                 }
-                if (fromReplay != replayOpen) {
-                    // Ride Replay only emits on a change, so a constant replayed grade would go stale after
-                    // GPS_FIX_FRESH_MS; the Karoo's ~1 Hz samples keep it fresh without touching its value.
-                    if (!fromReplay) lastGradeMs = SystemClock.elapsedRealtime()
-                    return@onEach
-                }
-                val field = if (fromReplay) DataType.Field.SINGLE else DataType.Field.ELEVATION_GRADE
-                val v = (state as? StreamState.Streaming)?.dataPoint?.values?.get(field)
-                // UNIT: assumed already a percentage. If a field log shows ratios (0.06 on a 6% ramp),
-                // multiply by 100 HERE — the one place that knows the unit — never at the lookup site.
-                lastGradePct = v?.takeIf { it.isFinite() }
-                lastGradeMs = SystemClock.elapsedRealtime()
-                if (!gradeUnitLogged) {
-                    gradeUnitLogged = true
-                    Timber.i("KVP grade sample: raw=%s replay=%s", v?.toString() ?: "null", fromReplay)
+                when (action) {
+                    GradeSourceGate.Action.Ignore -> Unit
+                    GradeSourceGate.Action.Refresh -> lastGradeMs = SystemClock.elapsedRealtime()
+                    GradeSourceGate.Action.Clear -> {
+                        lastGradePct = null
+                        lastGradeMs = 0L
+                    }
+                    is GradeSourceGate.Action.Write -> {
+                        val v = action.pct
+                        // UNIT: assumed already a percentage. If a field log shows ratios (0.06 on a 6% ramp),
+                        // multiply by 100 HERE — the one place that knows the unit — never at the lookup site.
+                        lastGradePct = v?.takeIf { it.isFinite() }
+                        lastGradeMs = SystemClock.elapsedRealtime()
+                        if (!gradeUnitLogged) {
+                            gradeUnitLogged = true
+                            Timber.i("KVP grade sample: raw=%s replay=%s", v?.toString() ?: "null", fromReplay)
+                        }
+                    }
                 }
             }.launchIn(scope)
         }
