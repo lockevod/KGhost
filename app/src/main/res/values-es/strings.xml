@@ -101,6 +101,8 @@
     <string name="update_check_description">Al arrancar el Karoo (nunca durante una salida), avisa cuando haya una versión nueva de KGhost. Como mucho una vez cada 3 días.</string>
     <string name="update_available_title">Actualización de KGhost disponible</string>
     <string name="update_available_message">v%1$s disponible — actualiza desde la tienda de extensiones de Hammerhead</string>
+    <string name="replay_grade_label">Usar la pendiente de Ride Replay (pruebas)</string>
+    <string name="replay_grade_description">Solo para probar con Ride Replay: con un replay abierto, KGhost usa la pendiente de la salida reproducida en vez de la del Karoo, que no puede seguir un replay. Sin replay abierto usa la del Karoo. Se aplica desde la siguiente salida. Déjalo apagado para el uso normal.</string>
     <string name="race_filelog_label">Guardar un registro de diagnóstico</string>
     <string name="race_filelog_description">Guarda los diagnósticos de KGhost en un fichero para poder estudiar una salida después sin ordenador. Cada salida genera su propio fichero (kghost-AAAA-MM-dd-HHmmss.log); los más antiguos se purgan automáticamente cuando hay más de 6. Déjalo apagado para el uso normal.</string>
     <string name="race_filelog_path">Fichero de log: %1$s</string>

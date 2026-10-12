@@ -219,7 +219,7 @@ object HistoryImportRunner {
                         onStored = onStored,
                     )
                 },
-                sweep = { c -> TrackStore(tracksDir).sweep(checkCancel = c) },
+                sweep = { c -> TrackStore(tracksDir).sweep(checkCancel = c, label = "reconcile") },
             )
         }
 

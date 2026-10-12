@@ -2,6 +2,8 @@ package com.enderthor.kghost.import_
 
 import com.enderthor.kghost.data.KGhostConfig
 import com.enderthor.kghost.data.reconcileOwed
+import com.enderthor.kghost.engine.GradePace
+import com.enderthor.kghost.geo.GradePaceStore
 import com.enderthor.kghost.geo.RecordedTrack
 import com.enderthor.kghost.geo.Source
 import com.enderthor.kghost.geo.TrackPointDto
@@ -123,13 +125,20 @@ class LibraryJobTest {
         fits(1)
     }
 
+    /** A current-schema model already on disk, stamped old so a rewrite shows in its mtime. */
+    private fun LibraryFixture.existingModel(): File {
+        assertTrue(GradePaceStore(tracksDir).save(GradePace.build(emptyList())))
+        return File(tracksDir, GradePaceStore.FILE_NAME).apply { setLastModified(1_000_000L) }
+    }
+
     @Test fun `a completed run that stores nothing skips the model rebuild and the sweep`() = runTest {
         val fx = fixture()
         fx.duplicateOnly()
+        val model = fx.existingModel()
         var swept = false
         assertEquals(0, run(fx.deps(sweep = { swept = true; 0 })).getOrThrow())
         assertTrue("fixture must decode", fx.decodes > 0)
-        assertFalse(File(fx.tracksDir, "gradepace.json").exists())
+        assertEquals("not rebuilt", 1_000_000L, model.lastModified())
         assertFalse(swept)
         assertFalse(fx.cfg.value.gradeModelDirty)
         assertFalse(fx.cfg.value.reconcileOwed())
@@ -217,6 +226,96 @@ class LibraryJobTest {
         assertTrue(File(fx.tracksDir, "gradepace.json").isFile)
         assertFalse(fx.cfg.value.gradeModelDirty)
         assertEquals("nothing to import bumps no gen", 0L, fx.cfg.value.reconcileGen)
+    }
+
+    @Test fun `a missing model is owed even without the debt flag`() = runTest {
+        val fx = fixture()
+        TrackStore(fx.tracksDir).add(fx.ride("r1", ele = true))
+        run(fx.deps()).getOrThrow()
+        val m = GradePaceStore(fx.tracksDir).load()
+        assertTrue("rebuilt from the library", m != null && m.coveredM > 0)
+        assertFalse(fx.cfg.value.gradeModelDirty)
+    }
+
+    @Test fun `an incomplete rebuild saves what it has but stays owed - a zero-work retry includes the file`() = runTest {
+        val fx = fixture()
+        TrackStore(fx.tracksDir).add(fx.ride("r1", ele = true))
+        val f = File(fx.tracksDir, "r1.json")
+        assertTrue(f.setReadable(false)) // a transient read failure
+        try { run(fx.deps()).getOrThrow() } finally { f.setReadable(true) }
+        assertTrue("the partial model is still saved", File(fx.tracksDir, GradePaceStore.FILE_NAME).isFile)
+        assertEquals(0.0, GradePaceStore(fx.tracksDir).load()!!.coveredM, 0.0)
+        assertTrue("an incomplete rebuild must not clear the debt", fx.cfg.value.gradeModelDirty)
+
+        run(fx.deps()).getOrThrow()
+        assertTrue(GradePaceStore(fx.tracksDir).load()!!.coveredM > 0)
+        assertFalse(fx.cfg.value.gradeModelDirty)
+    }
+
+    // Schema-1 model on disk, debt flag clear: the first run after an upgrade owes a rebuild. Its config writes
+    // fail ([cancel] false) or are cancelled ([cancel] true) once a current-schema model is on disk, i.e. AFTER
+    // the save. Whatever happens there, the debt must already be durable and the next zero-work run must pay it.
+    private suspend fun upgradeWithPostSaveFault(partial: Boolean, cancel: Boolean) {
+        val fx = fixture()
+        File(fx.tracksDir, GradePaceStore.FILE_NAME).writeText("""{"schemaVersion":1,"bins":[]}""")
+        TrackStore(fx.tracksDir).add(fx.ride("r1", ele = true))
+        val f = File(fx.tracksDir, "r1.json")
+        var postSaveWrites = 0
+        val faulty: suspend ((KGhostConfig) -> KGhostConfig) -> Boolean = { t ->
+            if (GradePaceStore(fx.tracksDir).isCurrent()) {
+                postSaveWrites++
+                if (cancel) throw CancellationException("cut after the save")
+                false
+            } else { fx.cfg.update(t); true }
+        }
+        if (partial) assertTrue(f.setReadable(false))
+        try { run(fx.deps().copy(updateConfig = faulty)) } finally { f.setReadable(true) }
+        if (!partial) {
+            // A complete rebuild's only post-save write is the one that clears the debt: the fault must hit it.
+            assertTrue("the fault must reach the post-save debt clear", postSaveWrites > 0)
+        }
+        // A partial rebuild makes NO post-save write since the debt went down first; before that fix it wrote
+        // the debt there, after the save, so the injected fault lost it (schema 2 + dirty=false, never retried).
+        assertTrue("the debt is durable before the save", fx.cfg.value.gradeModelDirty)
+        assertTrue(GradePaceStore(fx.tracksDir).isCurrent())
+
+        run(fx.deps()).getOrThrow()
+        assertTrue("the owed rebuild is retried", GradePaceStore(fx.tracksDir).load()!!.coveredM > 0)
+        assertFalse(fx.cfg.value.gradeModelDirty)
+    }
+
+    @Test fun `a partial upgrade rebuild stays owed when the post-save config write fails`() = runTest {
+        upgradeWithPostSaveFault(partial = true, cancel = false)
+    }
+
+    @Test fun `a partial upgrade rebuild stays owed when cancelled after the save`() = runTest {
+        upgradeWithPostSaveFault(partial = true, cancel = true)
+    }
+
+    @Test fun `a complete upgrade rebuild stays owed when its post-save debt clear fails`() = runTest {
+        upgradeWithPostSaveFault(partial = false, cancel = false)
+    }
+
+    @Test fun `a complete upgrade rebuild stays owed when cancelled at its post-save debt clear`() = runTest {
+        upgradeWithPostSaveFault(partial = false, cancel = true)
+    }
+
+    @Test fun `a stale-schema model is rebuilt once after the upgrade`() = runTest {
+        val fx = fixture()
+        val f = File(fx.tracksDir, GradePaceStore.FILE_NAME)
+        f.writeText("""{"schemaVersion":1,"bins":[]}""")
+        run(fx.deps()).getOrThrow()
+        assertTrue(f.readText().contains("\"schemaVersion\":${com.enderthor.kghost.engine.GRADE_SCHEMA_VERSION}"))
+    }
+
+    @Test fun `an empty library writes an empty model once and then stops rebuilding`() = runTest {
+        val fx = fixture()
+        run(fx.deps()).getOrThrow()
+        val f = File(fx.tracksDir, GradePaceStore.FILE_NAME)
+        assertTrue("an empty model is still saved", f.isFile)
+        f.setLastModified(1_000_000L)
+        run(fx.deps()).getOrThrow()
+        assertEquals("no rebuild loop", 1_000_000L, f.lastModified())
     }
 
     @Test fun `a failed model save keeps the debt`() = runTest {

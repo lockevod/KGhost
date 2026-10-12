@@ -18,6 +18,8 @@ import com.enderthor.kghost.engine.chooseComparator
 import com.enderthor.kghost.engine.consumedHistory
 import com.enderthor.kghost.engine.historyCoverage
 import com.enderthor.kghost.engine.paceAfterInterstitial
+import com.enderthor.kghost.engine.gateResume
+import com.enderthor.kghost.engine.GateResume
 import com.enderthor.kghost.engine.routeGapPublication
 import com.enderthor.kghost.engine.selectRacePace
 import com.enderthor.kghost.engine.GpsHealth
@@ -40,6 +42,14 @@ import com.enderthor.kghost.engine.toInfo
 import com.enderthor.kghost.engine.AGG_MIN_LAPS
 import com.enderthor.kghost.engine.CorridorSeeder
 import com.enderthor.kghost.engine.GhostCheckpoint
+import com.enderthor.kghost.engine.VpOrigin
+import com.enderthor.kghost.engine.startVpOrigin
+import com.enderthor.kghost.engine.VpOriginDecision
+import com.enderthor.kghost.engine.vpOriginDecision
+import com.enderthor.kghost.engine.vpOriginCoherent
+import com.enderthor.kghost.engine.savedRecently
+import com.enderthor.kghost.engine.inactiveTick
+import com.enderthor.kghost.engine.vpRaceGap
 import com.enderthor.kghost.engine.raceCheckpoint
 import com.enderthor.kghost.engine.GhostIntegrator
 import com.enderthor.kghost.engine.GradePace
@@ -112,6 +122,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
@@ -290,6 +302,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          *    (genuinely off-route) → don't trust the projection, fall back to the Karoo value.
          */
         private const val GPS_FIX_FRESH_MS = 5_000L
+        private val REPLAY_GRADE_TYPE = DataType.dataTypeId("ride-replay", "grade")
         private const val ROUTE_PROJ_BACK_M = 120.0
         private const val ROUTE_PROJ_FWD_M = 300.0
         private const val ROUTE_PROJ_FWD_MAX_M = 400.0
@@ -305,6 +318,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          *  proximity that lets a resumed ride (continuous distance) restore even when the process died
          *  and minted a fresh recordingStartedEpoch (a genuinely new ride starts near 0 → rejected). */
         private const val GHOST_CHECKPOINT_FILE = "ghost-checkpoint.json"
+        // Persisted Ghost-Pace race origin (see VpOrigin) — same lifecycle as the ghost checkpoint.
+        private const val VP_ORIGIN_FILE = "vp-origin.json"
         private const val CHECKPOINT_INTERVAL_MS = 5_000L
         // A checkpoint older than this (wall-clock) is not a resume candidate — bounds cross-ride false hits.
         private const val CHECKPOINT_MAX_AGE_MS = 6 * 60 * 60 * 1000L
@@ -549,6 +564,16 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     @Volatile private var firstMoveElapsedS: Double? = null
     // ① Ghost-Pace clock origin — set ONCE per ride, NEVER re-nulled on a route change.
     @Volatile private var vpFirstMoveElapsedS: Double? = null
+    // Odometer captured WITH vpFirstMoveElapsedS — the VP race measures distance from here, so an adopted
+    // (or late-speed) origin never counts metres ridden before it as lead.
+    @Volatile private var vpStartDistM: Double = 0.0
+    // Latest VP origin snapshot (origin fixed, continuity evidence refreshed) + its write throttle.
+    @Volatile private var pendingVpOrigin: VpOrigin? = null
+    @Volatile private var lastVpOriginSaveMs: Long = 0L
+    // A VP origin stamp DEFERRED while a resumed ELAPSED_TIME catches up (see vpOriginDecision): monotonic
+    // start of the wait + the saved origin read at its start (no file read per tick). Null = not deferring.
+    @Volatile private var vpOriginDeferSinceMs: Long? = null
+    @Volatile private var vpOriginDeferSaved: VpOrigin? = null
     // Consecutive MOVING ticks off the windowed line — arms the unambiguous global marker re-acquire.
     @Volatile private var emptyWindowTicks: Int = 0
     // The rider's last TRUSTWORTHY route distance (the monotone rail) + the odometer captured with it.
@@ -622,6 +647,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // The VP branch raced while this integrator existed → its next onTick spans the interstitial (see
     // paceAfterInterstitial). Cleared once an onTick has actually run.
     @Volatile private var integAfterVp: Boolean = false
+    // The per-profile / master gate kept the extension inert while a route race was running → the next
+    // active route tick must re-anchor the integrator (see engine.gateResume) so the disabled stretch
+    // contributes 0. [gateSnapshot] = the last PUBLISHED gap (seconds AND route-derived metres), republished
+    // while that re-anchor waits on an unresolved pending hold; null = keep the field blank ("---").
+    @Volatile private var gateInterstitial: Boolean = false
+    @Volatile private var gateSnapshot: GapState? = null
     // Monotonic (elapsedRealtime ms) of the last checkpoint write — throttles the ~5 s periodic persist.
     @Volatile private var lastCheckpointMs: Long = 0L
     // Latest checkpoint SNAPSHOT, built on the Main tick (so the IO writer never reads the integrator's
@@ -648,6 +679,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         projectorPolyline = null
         firstMoveElapsedS = null
         vpFirstMoveElapsedS = null
+        vpStartDistM = 0.0
+        pendingVpOrigin = null
+        lastVpOriginSaveMs = 0L
+        vpOriginDeferSinceMs = null
+        vpOriginDeferSaved = null
         emptyWindowTicks = 0
         lastGoodRouteDistM = null
         distMAtLastGoodM = null
@@ -672,6 +708,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         historyVerdictSeen = false
         integPublished = false
         integAfterVp = false
+        gateInterstitial = false
+        gateSnapshot = null
         lastCheckpointMs = 0L
         pendingCheckpoint = null
         lastReliableGhostRouteDist = null
@@ -705,6 +743,24 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     /** Deletes the checkpoint at a clean ride end so the next ride starts fresh. */
     private fun deleteGhostCheckpoint() {
         runCatching { ghostCheckpointFile.delete() }
+    }
+
+    // ---- VP origin (Ghost-Pace race clock + start odometer) — same pattern as the ghost checkpoint.
+    private val vpOriginFile: File get() = File(applicationContext.filesDir, VP_ORIGIN_FILE)
+
+    private fun loadVpOrigin(): VpOrigin? = runCatching {
+        val f = vpOriginFile
+        if (!f.exists()) null else jsonForStorage.decodeFromString(VpOrigin.serializer(), f.readText())
+    }.getOrNull()
+
+    /** Flushes the latest tick-built [pendingVpOrigin] atomically. Suspends; call on IO. */
+    private suspend fun flushVpOrigin() {
+        val o = pendingVpOrigin ?: return
+        checkpointMutex.withLock {
+            runCatching {
+                atomicWriteText(vpOriginFile, jsonForStorage.encodeToString(VpOrigin.serializer(), o), fsync = false)
+            }.onFailure { Timber.w(it, "VP origin write failed") }
+        }
     }
 
     // Wall-clock epoch captured when the current Recording started. Used as the recorded track's
@@ -1012,7 +1068,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                 // Stamp ONLY a sweep that completed. runCatching swallows Throwable, so an
                 // OutOfMemoryError on a big library would otherwise be recorded as "swept, archived 0"
                 // and never retried — marking done exactly the libraries that most need the pass.
-                runCatching { trackStore().sweep() }
+                runCatching { trackStore().sweep(label = "backlog") }
                     .onSuccess { archived ->
                         // null = skipped over the track cap. Not a completed pass, so it must NOT be
                         // stamped: the library that was too big to examine is exactly the one that needs
@@ -1221,7 +1277,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // A checkpoint left by a ride that really ended while we were dead stays behind; the
                     // restore gates (6 h age, routeKey, pick, GhostCheckpoint.continuesRide's odometer + ride
                     // clock continuity) keep a new ride from taking it.
-                    if (sawActiveRide) deleteGhostCheckpoint()
+                    if (sawActiveRide) {
+                        deleteGhostCheckpoint()
+                        runCatching { vpOriginFile.delete() }
+                    }
                     else Timber.i("KVP Idle before any active ride in this process — checkpoint kept for a resume")
                     GapStateHolder.clear()
                     SegmentInfoHolder.clear()
@@ -1945,7 +2004,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun configSummary(c: KGhostConfig): String =
         "raceEnabled=${c.raceEnabled} target=${"%.1f".format(c.targetMs())}m/s pick=${c.ghostPick} " +
             "showMap=${c.showGhostOnMap} icon=${c.ghostIcon} entryAlert=${c.segmentEntryAlert} " +
-            "exitAlert=${c.segmentExitAlert} autoRecord=${c.autoRecord}"
+            "exitAlert=${c.segmentExitAlert} autoRecord=${c.autoRecord} replayGrade=${c.replayGrade}"
 
     /**
      * On ride start, if all-files access is missing (and the master switch is on), fire the decaying
@@ -2057,6 +2116,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             locRepeatCount = 0L; locRepeatMovingCount = 0L; probeRiderMoving = false
             lastLocLat = Double.NaN; lastLocLng = Double.NaN
             lastCadenceLogMs = 0L; lastTickDistM = Double.NaN
+            // The route-load line is the only other place this shows, so a no-route ride never said whether
+            // the gradient model exists (field logs: "absent" on every device that never imported).
+            scope.launch(Dispatchers.IO) {
+                val gp = GradePaceStore(TrackStorage.tracksDir(applicationContext)).load()
+                Timber.i("KVP ride start: gradePace=%s", gp?.let { "coveredM=%.0f usable=%b".format(it.coveredM, it.hasUsableBin) } ?: "absent")
+            }
         }
         // GPS location consumer — subscribed only while Recording. `lastFix` is the ONE position source
         // the ride uses: the RECORDER, the historical-pace lookup, and the marker's route projection all
@@ -2110,15 +2175,47 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // stall waiting for a gradient sample, and an absent gradient is a legitimate state (the model is
         // simply not asked). Cancelled with the other stream jobs on reconnect/stop.
         if (gradeJob?.isActive != true) {
-            gradeJob = karooSystem.streamDataFlow(DataType.Type.ELEVATION_GRADE).onEach { state ->
-                val v = (state as? StreamState.Streaming)?.dataPoint?.values?.get(DataType.Field.ELEVATION_GRADE)
-                // UNIT: assumed already a percentage. If a field log shows ratios (0.06 on a 6% ramp),
-                // multiply by 100 HERE — the one place that knows the unit — never at the lookup site.
-                lastGradePct = v?.takeIf { it.isFinite() }
-                lastGradeMs = SystemClock.elapsedRealtime()
-                if (!gradeUnitLogged) {
-                    gradeUnitLogged = true
-                    Timber.i("KVP grade sample: raw=%s", v?.toString() ?: "null")
+            // BENCH TESTING ONLY: Ride Replay can't mock the barometer, so on the bench the Karoo's own grade
+            // reads ~0 on a replayed climb. Ride Replay publishes the recorded grade as its own data type
+            // (percent, under SINGLE); while a replay is open it wins over the Karoo's, otherwise it reports
+            // NotAvailable and the Karoo's grade is used. Opened only when the rider turns on the settings
+            // switch (off by default); read once per ride, so a change applies from the next ride.
+            val karooGrade = karooSystem.streamDataFlow(DataType.Type.ELEVATION_GRADE).map { false to it }
+            val grades = if (activeConfig.value.replayGrade) {
+                // A dead Ride Replay ends its stream without a final NotAvailable; synthesise one so the Karoo's
+                // grade takes over again instead of being dropped for the rest of the ride.
+                val replay = karooSystem.streamDataFlow(REPLAY_GRADE_TYPE)
+                    .onCompletion { cause -> if (cause == null) emit(StreamState.NotAvailable) }
+                    .map { true to it }
+                merge(karooGrade, replay)
+            } else {
+                karooGrade
+            }
+            val gate = GradeSourceGate()
+            gradeJob = grades.onEach { (fromReplay, state) ->
+                val wasOpen = gate.replayOpen
+                val action = gate.onEvent(fromReplay, state)
+                if (gate.replayOpen != wasOpen) {
+                    Timber.i("KVP grade source: %s", if (gate.replayOpen) "ride-replay" else "karoo")
+                }
+                when (action) {
+                    GradeSourceGate.Action.Ignore -> Unit
+                    GradeSourceGate.Action.Refresh -> lastGradeMs = SystemClock.elapsedRealtime()
+                    GradeSourceGate.Action.Clear -> {
+                        lastGradePct = null
+                        lastGradeMs = 0L
+                    }
+                    is GradeSourceGate.Action.Write -> {
+                        val v = action.pct
+                        // UNIT: assumed already a percentage. If a field log shows ratios (0.06 on a 6% ramp),
+                        // multiply by 100 HERE — the one place that knows the unit — never at the lookup site.
+                        lastGradePct = v?.takeIf { it.isFinite() }
+                        lastGradeMs = SystemClock.elapsedRealtime()
+                        if (!gradeUnitLogged) {
+                            gradeUnitLogged = true
+                            Timber.i("KVP grade sample: raw=%s replay=%s", v?.toString() ?: "null", fromReplay)
+                        }
+                    }
                 }
             }.launchIn(scope)
         }
@@ -2166,6 +2263,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // GPS settle) the logs matter most. elapsedRealtime never goes backward.
         var lastDiagLogMs = 0L
         val diagLogMs = 2500L
+        // Edge-log of the per-profile/master gate: an inert tick logs nothing else, so without this a
+        // rider disabling the profile mid-ride is indistinguishable from a dead tick in the ride log.
+        var lastGateLog: String? = null
 
         tickJob = scope.launch(Dispatchers.Default) {
             // Probe the RAW DISTANCE arrivals here: combine()+sample(REFRESH_MS) below discards this
@@ -2310,8 +2410,63 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // gap/segment fields (→ `---`), hide the ghost, skip recording, and emit nothing.
                     // The service stays subscribed, so flipping the master switch or the profile's enable
                     // (config flow) or changing profile (rideProfileJob) re-activates on the next tick.
-                    val eff: EffectiveProfile = resolveProfile(cfg, activeProfileId)
+                    val profileId = activeProfileId // one read: the decision and its log name the same profile
+                    val eff: EffectiveProfile = resolveProfile(cfg, profileId)
+                    val why = if (!cfg.masterEnabled) "master off" else if (!eff.active) "profile disabled" else "enabled"
+                    // Keyed on the cause too, so master-on-but-profile-still-off or a profile switch re-logs.
+                    val gateLog = "active=${eff.active} ($why) profile=$profileId"
+                    if (gateLog != lastGateLog) {
+                        lastGateLog = gateLog
+                        Timber.i("KVP gate: $gateLog")
+                    }
+                    // Throttled persistence of the resume evidence, shared by the active ticks and the inert
+                    // branch below (which must keep both fresh — see [inactiveTick]).
+                    fun refreshVpOriginEvidence() {
+                        val o = pendingVpOrigin ?: return
+                        val nowMs = SystemClock.elapsedRealtime()
+                        if (nowMs - lastVpOriginSaveMs >= CHECKPOINT_INTERVAL_MS) {
+                            lastVpOriginSaveMs = nowMs
+                            pendingVpOrigin = o.withEvidence(coast.effectiveDistanceM, elapsedS, System.currentTimeMillis())
+                            scope.launch(Dispatchers.IO) { flushVpOrigin() }
+                        }
+                    }
+                    // The snapshot is built HERE (tick thread) so the IO writer never reads the integrator's
+                    // non-volatile scalars cross-thread; the actual write is off-thread + serialized.
+                    fun persistRaceCheckpoint(integ: GhostIntegrator, rm: RouteMode, cmp: RaceComparator, lastRiderDist: Double) {
+                        val pick = integPick ?: return
+                        val nowCp = SystemClock.elapsedRealtime()
+                        if (nowCp - lastCheckpointMs >= CHECKPOINT_INTERVAL_MS) {
+                            lastCheckpointMs = nowCp
+                            pendingCheckpoint = raceCheckpoint(
+                                rideEpoch = recordingStartedEpoch,
+                                leadS = integ.gapTimeS,
+                                lastRiderDist = lastRiderDist,
+                                pick = pick,
+                                vpTimePerM = integVpTpm,
+                                savedAtEpoch = System.currentTimeMillis(),
+                                routeKey = routeKeyOf(rm.routeName, rm.path.totalM),
+                                rideElapsedS = elapsedS,
+                                comparator = cmp,
+                                historyVerdictSeen = historyVerdictSeen,
+                            )
+                            scope.launch(Dispatchers.IO) { flushGhostCheckpoint() }
+                        }
+                    }
                     if (!eff.active) {
+                        val integ0 = integrator
+                        val rm0 = routeMode
+                        val cmp0 = integComparator
+                        val todo = inactiveTick(gateInterstitial, integ0 != null, pendingVpOrigin != null, rm0 != null && cmp0 != null)
+                        if (todo.snapshot) {
+                            gateSnapshot = GapStateHolder.state.value.takeIf { integPublished && it.active }
+                            gateInterstitial = true
+                        }
+                        if (todo.refreshVpEvidence) refreshVpOriginEvidence()
+                        // Lead re-anchored at the CURRENT odometer and clock — what the gate re-anchor does on
+                        // re-enable — so a restart after riding past the margin disabled still continues the ride.
+                        if (todo.refreshCheckpoint && integ0 != null && rm0 != null && cmp0 != null) {
+                            persistRaceCheckpoint(integ0, rm0, cmp0, coast.effectiveDistanceM)
+                        }
                         GapStateHolder.clear()
                         SegmentInfoHolder.clear()
                         mapGhostState = null
@@ -2416,8 +2571,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             cachedCurve = GhostPaceSource(target).curve()
                             cachedTargetMs = target
                         }
-                        return GapCalculator.compute(
-                            coast.effectiveDistanceM, raceElapsedS, cachedCurve!!,
+                        return vpRaceGap(
+                            coast.effectiveDistanceM, vpStartDistM, raceElapsedS, cachedCurve!!,
                             fresh = coast.quality != CoastQuality.LONG_LOSS,
                         )
                     }
@@ -2449,10 +2604,61 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         firstMoveElapsedS = elapsedS
                     }
                     // The VP race clock is set ONCE per ride and never re-nulled (see its declaration).
-                    if (vpFirstMoveElapsedS == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS) {
-                        vpFirstMoveElapsedS = elapsedS
-                        gpsHealth.onRaceStart(SystemClock.elapsedRealtime())
+                    // Never stamped from an incoherent sample (odometer impossible for the clock: a replayed
+                    // previous-ride DISTANCE at elapsed≈0, or a resumed ELAPSED_TIME not caught up yet) — that
+                    // would reject a valid saved origin or race from a phantom 40 km start. Keep waiting.
+                    if (vpFirstMoveElapsedS == null && speedMs != null && speedMs > StalenessLogic.MIN_MOVING_MS &&
+                        vpOriginCoherent(coast.effectiveDistanceM, elapsedS)
+                    ) {
+                        // A fresh process mid-ride (ride-app restart, power-off) lands here with the whole-ride
+                        // odometer: ADOPT the persisted origin iff recent + same ride (the ghost checkpoint's
+                        // rule), else start fresh here. Tiny file read, once per ride (as loadGhostCheckpoint) —
+                        // a DEFER (odometer carries on, ELAPSED_TIME still stale) keeps the read and waits, bounded.
+                        val distNow = coast.effectiveDistanceM
+                        val nowMono = SystemClock.elapsedRealtime()
+                        val deferSince = vpOriginDeferSinceMs
+                        val saved = if (deferSince != null) vpOriginDeferSaved else loadVpOrigin()
+                        val decision = vpOriginDecision(
+                            saved, recordingStartedEpoch, elapsedS, distNow, System.currentTimeMillis(), CHECKPOINT_MAX_AGE_MS,
+                            deferredMs = if (deferSince == null) 0L else nowMono - deferSince,
+                        )
+                        if (decision == VpOriginDecision.DEFER) {
+                            if (deferSince == null) {
+                                vpOriginDeferSinceMs = nowMono
+                                vpOriginDeferSaved = saved
+                                Timber.i(
+                                    "KVP VP origin DEFERRED: odometer continues (${"%.0f".format(distNow)}m) but " +
+                                        "elapsedNow=${"%.0f".format(elapsedS)}s < cpElapsed=${"%.0f".format(saved!!.rideElapsedS)}s",
+                                )
+                            }
+                        } else {
+                            vpOriginDeferSinceMs = null
+                            vpOriginDeferSaved = null
+                            val origin = startVpOrigin(
+                                saved, recordingStartedEpoch, elapsedS, distNow, System.currentTimeMillis(), CHECKPOINT_MAX_AGE_MS,
+                            )
+                            vpFirstMoveElapsedS = origin.originElapsedS
+                            vpStartDistM = origin.startDistM
+                            if (saved != null) {
+                                val recent = saved.isRecent(System.currentTimeMillis(), CHECKPOINT_MAX_AGE_MS)
+                                val continuous = saved.continues(recordingStartedEpoch, distNow, elapsedS)
+                                Timber.i(
+                                    "KVP VP origin ${if (recent && continuous) "ADOPTED" else "REJECTED"}: " +
+                                        "recent=$recent continuous=$continuous epochMatch=${saved.rideEpoch == recordingStartedEpoch} " +
+                                        "origin=${"%.0f".format(saved.originElapsedS)}s/${"%.0f".format(saved.startDistM)}m " +
+                                        "(ΔdistM=${"%.0f".format(distNow - saved.lastDist)} " +
+                                        "cpElapsed=${"%.0f".format(saved.rideElapsedS)}s elapsedNow=${"%.0f".format(elapsedS)}s)",
+                                )
+                            }
+                            pendingVpOrigin = origin
+                            lastVpOriginSaveMs = SystemClock.elapsedRealtime()
+                            scope.launch(Dispatchers.IO) { flushVpOrigin() }
+                            gpsHealth.onRaceStart(SystemClock.elapsedRealtime())
+                        }
                     }
+                    // Refresh the VP origin's continuity evidence in BOTH modes (a route-mode ride must still
+                    // resume its VP race after a restart). Origin fields stay fixed.
+                    refreshVpOriginEvidence()
 
                     // --- mode select: ② route mode vs ① Ghost Pace ---------------------
                     // Read the route-mode snapshot ONCE per tick so path + segments stay consistent
@@ -2510,6 +2716,33 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             return@runCatching
                         }
                         val riderDist = coast.effectiveDistanceM
+                        // Back from a gate-inactive stretch: the integrator got no ticks, so its next dd would
+                        // charge the whole stretch at one endpoint pace — re-anchor instead (lead kept in seconds
+                        // AND metres: rebase translates the race across the stretch, nothing earned or lost), but
+                        // only once no pending interval straddles the gate.
+                        when (gateResume(gateInterstitial, coast.pendingHold)) {
+                            GateResume.WAIT_REPUBLISH -> {
+                                prevTickElapsedS = elapsedS
+                                gateSnapshot?.let { GapStateHolder.update(it) } ?: GapStateHolder.clear()
+                                // The snapshot's SEG tag too (the inert branch cleared it), as the PUBLISH path sets it.
+                                if (gateSnapshot != null && integComparator == RaceComparator.HISTORY) SegmentInfoHolder.set(B2_ON_HISTORY)
+                                return@runCatching
+                            }
+                            GateResume.REANCHOR -> {
+                                integrator?.rebase(riderDist, elapsedS - moveStart0)
+                                // Redundant today (prevTickElapsedS = elapsedS skips this tick's freeze check and the
+                                // onTick below re-sets it) — kept so the baseline never reads the pre-disable odometer.
+                                integLastRiderDist = riderDist
+                                prevTickElapsedS = elapsedS // this tick must not freeze the race clock either
+                                // No integInitialised reset: rebase leaves no re-anchor pending, and REANCHOR implies
+                                // !pendingHold (gateResume), so the onTick guard passes anyway (rig + `pure decision`).
+                                // Redundant too (publication can't HOLD with !pendingHold); kept as a belt.
+                                integPublished = false
+                                gateInterstitial = false
+                                gateSnapshot = null
+                            }
+                            GateResume.NORMAL -> Unit
+                        }
                         // MOVING-TIME race clock (option B): while the rider isn't advancing on the ground
                         // (stopped at the finish or a light), HOLD raceElapsed by advancing the origin, so the
                         // gap FREEZES at the result instead of drifting BEHIND, and resumes cleanly on moving.
@@ -2571,7 +2804,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             // lead onto a new one (rideEpoch is unchanged across a route change), with no dependence
                             // on delete ordering; the stable name+length key also survives a host polyline re-encode.
                             if (cp != null) {
-                                val recent = System.currentTimeMillis() - cp.savedAtEpoch in 0..CHECKPOINT_MAX_AGE_MS
+                                val recent = savedRecently(cp.savedAtEpoch, System.currentTimeMillis(), CHECKPOINT_MAX_AGE_MS)
                                 val keyMatch = cp.routeKey == curKey
                                 // vpTimePerM is deliberately NOT part of this gate: since the neutral-fill change
                                 // it no longer influences the accrued gap, so gating resume on it only cost riders
@@ -2696,28 +2929,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // crash resumes with the LEAD (integ.gapTimeS), not the raw ghostTime. The snapshot is
                         // built HERE (Main) so the IO writer never reads the integrator's non-volatile scalars
                         // cross-thread; the actual write is off-Main + serialized.
-                        run {
-                            val nowCp = SystemClock.elapsedRealtime()
-                            // A pick-only repick preserves the integrator; keep checkpoint metadata
-                            // aligned with the live settings so restart can restore the preserved lead.
-                            integPick = eff.ghostPick
-                            if (nowCp - lastCheckpointMs >= CHECKPOINT_INTERVAL_MS && integPick != null) {
-                                lastCheckpointMs = nowCp
-                                pendingCheckpoint = raceCheckpoint(
-                                    rideEpoch = recordingStartedEpoch,
-                                    leadS = integ.gapTimeS,
-                                    lastRiderDist = integLastRiderDist,
-                                    pick = integPick!!,
-                                    vpTimePerM = integVpTpm,
-                                    savedAtEpoch = System.currentTimeMillis(),
-                                    routeKey = routeKeyOf(rm.routeName, rm.path.totalM),
-                                    rideElapsedS = elapsedS,
-                                    comparator = raceCmp,
-                                    historyVerdictSeen = historyVerdictSeen,
-                                )
-                                scope.launch(Dispatchers.IO) { flushGhostCheckpoint() }
-                            }
-                        }
+                        // A pick-only repick preserves the integrator; keep checkpoint metadata
+                        // aligned with the live settings so restart can restore the preserved lead.
+                        integPick = eff.ghostPick
+                        persistRaceCheckpoint(integ, rm, raceCmp, integLastRiderDist)
                         // Rider ROUTE position R — anchors the map marker AND triggers the finish freeze; the
                         // NUMBER never touches it (stays teleport-proof). PRIMARY per-tick projection is a small
                         // odometer-propagated WINDOW (route-distance space, so a loop's two passes sit far apart →
@@ -2923,6 +3138,22 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // missing target blanks — EXCEPT after a sustained (~3 min) loss, where
                         // handleGpsLoss() gives up and we blank rather than show a wild extrapolation.
                         publishSegment(null, fireExit = false)
+                        // Re-enabled with no route: consume the gate interstitial HERE (the first active tick),
+                        // else it survives and a later route load REANCHORs over this VP stretch, discarding
+                        // what integAfterVp lets it earn. Translate the race across the disabled stretch only
+                        // and align the route clock/odometer with it, as the route branch's REANCHOR does — and,
+                        // like it, only once no pending interval straddles the gate (else its settled metres are
+                        // charged after a route reload); until then the flag stays for a later tick to consume.
+                        if (gateResume(gateInterstitial, coast.pendingHold) == GateResume.REANCHOR) {
+                            val ms = firstMoveElapsedS
+                            if (ms != null) {
+                                integrator?.rebase(coast.effectiveDistanceM, elapsedS - ms)
+                                integLastRiderDist = coast.effectiveDistanceM
+                                prevTickElapsedS = elapsedS
+                            }
+                            gateInterstitial = false
+                            gateSnapshot = null
+                        }
                         // The VP branch now owns the holder: a route that loads next (the integrator survives
                         // the interstitial) must publish before its hold may freeze anything, else this VP
                         // number stays on screen for a whole stop (pendingHold persists while stationary).
@@ -3176,8 +3407,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         }
                         // Auto-clean: archive near-duplicate rides of this route so BEST/LAST stay solid.
                         if (activeConfig.value.autoTidy) {
+                            val lockT0 = SystemClock.elapsedRealtime()
                             val archived = LibraryLock.mutex.withLock {
-                                runCatching { store.tidyGroup(track) }.getOrElse { e ->
+                                val waitMs = SystemClock.elapsedRealtime() - lockT0
+                                runCatching { store.tidyGroup(track, waitMs) }.getOrElse { e ->
                                     Timber.w(e, "KVP tidy: tidyGroup failed for ${track.id}"); 0
                                 }
                             }

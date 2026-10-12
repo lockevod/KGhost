@@ -88,18 +88,19 @@ class GradePaceTest {
     }
 
     @Test fun `BEST is clamped so it can never be more than BEST_MAX_SPEEDUP faster than the average`() {
-        // 5 m/s (0.2 s/m) then 25 m/s (0.04 s/m) — both under AGG_MAX_SPEED_MS, so BOTH rides land in bin 0
-        // and the raw min (0.04) really is more than BEST_MAX_SPEEDUP faster than the average (0.12).
+        // 2 m/s (0.5 s/m) then 14 m/s (1/14 s/m) — both under AGG_MAX_SPEED_MS and not above the motorised
+        // gate's MOTOR_MIN_SPEED_MS, so BOTH rides land in bin 0 and the raw min (0.0714) really is more than
+        // BEST_MAX_SPEEDUP faster than the average (0.2857).
         val g = GradePace.build(
             listOf(
-                track("slow", n = 201, stepM = 20.0, gradePct = 0.0, speedMs = 5.0),
-                track("fast", n = 201, stepM = 20.0, gradePct = 0.0, speedMs = 25.0, startEpoch = 2L),
+                track("slow", n = 201, stepM = 20.0, gradePct = 0.0, speedMs = 2.0),
+                track("fast", n = 201, stepM = 20.0, gradePct = 0.0, speedMs = 14.0, startEpoch = 2L),
             )
         )
         val avg = g.pace(0.0, GhostPick.AVERAGE)!!
         val best = g.pace(0.0, GhostPick.BEST)!!
-        // Metre-weighted mean of the two rides: (0.2*3920 + 0.04*3920) / 7840 = 0.12.
-        assertEquals(0.12, avg, 1e-9)
+        // Metre-weighted mean of the two rides (same metres each): (0.5 + 1/14) / 2.
+        assertEquals((0.5 + 1.0 / 14.0) / 2, avg, 1e-9)
         assertEquals(avg / BEST_MAX_SPEEDUP, best, 1e-9)   // the clamp binds, exactly
     }
 
@@ -365,5 +366,97 @@ class GradePaceTest {
         val second = runCatching { b.build() }
         assertTrue("a second build() must be refused, not silently double-count", second.isFailure)
         assertTrue("the first build must still be a real model", first.coveredM > 0.0)
+    }
+
+    // --- BEST from qualifying rides only (>= GRADE_MIN_BIN_M of a ride in the bin) ------------------------
+    // A flat n-point track folds (n - 5) * 20 m into bin 0: the first GRADE_WINDOW_M only fills the window.
+    private fun slowFlat() = track("slow", n = 201, stepM = 20.0, gradePct = 0.0, speedMs = 4.0)          // 3920 m @ 0.25
+    private fun dto0(g: GradePace) = g.toDto().bins.single { it.bin == 0 }
+
+    @Test fun `a short fast fragment under GRADE_MIN_BIN_M in the bin does not set BEST`() {
+        // 380 m at 12 m/s: under the floor, so it votes in the mean and the count but cannot own BEST.
+        val g = GradePace.build(listOf(slowFlat(), track("frag", n = 24, stepM = 20.0, gradePct = 0.0, speedMs = 12.0, startEpoch = 2L)))
+        assertEquals(3920.0 + 380.0, dto0(g).metres, 1e-6)
+        val avg = g.pace(0.0, GhostPick.AVERAGE)!!
+        assertEquals((0.25 * 3920 + 380.0 / 12.0) / 4300.0, avg, 1e-9) // mean unchanged: every metre counts
+        assertEquals(2, dto0(g).count)                                    // count unchanged: every ride counts
+        // The only qualifying ride is slower than the mean, so BEST == AVERAGE (never slower than it).
+        assertEquals(avg, g.pace(0.0, GhostPick.BEST)!!, 1e-12)
+    }
+
+    @Test fun `a ride with GRADE_MIN_BIN_M in the bin does set BEST`() {
+        // Exactly 400 m at 8 m/s qualifies (>=).
+        val g = GradePace.build(listOf(slowFlat(), track("fast", n = 25, stepM = 20.0, gradePct = 0.0, speedMs = 8.0, startEpoch = 2L)))
+        assertEquals(0.125, g.pace(0.0, GhostPick.BEST)!!, 1e-9)
+        assertEquals(0.125, dto0(g).minTpm, 1e-9)
+    }
+
+    @Test fun `no qualifying ride in a bin makes BEST equal AVERAGE, persisted as a finite minTpm`() {
+        // Two 380 m rides: the bin clears the trust floor (760 m) but neither ride alone does.
+        val g = GradePace.build(
+            listOf(
+                track("a", n = 24, stepM = 20.0, gradePct = 0.0, speedMs = 4.0),
+                track("b", n = 24, stepM = 20.0, gradePct = 0.0, speedMs = 8.0, startEpoch = 2L),
+            )
+        )
+        val avg = g.pace(0.0, GhostPick.AVERAGE)!!
+        assertEquals((0.25 + 0.125) / 2, avg, 1e-9)
+        assertEquals(avg, g.pace(0.0, GhostPick.BEST)!!, 1e-12)
+        assertEquals(dto0(g).meanTpm, dto0(g).minTpm, 0.0)
+        assertEquals(2, dto0(g).count)
+    }
+
+    @Test fun `Codex counterexample - a slow qualifying ride plus fast short ones gives BEST == AVERAGE, not the slow ride`() {
+        // One 400 m ride at 0.5 s/m qualifies; four 200 m rides at 0.2 s/m do not. Mean = (200 + 4*40)/1200 = 0.3.
+        // The qualifying minimum (0.5) is SLOWER than the mean: BEST must not be slower than AVERAGE.
+        val folds = listOf(GradePace.Fold(1L, mapOf(0 to 200.0), mapOf(0 to 400.0))) +
+            (2L..5L).map { GradePace.Fold(it, mapOf(0 to 40.0), mapOf(0 to 200.0)) }
+        val g = GradePace.reduce(folds)
+        assertEquals(0.3, g.pace(0.0, GhostPick.AVERAGE)!!, 1e-12)
+        assertEquals(0.3, g.pace(0.0, GhostPick.BEST)!!, 1e-12)
+        assertEquals(5, dto0(g).count)
+        assertEquals(1200.0, dto0(g).metres, 1e-9)
+    }
+
+    // --- LAST from qualifying rides only: the newest ride with >= GRADE_MIN_BIN_M in the bin ---------------
+    private fun f(epoch: Long, dt: Double, dd: Double) = GradePace.Fold(epoch, mapOf(0 to dt), mapOf(0 to dd))
+
+    @Test fun `LAST - a sole 400 m ride is LAST and AVERAGE alike`() {
+        val g = GradePace.reduce(listOf(f(1L, 100.0, 400.0)))
+        assertEquals(0.25, g.pace(0.0, GhostPick.LAST)!!, 1e-12)
+        assertEquals(dto0(g).meanTpm, dto0(g).lastTpm, 0.0)
+    }
+
+    @Test fun `LAST - two 200 m rides, neither qualifying, is the mean, not the newer one`() {
+        val g = GradePace.reduce(listOf(f(1L, 40.0, 200.0), f(2L, 80.0, 200.0)))
+        assertEquals(0.3, g.pace(0.0, GhostPick.LAST)!!, 1e-12)
+        assertEquals(dto0(g).meanTpm, dto0(g).lastTpm, 0.0)
+    }
+
+    @Test fun `LAST - a newer 20 m sliver cannot displace an older qualifying ride`() {
+        val g = GradePace.reduce(listOf(f(1L, 80.0, 400.0), f(2L, 20.0, 20.0)))
+        assertEquals(0.2, g.pace(0.0, GhostPick.LAST)!!, 1e-12)
+        assertEquals(100.0 / 420.0, g.pace(0.0, GhostPick.AVERAGE)!!, 1e-12) // mean/count unchanged: ~0.2381
+        assertEquals(2, dto0(g).count)
+        assertEquals(420.0, dto0(g).metres, 1e-9)
+    }
+
+    @Test fun `LAST - equal epochs keep the caller's order, the later qualifying fold wins`() {
+        val g = GradePace.reduce(listOf(f(5L, 160.0, 400.0), f(5L, 80.0, 400.0), f(5L, 1.0, 10.0)))
+        assertEquals(0.2, g.pace(0.0, GhostPick.LAST)!!, 1e-12)
+    }
+
+    @Test fun `the json round-trip carries no non-finite value when no ride qualifies`() {
+        val folds = (1L..3L).map { GradePace.Fold(it, mapOf(0 to 40.0, 5 to 60.0), mapOf(0 to 200.0, 5 to 150.0)) }
+        val g = GradePace.reduce(folds)
+        val json = com.enderthor.kghost.extension.jsonForStorage.encodeToString(GradePaceDto.serializer(), g.toDto())
+        assertFalse(json, json.contains("NaN") || json.contains("Infinity"))
+        for (b in g.toDto().bins) {
+            assertTrue("$b", listOf(b.meanTpm, b.minTpm, b.lastTpm, b.metres).all { it.isFinite() && it > 0.0 })
+            assertEquals("$b: no qualifying ride -> LAST is the mean", b.meanTpm, b.lastTpm, 0.0)
+        }
+        val back = GradePace.fromDto(com.enderthor.kghost.extension.jsonForStorage.decodeFromString(GradePaceDto.serializer(), json))
+        for (pick in GhostPick.entries) assertEquals(pick.name, g.pace(0.0, pick)!!, back.pace(0.0, pick)!!, 0.0)
+        assertEquals(g.toDto(), back.toDto())
     }
 }

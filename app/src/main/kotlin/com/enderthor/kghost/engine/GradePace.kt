@@ -1,14 +1,71 @@
 package com.enderthor.kghost.engine
 
+import com.enderthor.kghost.geo.LatLng
+import com.enderthor.kghost.geo.Polyline
 import com.enderthor.kghost.geo.RecordedTrack
+import com.enderthor.kghost.geo.TrackPointDto
+import kotlin.math.ceil
 import kotlinx.serialization.Serializable
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** Persisted-model schema version. Bump when the binning or the reducer layout changes so an old blob is
- *  discarded and rebuilt instead of mis-read. Still 1 after the `ema` -> `meanTpm` rename: nothing has ever
- *  been persisted, so there is no old blob in the field to discard. */
-const val GRADE_SCHEMA_VERSION = 1
+/** Persisted-model schema version. Bump when the binning, the reducer layout, the INPUT SET or any constant
+ *  [GradePace.foldOf] reads changes, so the next import run owes a rebuild (`GradePaceStore.isCurrent`); an
+ *  older model keeps being served meanwhile only down to `GradePaceStore.MIN_SERVABLE_SCHEMA` (raise that
+ *  when the DTO or a field's meaning changes). The per-file fold cache carries this version AND
+ *  [GRADE_FOLD_SIGNATURE], so a changed fold constant invalidates cached folds even without a bump.
+ *  2: the model counts the archive too, one contribution per physical ride — the bump makes the first run
+ *  after the upgrade rebuild once over the whole archive (the one-time history recovery).
+ *  3: the home-drift gate ([GradePace.isHomeDrift]) and the motorised gate ([GradePace.isMotorised]) empty
+ *  drift and car sessions; the DTO is unchanged. `minTpm` and `lastTpm` also changed meaning under 3 (BEST and
+ *  LAST from qualifying rides only, see [GradePace.reduce]); a schema-1/2 model served while its rebuild is owed
+ *  keeps the old BEST/LAST until that rebuild — an accepted continuity tradeoff for an unreleased schema. */
+const val GRADE_SCHEMA_VERSION = 3
+
+/** Every constant [GradePace.foldOf] reads, stamped into the fold cache: change one and every cached fold is
+ *  recomputed. Add any new foldOf input here. */
+internal val GRADE_FOLD_SIGNATURE: String =
+    "bin=$GRADE_BIN_PCT max=$GRADE_MAX_PCT win=$GRADE_WINDOW_M gap=${TrackSamples.DROPOUT_GAP_M} " +
+        "v=$AGG_MIN_SPEED_MS..$AGG_MAX_SPEED_MS " +
+        "drift=$DRIFT_FOOTPRINT_M/r$DRIFT_MIN_RADIUS_M/$DRIFT_MIN_CHORD_M/$DRIFT_MIN_PAIRS/g$DRIFT_MAX_GRADE_PCT " +
+        "motor=$MOTOR_MIN_SPEED_MS/$MOTOR_MIN_GRADE_PCT/$MOTOR_MIN_S/$MOTOR_MIN_SHARE/$MOTOR_UPHILL_PCT/$MOTOR_UPHILL_MIN_S"
+
+/** Motorised gate ([GradePace.isMotorised]): a step is car evidence above this speed (54 km/h)... */
+const val MOTOR_MIN_SPEED_MS = 15.0
+
+/** ...on a KNOWN trailing gradient at least this (flat or uphill: only a descent takes a bike there). */
+const val MOTOR_MIN_GRADE_PCT = -1.0
+
+/** A session is motorised when its evidence lasts at least this many seconds (an 18 s sprint cannot)... */
+const val MOTOR_MIN_S = 45.0
+
+/** ...AND is at least this share of its moving time... */
+const val MOTOR_MIN_SHARE = 0.05
+
+/** ...AND at least [MOTOR_UPHILL_MIN_S] of it is on a KNOWN trailing gradient at least this steep: a bike cannot
+ *  hold 54 km/h uphill. Real library: 5 of 6 car sessions spend 37-156 s there, no bike session one second. */
+const val MOTOR_UPHILL_PCT = 2.0
+
+const val MOTOR_UPHILL_MIN_S = 30.0
+
+/** Home-drift gate ([GradePace.isHomeDrift]): a track whose robust footprint (95th-percentile distance of its
+ *  points from their per-axis median point) is under this many metres may be drift... */
+const val DRIFT_FOOTPRINT_M = 1000.0
+
+/** ...and IS drift when its median turn RATE (|Δbearing| per metre of chord) is sharper than a circle of this
+ *  radius (180/π/40 ≈ 1.43 deg/m). A curvature, not a per-step turn: the stored step is 20-29 m depending on
+ *  the speed, so a per-step threshold excluded a 45 m-radius loop at 30 km/h but not at 20. */
+const val DRIFT_MIN_RADIUS_M = 40.0
+
+/** A step only carries a heading when its GEOGRAPHIC chord is at least this long (shorter is GPS noise). */
+const val DRIFT_MIN_CHORD_M = 5.0
+
+/** Below this many qualifying heading pairs there is no verdict, and the track is kept. */
+const val DRIFT_MIN_PAIRS = 20
+
+/** ...and a circling track is drift only while the median |trailing gradient| of its folded steps is under this
+ *  (%): home drift barely changes altitude per metre, tight switchback climbing does. */
+const val DRIFT_MAX_GRADE_PCT = 2.0
 
 /** Gradient bin width (%). 1% is finer than the noise floor of a smoothed barometric profile and keeps the
  *  table at 41 entries. */
@@ -37,6 +94,9 @@ const val GRADE_MIN_BIN_M = 400.0
  * The tier below `PacePatch` and above the neutral fill:
  *   `PacePatch(here) ?: GradePace(gradient now) ?: neutral`
  *
+ * "ALL-TIME" means every track file with altitude in the live dir AND `archive/`, one contribution per
+ * physical ride (see `GradePaceStore.rebuild` for the duplicate suppression and its accepted residuals).
+ *
  * AVERAGE here is the rider's ALL-TIME, METRE-WEIGHTED pace at that gradient — every metre ever ridden in
  * the bin counts the same, no matter how old. There is deliberately NO recency weighting: recency is what
  * LAST exists for, and a pick that quietly drifts toward the last few rides is not an average.
@@ -54,7 +114,11 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
     class Reducer(
         /** Metre-weighted mean pace (s/m) over all history in this bin. */
         var meanTpm: Double = 0.0,
+        /** Fastest per-ride pace among rides with >= [GRADE_MIN_BIN_M] in this bin, or [meanTpm] when none
+         *  qualifies (finite, never 0/Infinity). See [reduce]. */
         var minTpm: Double = 0.0,
+        /** The newest ride's pace among rides with >= [GRADE_MIN_BIN_M] in this bin, or [meanTpm] when none
+         *  qualifies (finite, never 0/Infinity). See [reduce]. */
         var lastTpm: Double = 0.0,
         var metres: Double = 0.0,
         var count: Int = 0,
@@ -81,7 +145,9 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
             // same rule as PacePatch/RouteAggregate.
             GhostPick.AVERAGE -> if (r.count >= AGG_MIN_LAPS) r.meanTpm else r.lastTpm
             GhostPick.LAST -> r.lastTpm
-            GhostPick.BEST -> maxOf(r.minTpm, r.meanTpm / BEST_MAX_SPEEDUP)
+            // Never slower than AVERAGE (a slow lone qualifier must not drag BEST below the mean), never more
+            // than BEST_MAX_SPEEDUP faster than it.
+            GhostPick.BEST -> maxOf(minOf(r.minTpm, r.meanTpm), r.meanTpm / BEST_MAX_SPEEDUP)
         }
     }
 
@@ -114,31 +180,28 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
          */
         fun build(tracks: List<RecordedTrack>): GradePace =
             Builder().apply { tracks.forEach { add(it) } }.build()
-    }
 
-    /**
-     * STREAMING builder: [add] one track at a time and [build] at the end, so a whole-library rebuild
-     * never has to hold the library in heap (1500 rides x ~3000 points is hundreds of MB — an OOM on a
-     * Karoo). All [add] keeps per track is its epoch plus its per-bin (seconds, metres) totals — at most
-     * 41 bins, i.e. kilobytes for the whole library — because the final fold must run OLDEST-FIRST for
-     * `lastTpm` to mean the most recent ride, and files are not listed in epoch order.
-     *
-     * Not thread-safe; drive it from one coroutine (the import job).
-     */
-    class Builder {
-        private class Fold(val epoch: Long, val sumDt: Map<Int, Double>, val sumDd: Map<Int, Double>)
-
-        private val folds = ArrayList<Fold>()
-        private var built = false
-
-        fun add(track: RecordedTrack) {
-            check(!built) { "GradePace.Builder is single-use; add() after build() would be ignored" }
+        /** One track's per-bin (seconds, metres) totals; empty maps when it carries no usable altitude or is
+         *  home drift ([isHomeDrift]) or motorised ([isMotorised]) — gated HERE so the per-file fold cache
+         *  stores the empty result. */
+        fun foldOf(track: RecordedTrack): Fold {
             val pts = track.points
-            if (pts.size < 2) return
-            // Per-bin totals for THIS track: seconds and metres, so [build]'s fold emits one
-            // metre-weighted sample per bin.
+            if (isHomeDrift(pts) || isMotorised(pts)) return Fold(track.startedAtEpoch, emptyMap(), emptyMap())
+            // Per-bin totals for THIS track: seconds and metres, so [reduce] emits one metre-weighted
+            // sample per bin.
             val sumDt = HashMap<Int, Double>()
             val sumDd = HashMap<Int, Double>()
+            forEachGradedStep(pts) { gradePct, stepT, stepM ->
+                val bin = binOf(gradePct)
+                sumDt[bin] = (sumDt[bin] ?: 0.0) + stepT
+                sumDd[bin] = (sumDd[bin] ?: 0.0) + stepM
+            }
+            return Fold(track.startedAtEpoch, sumDt, sumDd)
+        }
+
+        /** Every step [foldOf] folds, with its trailing gradient (finite, within +-[GRADE_MAX_PCT]), seconds and
+         *  metres. THE step/gradient rule: [foldOf] and the drift gate's climbing corroboration both read it. */
+        private inline fun forEachGradedStep(pts: List<TrackPointDto>, emit: (gradePct: Double, stepT: Double, stepM: Double) -> Unit) {
             var j = 0 // trailing index of the gradient window
             for (i in 1 until pts.size) {
                 val here = pts[i]
@@ -147,32 +210,22 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                 while (j < i - 1 && here.distanceM - pts[j + 1].distanceM >= GRADE_WINDOW_M) j++
                 val stepM = here.distanceM - prev.distanceM
                 val stepT = here.timeS - prev.timeS
-                if (stepM > TrackSamples.DROPOUT_GAP_M) {
-                    // A device-off / tunnel jump, not riding. RESTART the gradient window here: left
-                    // alone, the trailing edge stays on the far side of the gap for the next ~100 m and
-                    // divides the gap's whole altitude jump by (gap + a few steps), landing a bogus
-                    // gradient — carrying the step's real, flat pace — in a steep bin. Costs the first
-                    // GRADE_WINDOW_M after every gap, which is the right trade. Checked BEFORE the
-                    // stepT guard below: a dropout's landing point can carry a duplicate/backward
-                    // timestamp (stepT <= 0), and that must still restart the window — a timestamp
-                    // fault must never suppress a distance-based dropout restart.
-                    j = i
-                    continue
-                }
-                if (stepM <= 0.0 || stepT <= 0.0) continue
-                val stepSpeed = stepM / stepT
-                if (stepSpeed > AGG_MAX_SPEED_MS) {
-                    // A GPS spike (30-200 m in one step): not riding, so it is no pace sample — and, like a
-                    // dropout, it must RESTART the window. Left alone the spike's metres stay in `dd` for the
-                    // next ~100 m and dilute the gradient ~2.5x, filing an 8% climb's crawl in bin +3.
-                    j = i
+                if (isStepFault(stepM, stepT)) {
+                    // A DROPOUT (device-off / tunnel jump, > DROPOUT_GAP_M) or a GPS SPIKE (above
+                    // AGG_MAX_SPEED_MS) is not riding, and it RESTARTS the gradient window: left alone the
+                    // trailing edge stays behind it for the next ~100 m and divides its altitude jump (or
+                    // dilutes the gradient with its metres) into a bogus bin carrying real pace. Costs the
+                    // first GRADE_WINDOW_M after each, which is the right trade. The dropout test ignores the
+                    // timestamp: its landing point can carry a duplicate/backward one, and a timestamp fault
+                    // must never suppress a distance-based restart.
+                    if (stepM > TrackSamples.DROPOUT_GAP_M || (stepT > 0.0 && stepM / stepT > AGG_MAX_SPEED_MS)) j = i
                     continue
                 }
                 // A DWELL (red light, cafe, a photo) is DROPPED, not clipped to the floor: a stop says
                 // nothing about pace-at-gradient, and a GradePace bin is GLOBAL — bin 0 holds 80-90% of a
                 // rider's metres, so a clipped city stop moves the pace used on a country lane. (`PacePatch`
                 // can afford the clip: its 18 m cells keep the poison at the junction it happened in.)
-                if (stepSpeed < AGG_MIN_SPEED_MS) continue
+                if (stepM / stepT < AGG_MIN_SPEED_MS) continue
                 val ele = here.eleM ?: continue
                 val back = pts[j]
                 val backEle = back.eleM ?: continue
@@ -189,24 +242,155 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                 // glitch with a genuine 20% wall. The lookup-side clamp in binOf stays — a live 25%
                 // reading legitimately maps to bin 20.
                 if (!gradePct.isFinite() || kotlin.math.abs(gradePct) > GRADE_MAX_PCT) continue
-                val bin = binOf(gradePct)
-                sumDt[bin] = (sumDt[bin] ?: 0.0) + stepT
-                sumDd[bin] = (sumDd[bin] ?: 0.0) + stepM
+                emit(gradePct, stepT, stepM)
             }
-            if (sumDd.isNotEmpty()) folds.add(Fold(track.startedAtEpoch, sumDt, sumDd))
         }
 
         /**
-         * SINGLE-USE: the folds are not consumed by the fold below, so a second call on the same builder
-         * would count every track twice (doubling `count`, halving nothing else) and silently produce a
-         * model that claims twice the rides it has. Build a fresh [Builder] instead.
+         * HOME DRIFT: a Karoo left on at home (or on a café table) records GPS jitter that the distance
+         * stream turns into kilometres of "riding" at plausible speeds, flat — it inflated the flat bin's
+         * metres and could become LAST. Speed, footprint or altitude alone cannot tell it from slow riding;
+         * HEADING COHERENCE can: riding — a small circuit, hill repeats, a velodrome — turns a little from
+         * step to step, jitter points anywhere. A track is drift iff ALL THREE:
+         *  1. its robust footprint (95th-percentile haversine distance of its points from the per-axis
+         *     MEDIAN point) is under [DRIFT_FOOTPRINT_M] — robust, so one far-off fix cannot hide it; and
+         *  2. the median TURN RATE over consecutive QUALIFYING steps (geographic chord >= [DRIFT_MIN_CHORD_M]),
+         *     |Δbearing| / (mean of the two chords) in deg/m, is sharper than a circle of radius
+         *     [DRIFT_MIN_RADIUS_M] — speed-independent, unlike a per-step turn. Headings are never paired across a
+         *     faulty step ([isStepFault]: dropout, spike, non-positive distance or time) — the pairing
+         *     restarts after it. A DWELL step (< [AGG_MIN_SPEED_MS]), which [foldOf] also drops, still
+         *     carries a heading on purpose: drift IS dwell-speed jitter, and on the real library resetting at
+         *     dwells cleared 28 of 46 drift sessions, pouring ~45 km of jitter into the fold
+         *     (bin 0 AVERAGE 11.85 -> 10.07 km/h). Fewer than
+         *     [DRIFT_MIN_PAIRS] pairs: no verdict, kept; and
+         *  3. it does not CLIMB: the true median of |trailing gradient| over exactly the steps [foldOf] folds
+         *     ([forEachGradedStep]: same step validity, gap restarts and window) is under [DRIFT_MAX_GRADE_PCT].
+         *     Tight switchback hill repeats (35 m legs at 10 %, footprint < 1 km) turn like drift but climb. No
+         *     such step (no altitude) does not block the verdict — such a track folds to nothing anyway — and
+         *     neither do fewer than [DRIFT_MIN_PAIRS] graded steps (a barometer settling after power-on).
+         * Accepted residuals (user decision 2026-10-11): a session circling a loop of radius < ~40 m, e.g. a
+         * very compact pump track, is excluded regardless of speed unless it climbs (a flat one stays excluded);
+         * alternating short climbs and descents can cancel within the [GRADE_WINDOW_M] window and read flat. Coherent back-and-forth drift along a line is NOT caught (no worse than
+         * before the gate).
          */
-        fun build(): GradePace {
-            check(!built) { "GradePace.Builder is single-use; create a new Builder for another model" }
-            built = true
+        internal fun isHomeDrift(pts: List<TrackPointDto>): Boolean {
+            val rates = ArrayList<Double>()
+            var lastBearing = Double.NaN
+            var lastChord = 0.0
+            for (i in 1 until pts.size) {
+                val a = pts[i - 1]
+                val b = pts[i]
+                if (isStepFault(b.distanceM - a.distanceM, b.timeS - a.timeS)) {
+                    lastBearing = Double.NaN
+                    continue
+                }
+                val la = LatLng(a.lat, a.lng)
+                val lb = LatLng(b.lat, b.lng)
+                val chord = Polyline.haversineM(la, lb)
+                if (chord < DRIFT_MIN_CHORD_M) continue
+                val bearing = Polyline.bearingDeg(la, lb)
+                if (!lastBearing.isNaN()) rates += Polyline.bearingDiffDeg(lastBearing, bearing) / ((lastChord + chord) / 2.0)
+                lastBearing = bearing
+                lastChord = chord
+            }
+            if (rates.size < DRIFT_MIN_PAIRS || median(rates) <= Math.toDegrees(1.0 / DRIFT_MIN_RADIUS_M)) return false
+            if (robustFootprintM(pts) >= DRIFT_FOOTPRINT_M) return false
+            val grades = ArrayList<Double>()
+            forEachGradedStep(pts) { g, _, _ -> grades += kotlin.math.abs(g) }
+            // Fewer graded steps than heading pairs needed → too little evidence of climbing to veto (field:
+            // fit-1735819644000, 11 steps of a barometer settling after power-on, median 4.3 %, otherwise drift).
+            return grades.size < DRIFT_MIN_PAIRS || median(grades) < DRIFT_MAX_GRADE_PCT
+        }
+
+        /**
+         * MOTORISED: a session recorded in a car (5-6 in the real library) inflated AVERAGE at +-1 % by ~1 km/h
+         * and BEST on descents by up to 50 %. The rider rides MTB and does not record car shuttles, so the
+         * WHOLE session is excluded — a mixed shuttle day loses its riding too (accepted, user decision).
+         *
+         * Evidence = seconds spent above [MOTOR_MIN_SPEED_MS] on a KNOWN trailing gradient (window >=
+         * [GRADE_WINDOW_M], restarted after a dropout or an above-cap step like [foldOf]'s; no altitude in the window = unknown,
+         * never flat) >= [MOTOR_MIN_GRADE_PCT]. A track is motorised iff evidence >= [MOTOR_MIN_S] AND >=
+         * [MOTOR_MIN_SHARE] of its moving time AND at least [MOTOR_UPHILL_MIN_S] of the evidence is on a known
+         * gradient >= [MOTOR_UPHILL_PCT] (a bike cannot hold 54 km/h uphill: this keeps a tailwind ride or a
+         * fast valley return on -0.8 %). Steps counted: [foldOf]'s gap rule only (0 < dd <=
+         * DROPOUT_GAP_M, dt > 0), moving (v >= [AGG_MIN_SPEED_MS]); deliberately NO speed cap (a step above
+         * [AGG_MAX_SPEED_MS] is still evidence) and NO dt cap (20 m decimation makes slow climbing ~14 s/step;
+         * dropping those would leave only the fast steps in the denominator).
+         * Measured on the real library: cars 13.2-23.8 % / 64-677 s; bikes max 0.5 % / 6 s.
+         * Documented limits: a car that never goes fast uphill is not caught (one 8-min city session in the
+         * real library); a sustained run above [AGG_MAX_SPEED_MS] counts only its steps with a known window; an
+         * imported FIT from a device WITHOUT a barometer (GPS-only altitude, noise sigma >~ 4 m) can make a fast
+         * genuine descent read as uphill over the [GRADE_WINDOW_M] window and be gated. Karoo recordings are
+         * barometric and not affected (closest real bike session: 8 s of fast evidence).
+         */
+        internal fun isMotorised(pts: List<TrackPointDto>): Boolean {
+            var movingS = 0.0
+            var fastS = 0.0
+            var uphillS = 0.0
+            var j = 0
+            for (i in 1 until pts.size) {
+                val here = pts[i]
+                while (j < i - 1 && here.distanceM - pts[j + 1].distanceM >= GRADE_WINDOW_M) j++
+                val stepM = here.distanceM - pts[i - 1].distanceM
+                val stepT = here.timeS - pts[i - 1].timeS
+                if (stepM > TrackSamples.DROPOUT_GAP_M) { j = i; continue }
+                if (stepM <= 0.0 || stepT <= 0.0 || stepM / stepT < AGG_MIN_SPEED_MS) continue
+                movingS += stepT
+                val v = stepM / stepT
+                val ele = here.eleM
+                val backEle = pts[j].eleM
+                val dd = here.distanceM - pts[j].distanceM
+                if (v > MOTOR_MIN_SPEED_MS && ele != null && backEle != null && dd >= GRADE_WINDOW_M) {
+                    val gradePct = (ele - backEle) / dd * 100.0
+                    if (gradePct >= MOTOR_MIN_GRADE_PCT) fastS += stepT
+                    if (gradePct >= MOTOR_UPHILL_PCT) uphillS += stepT
+                }
+                // Like foldOf: an above-cap step still counts (above), but its metres must not sit in the next
+                // windows — a GPS spike would drag a descent's gradient toward 0 % and into flat evidence.
+                if (v > AGG_MAX_SPEED_MS) j = i
+            }
+            return fastS >= MOTOR_MIN_S && fastS >= MOTOR_MIN_SHARE * movingS && uphillS >= MOTOR_UPHILL_MIN_S
+        }
+
+        /** 95th-percentile haversine distance of [pts] from their per-axis median point. */
+        internal fun robustFootprintM(pts: List<TrackPointDto>): Double {
+            if (pts.isEmpty()) return 0.0
+            val centre = LatLng(median(pts.map { it.lat }), median(pts.map { it.lng }))
+            val d = pts.map { Polyline.haversineM(centre, LatLng(it.lat, it.lng)) }.sorted()
+            return d[ceil(0.95 * d.size).toInt() - 1]
+        }
+
+        /** A step that is no movement at all: a dropout (> DROPOUT_GAP_M), a non-positive distance or time,
+         *  or a spike (above [AGG_MAX_SPEED_MS]). ONE rule for [foldOf], which drops it, and [isHomeDrift],
+         *  which restarts its heading pairing after it, so the two cannot diverge. */
+        private fun isStepFault(stepM: Double, stepT: Double): Boolean =
+            !(stepM > 0.0 && stepM <= TrackSamples.DROPOUT_GAP_M && stepT > 0.0 && stepM / stepT <= AGG_MAX_SPEED_MS)
+
+        /** The true median: the mean of the two central values for an even count. */
+        private fun median(v: List<Double>): Double {
+            val s = v.sorted()
+            val m = s.size / 2
+            return if (s.size % 2 == 0) (s[m - 1] + s[m]) / 2.0 else s[m]
+        }
+
+        /**
+         * THE reduce — the only one: [Builder.build] and the cached whole-history rebuild
+         * (`GradePaceStore.rebuild`) both end here, so the two paths cannot drift. Folds run OLDEST-FIRST
+         * for `lastTpm` to mean the most recent ride; `sortedBy` is stable, so folds sharing an epoch keep
+         * the caller's order.
+         *
+         * BEST (`minTpm`) and LAST (`lastTpm`) are taken ONLY from rides that rode at least [GRADE_MIN_BIN_M] in
+         * the bin; `mean`, `metres` and `count` still take every ride. On the real library a few metres of anomalous
+         * rides (a missed car, a GPS spike) pinned BEST at the 2x clamp in almost every bin (+8 %: 18.1 km/h
+         * vs AVERAGE 8.9); with the floor +8 % BEST is ~10.5. LAST is the NEWEST qualifying ride (oldest-first
+         * order, equal epochs in the caller's order): a 45 m sliver set LAST at -19 % to 3.1 km/h, and a short
+         * home session as the newest ride would set the flat LAST. A bin with no qualifying ride persists
+         * `minTpm = lastTpm = meanTpm`, so BEST == LAST == AVERAGE there and the JSON stays finite.
+         */
+        fun reduce(folds: List<Fold>): GradePace {
             val map = HashMap<Int, Reducer>()
-            // `sortedBy` is stable, so tracks sharing an epoch keep their add order — same as the old
-            // list-based build, which sorted the caller's list the same way.
+            val qualMin = HashMap<Int, Double>() // bins that HAVE a qualifying ride -> their fastest one
+            val qualLast = HashMap<Int, Double>() // ... -> their newest one
             for (fold in folds.sortedBy { it.epoch }) {
                 for ((bin, dd) in fold.sumDd) {
                     if (dd <= 0.0) continue
@@ -217,13 +401,56 @@ class GradePace private constructor(private val bins: Map<Int, Reducer>) {
                     // the bin, against every metre already there. `r.metres` is read BEFORE the add below.
                     r.meanTpm =
                         if (r.count == 0) tpm else (r.meanTpm * r.metres + tpm * dd) / (r.metres + dd)
-                    r.minTpm = if (r.count == 0) tpm else min(r.minTpm, tpm)
-                    r.lastTpm = tpm
+                    if (dd >= GRADE_MIN_BIN_M) {
+                        qualMin[bin] = min(qualMin[bin] ?: tpm, tpm)
+                        qualLast[bin] = tpm
+                    }
                     r.metres += dd
                     r.count++
                 }
             }
+            for ((bin, r) in map) {
+                r.minTpm = qualMin[bin] ?: r.meanTpm
+                r.lastTpm = qualLast[bin] ?: r.meanTpm
+            }
             return GradePace(map)
+        }
+    }
+
+    /** One ride's contribution: its epoch plus its per-bin (seconds, metres) totals (at most 41 bins). */
+    class Fold(val epoch: Long, val sumDt: Map<Int, Double>, val sumDd: Map<Int, Double>) {
+        val isEmpty: Boolean get() = sumDd.isEmpty()
+        val totalM: Double get() = sumDd.values.sum()
+    }
+
+    /**
+     * STREAMING builder: [add] one track at a time and [build] at the end, so a whole-library rebuild
+     * never has to hold the library in heap (1500 rides x ~3000 points is hundreds of MB — an OOM on a
+     * Karoo). All [add] keeps per track is its epoch plus its per-bin (seconds, metres) totals — at most
+     * 41 bins, i.e. kilobytes for the whole library — because the final fold must run OLDEST-FIRST for
+     * `lastTpm` to mean the most recent ride, and files are not listed in epoch order.
+     *
+     * Not thread-safe; drive it from one coroutine (the import job).
+     */
+    class Builder {
+        private val folds = ArrayList<Fold>()
+        private var built = false
+
+        fun add(track: RecordedTrack) {
+            check(!built) { "GradePace.Builder is single-use; add() after build() would be ignored" }
+            val fold = foldOf(track)
+            if (!fold.isEmpty) folds.add(fold)
+        }
+
+        /**
+         * SINGLE-USE: the folds are not consumed by the fold below, so a second call on the same builder
+         * would count every track twice (doubling `count`, halving nothing else) and silently produce a
+         * model that claims twice the rides it has. Build a fresh [Builder] instead.
+         */
+        fun build(): GradePace {
+            check(!built) { "GradePace.Builder is single-use; create a new Builder for another model" }
+            built = true
+            return reduce(folds)
         }
     }
 }

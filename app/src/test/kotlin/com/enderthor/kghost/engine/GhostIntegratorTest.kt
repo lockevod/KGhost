@@ -226,4 +226,67 @@ class GhostIntegratorTest {
         try { GhostIntegrator(GhostPick.AVERAGE, vpTimePerM = 0.0); org.junit.Assert.fail("expected IAE") }
         catch (e: IllegalArgumentException) { /* expected */ }
     }
+
+    // ── rebase: translate the race across an un-raced interval (the gate re-anchor) ──────────────────
+    private fun GhostIntegrator.rideFrom(d0: Double, t0: Double, n: Int, v: Double, hist: Double) {
+        for (k in 1..n) onTick(d0 + k * v, 0.0, (d0 + k * v) * 1e-5, 90.0, t0 + k, { _, _, _ -> hist })
+    }
+
+    /** Race 1000 m at 10 m/s on [hist], rebase by (Δd, Δt), race 10 more ticks; compare with a reference
+     *  that never had the interval (same ticks, untranslated). */
+    private fun rebaseCase(hist: Double, dd: Double, dt: Double) {
+        val g = newInt(); val ref = newInt()
+        g.onTick(0.0, 0.0, 0.0, 90.0, 0.0) { _, _, _ -> hist }
+        ref.onTick(0.0, 0.0, 0.0, 90.0, 0.0) { _, _, _ -> hist }
+        g.rideFrom(0.0, 0.0, 100, 10.0, hist)
+        ref.rideFrom(0.0, 0.0, 100, 10.0, hist)
+        val t0 = g.gapTimeS; val d0 = g.gapDistM
+        g.rebase(1000.0 + dd, 100.0 + dt)
+        assertEquals("seconds unchanged", t0, g.gapTimeS, 1e-9)
+        assertEquals("metres unchanged", d0, g.gapDistM, 1e-9)
+        g.rideFrom(1000.0 + dd, 100.0 + dt, 10, 10.0, hist)
+        ref.rideFrom(1000.0, 100.0, 10, 10.0, hist)
+        assertEquals("race continues: seconds", ref.gapTimeS, g.gapTimeS, 1e-9)
+        assertEquals("race continues: metres", ref.gapDistM, g.gapDistM, 1e-9)
+    }
+
+    @Test fun `rebase keeps seconds and metres - ahead, forward`() {
+        rebaseCase(hist = 0.2, dd = 1200.0, dt = 200.0) // +100 s ahead, ~ +500 m
+    }
+
+    @Test fun `rebase keeps seconds and metres - ahead, backward odometer`() {
+        rebaseCase(hist = 0.2, dd = -500.0, dt = 60.0)
+    }
+
+    @Test fun `rebase keeps seconds and metres - behind, forward and backward`() {
+        rebaseCase(hist = 0.05, dd = 1200.0, dt = 200.0)
+        rebaseCase(hist = 0.05, dd = -500.0, dt = 60.0)
+    }
+
+    @Test fun `rebase keeps the metres of a big lead - restore collapsed them to 0`() {
+        val g = newInt()
+        g.onTick(0.0, 0.0, 0.0, 90.0, 0.0) { _, _, _ -> 0.4 }
+        g.rideFrom(0.0, 0.0, 360, 5.0, 0.4) // 1800 m at 5 m/s on a 0.4 s/m road → +360 s
+        assertEquals(360.0, g.gapTimeS, 1e-6)
+        val metres = g.gapDistM
+        assertTrue(metres > 800.0)
+        g.rebase(3000.0, 600.0)
+        assertEquals(metres, g.gapDistM, 1e-9)
+        g.rideFrom(3000.0, 600.0, 1, 5.0, 0.4)
+        assertEquals(360.0 + 1.0, g.gapTimeS, 1e-6)
+        assertTrue(g.gapDistM > 800.0)
+    }
+
+    @Test fun `rebase before any tick falls back to restore semantics`() {
+        val g = newInt()
+        g.rebase(5000.0, 300.0)
+        g.onTick(5000.0, 0.0, 0.0, 90.0, 301.0) { _, _, _ -> 0.2 }
+        assertEquals(0.0, g.gapTimeS, 1e-9)
+        // A restored lead not yet anchored survives a rebase.
+        val r = newInt()
+        r.restore(42.0, 4000.0)
+        r.rebase(4100.0, 50.0)
+        r.onTick(4100.0, 0.0, 0.0, 90.0, 51.0) { _, _, _ -> 0.2 }
+        assertEquals(42.0, r.gapTimeS, 1e-9)
+    }
 }

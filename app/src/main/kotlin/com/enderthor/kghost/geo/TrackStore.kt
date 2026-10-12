@@ -62,10 +62,8 @@ class TrackStore(private val dir: File) {
     fun allTrackIds(): List<String> {
         val files = dir.listFiles() ?: return emptyList()
         return files
-            .filter {
-                it.isFile && it.name.endsWith(JSON_SUFFIX) && it.name !in BOOKKEEPING_FILES
-            }
-            .map { it.name.removeSuffix(JSON_SUFFIX) }
+            .filter(::isTrackFile)
+            .map(::trackIdOf)
     }
 
     /**
@@ -447,7 +445,9 @@ class TrackStore(private val dir: File) {
      * ride is always the most recent → always a survivor. Serialized by [tidyLock]. Returns the count
      * archived.
      */
-    fun tidyGroup(newTrack: RecordedTrack): Int = synchronized(tidyLock) {
+    fun tidyGroup(newTrack: RecordedTrack, lockWaitMs: Long = -1): Int = synchronized(tidyLock) {
+        val t0 = System.nanoTime()
+        val heap0 = heapUsedMb()
         val coarseCells = SpatialIndex(INDEX_PRECISION)
             .cellsForPath(newTrack.points.map { LatLng(it.lat, it.lng) })
         val candidateIds = synchronized(indexLock) {
@@ -457,6 +457,11 @@ class TrackStore(private val dir: File) {
         val metas = candidateIds.mapNotNull { id -> loadTrack(id)?.let { trackMetaOf(it) } }
         val toArchive = selectArchivable(metas)
         archive(toArchive)
+        Timber.i(
+            "KVP lib: tidyGroup cand=%d archived=%d wait=%dms work=%dms heap=%d->%d/%dMB",
+            candidateIds.size, toArchive.size, lockWaitMs, (System.nanoTime() - t0) / 1_000_000,
+            heap0, heapUsedMb(), heapMaxMb(),
+        )
         toArchive.size
     }
 
@@ -470,7 +475,13 @@ class TrackStore(private val dir: File) {
      * The caller must be able to tell those apart: a skip that reads as "completed, archived 0" would
      * let the one-shot upgrade sweep stamp itself done on exactly the libraries it never examined.
      */
-    fun sweep(maxTracks: Int = sweepMaxDefault, checkCancel: () -> Unit = {}): Int? = synchronized(tidyLock) {
+    fun sweep(
+        maxTracks: Int = sweepMaxDefault,
+        checkCancel: () -> Unit = {},
+        label: String = "sweep",
+    ): Int? = synchronized(tidyLock) {
+        val t0 = System.nanoTime()
+        val heap0 = heapUsedMb()
         val ids = allTrackIds()
         if (ids.size > maxTracks) {
             Timber.i("KVP tidy: sweep skipped (%d tracks > cap %d)", ids.size, maxTracks)
@@ -481,7 +492,12 @@ class TrackStore(private val dir: File) {
             loadTrack(id)?.let { trackMetaOf(it) }
         }
         // archive()'s return, not toArchive.size: report what moved, not what we intended to move.
-        archive(selectArchivable(metas))
+        archive(selectArchivable(metas)).also { archived ->
+            Timber.i(
+                "KVP lib: %s examined=%d archived=%d %dms heap=%d->%d/%dMB",
+                label, ids.size, archived, (System.nanoTime() - t0) / 1_000_000, heap0, heapUsedMb(), heapMaxMb(),
+            )
+        }
     }
 
     /**
@@ -685,7 +701,7 @@ class TrackStore(private val dir: File) {
                 continue
             }
             for (f in files) {
-                if (!f.isFile || !f.name.endsWith(JSON_SUFFIX) || f.name in BOOKKEEPING_FILES) continue
+                if (!isTrackFile(f)) continue
                 val text = runCatching { f.readText() }.getOrNull()
                 if (text == null) {
                     complete = false
@@ -752,10 +768,18 @@ class TrackStore(private val dir: File) {
          * Files in [dir] that are bookkeeping, not `<id>.json` tracks. [GradePaceStore.FILE_NAME] is
          * written into this SAME dir by `HistoryImportRunner` after any import that stored anything —
          * so leaving it out made "stored rides" read one too high from the first successful import
-         * onward, exactly when the rider is counting to check a rebuild lost nothing.
+         * onward, exactly when the rider is counting to check a rebuild lost nothing. The grade model's
+         * per-file fold cache ([GradePaceStore.FOLDS_FILE_NAME]) lives there too.
          */
         private val BOOKKEEPING_FILES =
-            setOf(INDEX_FILE, SOURCEKEYS_FILE, LEDGER_FILE, GradePaceStore.FILE_NAME)
+            setOf(INDEX_FILE, SOURCEKEYS_FILE, LEDGER_FILE, GradePaceStore.FILE_NAME, GradePaceStore.FOLDS_FILE_NAME)
+
+        /** Is [f] an `<id>.json` track (live or archived), not a bookkeeping file? */
+        internal fun isTrackFile(f: File): Boolean =
+            f.isFile && f.name.endsWith(JSON_SUFFIX) && f.name !in BOOKKEEPING_FILES
+
+        /** The track id of a file accepted by [isTrackFile]. */
+        internal fun trackIdOf(f: File): String = f.name.removeSuffix(JSON_SUFFIX)
 
         /** Subdirectory holding archived (pruned) tracks; excluded from listing/index/matching. */
         const val ARCHIVE_SUBDIR = "archive"

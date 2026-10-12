@@ -95,6 +95,11 @@ data class KGhostConfig(
     /** Whether to write the diagnostic logs to a file so a ride can be studied later (default off). */
     val fileLogging: Boolean = false,
     /**
+     * Bench testing: take the gradient from Ride Replay's grade stream while a replay is open (it can't
+     * mock the barometer, so the Karoo's own grade reads ~0 on a replayed climb). Off by default.
+     */
+    val replayGrade: Boolean = false,
+    /**
      * Epoch millis of the last successful history-import scan. Used by "Import new only" to skip
      * files not modified since. 0L means no scan has run yet (import everything).
      */

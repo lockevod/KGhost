@@ -106,6 +106,18 @@ fun AppSettingsScreen(
 
         HorizontalDivider()
 
+        // ── Bench testing: Ride Replay grade ──────────────────────────────────
+        SwitchRow(
+            label = stringResource(R.string.replay_grade_label),
+            description = stringResource(R.string.replay_grade_description),
+            checked = config.replayGrade,
+            onCheckedChange = { on ->
+                scope.launch { saveFailed = !configManager.updateConfig { it.copy(replayGrade = on) } }
+            },
+        )
+
+        HorizontalDivider()
+
         // ── Diagnostics: file logging ─────────────────────────────────────────
         SwitchRow(
             label = stringResource(R.string.race_filelog_label),
