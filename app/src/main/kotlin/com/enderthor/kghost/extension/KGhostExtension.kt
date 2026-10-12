@@ -2193,11 +2193,18 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
             }
             var replayOpen = false
             gradeJob = grades.onEach { (fromReplay, state) ->
-                if (fromReplay && replayOpen != (state !is StreamState.NotAvailable)) {
+                // Only a value opens the replay: Searching/Idle (a missing or restarting Ride Replay) must
+                // never silence the Karoo's grade on a real ride.
+                if (fromReplay && replayOpen != (state is StreamState.Streaming)) {
                     replayOpen = !replayOpen
                     Timber.i("KVP grade source: %s", if (replayOpen) "ride-replay" else "karoo")
                 }
-                if (fromReplay != replayOpen) return@onEach // the other source owns the gradient
+                if (fromReplay != replayOpen) {
+                    // Ride Replay only emits on a change, so a constant replayed grade would go stale after
+                    // GPS_FIX_FRESH_MS; the Karoo's ~1 Hz samples keep it fresh without touching its value.
+                    if (!fromReplay) lastGradeMs = SystemClock.elapsedRealtime()
+                    return@onEach
+                }
                 val field = if (fromReplay) DataType.Field.SINGLE else DataType.Field.ELEVATION_GRADE
                 val v = (state as? StreamState.Streaming)?.dataPoint?.values?.get(field)
                 // UNIT: assumed already a percentage. If a field log shows ratios (0.06 on a 6% ramp),
