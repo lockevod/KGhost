@@ -13,21 +13,17 @@ import org.junit.Test
  * tick also froze the race clock; TARGET too; a backward coast correction subtracted the inactive seconds).
  *
  * [Rig] replicates the route tick in production order — coast.update BEFORE the gate, the gate's inactive
- * branch (snapshot + interstitial), then [gateResume], the [raceClockFreezes] block, the guarded onTick and
- * [routeGapPublication]. The extension's wiring itself has no unit harness: [Rig.tick] is its mirror, so the
- * decision ([gateResume]) and the freeze/publication policies are shared with production, the field
- * assignments around them are replicated.
+ * branch (snapshot + interstitial), then [gateResume], the shared race step [advanceRace] (freeze, pace
+ * choice, guarded onTick, verdict latch) and [routeGapPublication]. The extension's wiring itself has no unit
+ * harness: [Rig.tick] is its mirror, so the decision ([gateResume]), the race step and the publication policy
+ * are shared with production, the field assignments around them are replicated.
  */
 class GateInterstitialPipelineTest {
 
     private class Rig(val cmp: RaceComparator, val target: Double = 0.25) {
         val coast = CoastingEstimator()
         val g = GhostIntegrator(GhostPick.AVERAGE, vpTimePerM = 0.3, decimateM = 20.0)
-        private var moveStart: Double? = null
-        private var prevEl: Double? = null
-        private var integLast = 0.0
-        private var integInit = false
-        private var verdictSeen = false
+        private val st = RaceStepState()
         private var published = false
         private var gateInterstitial = false
         private var snapshot: GapState? = null
@@ -42,70 +38,60 @@ class GateInterstitialPipelineTest {
         fun tick(raw: Double, t: Double, speed: Double?, hist: Double?, active: Boolean = true) {
             coast.update(raw, speed, t)
             if (!active) {
-                if (!gateInterstitial && integInit) {
+                if (!gateInterstitial && st.initialised) {
                     snapshot = shown.takeIf { published && it.active }
                     gateInterstitial = true
                 }
                 shown = GapState.inactive()
                 return
             }
-            if (moveStart == null && speed != null && speed > StalenessLogic.MIN_MOVING_MS) moveStart = t
+            if (st.moveStartS == null && speed != null && speed > StalenessLogic.MIN_MOVING_MS) st.moveStartS = t
             if (!routeLoaded) {
                 // VP branch: consumes the interstitial once no pending interval straddles the gate (mirror of
                 // production, same gateResume decision), then hands off via afterVp.
                 if (gateResume(gateInterstitial, coast.pendingHold) == GateResume.REANCHOR) {
-                    moveStart?.let { m ->
+                    st.moveStartS?.let { m ->
                         g.rebase(coast.effectiveDistanceM, t - m)
-                        integLast = coast.effectiveDistanceM
-                        prevEl = t
+                        st.lastRiderDist = coast.effectiveDistanceM
+                        st.prevTickElapsedS = t
                     }
                     gateInterstitial = false
                     snapshot = null
                 }
                 published = false
-                if (integInit) afterVp = true
+                if (st.initialised) afterVp = true
                 shown = GapState.inactive() // stand-in for the VP number
                 return
             }
-            var ms = moveStart ?: return
+            val ms = st.moveStartS ?: return
             val riderDist = coast.effectiveDistanceM
             lastDecision = gateResume(gateInterstitial, coast.pendingHold)
             when (lastDecision) {
                 GateResume.WAIT_REPUBLISH -> {
-                    prevEl = t
+                    st.prevTickElapsedS = t
                     shown = snapshot ?: GapState.inactive()
                     return
                 }
                 GateResume.REANCHOR -> {
                     g.rebase(riderDist, t - ms)
-                    integLast = riderDist
-                    prevEl = t // load-bearing: without it the re-enable tick freezes/counts the whole stretch
-                    // No integInit reset (production dropped it): REANCHOR ⇒ !pendingHold, the guard passes.
+                    st.lastRiderDist = riderDist
+                    st.prevTickElapsedS = t // load-bearing: without it the re-enable tick freezes/counts the whole stretch
+                    // No st.initialised reset (production dropped it): REANCHOR ⇒ !pendingHold, the guard passes.
                     published = false
                     gateInterstitial = false
                     snapshot = null
                 }
                 GateResume.NORMAL -> Unit
             }
-            val p = prevEl
-            val stoppedNow = speed != null && speed < StalenessLogic.MIN_MOVING_MS
-            if (p != null && t > p &&
-                raceClockFreezes(stoppedNow, coast.settledPending, riderDist > integLast, coast.pendingSample)
-            ) {
-                ms += (t - p); moveStart = ms
-            }
-            prevEl = t
+            val result = advanceRace(
+                st, g, cmp, coast, riderDist, t, speed, 0.0, riderDist * 1e-5, 90.0,
+                fixAgeOk = true, gradeFresh = true, targetSpeedMs = 1.0 / target,
+                historyPace = { hist }, gradePace = { null }, neutralizeHistoryStep = afterVp,
+            )
+            if (result.ticked) afterVp = false
+            // Display stand-in only (the metres below): this tick's un-neutralised pace, as before.
             val paceNow = selectRacePace(cmp, verdictAllowed(true, coast.quality), 1.0 / target, { hist }, { null })
-            if (!coast.pendingHold || !integInit) {
-                val before = g.matchedM
-                val tickPace = paceAfterInterstitial(cmp, afterVp, paceNow)
-                g.onTick(riderDist, 0.0, riderDist * 1e-5, 90.0, t - ms) { _, _, _ -> tickPace }
-                afterVp = false
-                if (cmp == RaceComparator.HISTORY && consumedHistory(before, g.matchedM)) verdictSeen = true
-                integInit = true
-                integLast = riderDist
-            }
-            when (routeGapPublication(cmp, verdictSeen, coast.pendingHold, published)) {
+            when (routeGapPublication(cmp, st.historyVerdictSeen, coast.pendingHold, published)) {
                 RouteGapPublication.INACTIVE -> shown = GapState.inactive()
                 RouteGapPublication.HOLD -> Unit
                 RouteGapPublication.PUBLISH -> {
