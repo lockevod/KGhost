@@ -38,6 +38,9 @@ garmin-fit = { module = "com.garmin:fit", version = "21.218.0" }
 junit = { module = "junit:junit", version.ref = "junit" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutinesTest" }
 mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockitoCore" }
+robolectric = { module = "org.robolectric:robolectric", version = "4.17" }
+androidx-test-core = { module = "androidx.test:core", version = "1.7.0" }
+karoo-ext-testing-robolectric = { module = "com.github.nikosavola.karoo-ext-testing:karoo-ext-testing-robolectric", version = "0.1.1" }
 
 [bundles]
 androidx-lifecycle = ["androidx-lifecycle-runtime-compose", "androidx-lifecycle-viewmodel-compose"]
