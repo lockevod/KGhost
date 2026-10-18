@@ -101,24 +101,13 @@ fun routeGapPublication(
  */
 fun consumedHistory(matchedBefore: Double, matchedAfter: Double): Boolean = matchedAfter > matchedBefore
 
-/**
- * Pace for the first integrator tick after a no-route (VP) interstitial. The route integrator got no ticks
- * while the VP branch raced, so its next dd spans the WHOLE interstitial and would be charged at the one
- * endpoint fix's history pace (Codex: 995 m of VP riding + a 0.4 s/m endpoint = +200 s, where the 5 m of
- * real history earned 1 s) — and that rise in matchedM would certify it as the race's first verdict.
- * A HISTORY race therefore neutral-fills that one step (lead carried unchanged, nothing latched). A TARGET
- * race keeps the target: it is valid on every metre, which is what VP charged meanwhile.
- */
-fun paceAfterInterstitial(comparator: RaceComparator, afterInterstitial: Boolean, pace: Double?): Double? =
-    if (afterInterstitial && comparator == RaceComparator.HISTORY) null else pace
-
 enum class GateResume { NORMAL, WAIT_REPUBLISH, REANCHOR }
 
 /**
- * What a route tick does after the per-profile / master gate kept the extension inert while a race was
- * running ([gateInterstitial]). The integrator got no ticks meanwhile, so its next dd would charge the
- * whole disabled stretch at one endpoint pace (and the race clock would count or freeze all of it). The
- * inactive interval must contribute exactly 0, so the race RE-ANCHORS: lead kept, odometer re-baselined.
+ * What a race tick (route or post-route) does after the per-profile / master gate kept the extension
+ * inert while a race was running ([gateInterstitial]). The integrator got no ticks meanwhile, so its next
+ * dd would charge the whole disabled stretch at one endpoint pace (and the race clock would count or
+ * freeze all of it). The inactive interval must contribute exactly 0, so the race RE-ANCHORS: lead kept, odometer re-baselined.
  * But not while a pending distance interval is unresolved: it straddles the gate, and re-anchoring before
  * it settles would charge its metres after reactivation — so WAIT (republishing the last number).
  */
@@ -127,6 +116,24 @@ fun gateResume(gateInterstitial: Boolean, pendingHold: Boolean): GateResume = wh
     pendingHold -> GateResume.WAIT_REPUBLISH
     else -> GateResume.REANCHOR
 }
+
+enum class NoRouteAction { VP, END_RACE_THEN_VP, POST_WAIT_REPUBLISH, POST_REANCHOR_THEN_STEP, POST_STEP }
+
+/**
+ * The no-route branch's whole decision, in spec order. No integrator → the whole-ride VP race. Fixed pace
+ * selected (![raceEnabled]) ends the B2 race FIRST, so a gate hold can never keep republishing a B2 snapshot
+ * under Fixed pace. Otherwise the race continues post-route, through the same [gateResume] as a route tick.
+ */
+fun noRouteAction(hasIntegrator: Boolean, raceEnabled: Boolean, gateInterstitial: Boolean, pendingHold: Boolean): NoRouteAction =
+    when {
+        !hasIntegrator -> NoRouteAction.VP
+        !raceEnabled -> NoRouteAction.END_RACE_THEN_VP
+        else -> when (gateResume(gateInterstitial, pendingHold)) {
+            GateResume.WAIT_REPUBLISH -> NoRouteAction.POST_WAIT_REPUBLISH
+            GateResume.REANCHOR -> NoRouteAction.POST_REANCHOR_THEN_STEP
+            GateResume.NORMAL -> NoRouteAction.POST_STEP
+        }
+    }
 
 /** What a gate-INACTIVE tick still does before returning. It never STARTS anything (no race, no VP origin)
  *  — it only keeps what already exists resumable: a process restart after riding past
@@ -140,3 +147,10 @@ fun inactiveTick(gateInterstitial: Boolean, hasIntegrator: Boolean, hasVpOrigin:
         refreshVpEvidence = hasVpOrigin,
         refreshCheckpoint = hasIntegrator && hasRoute,
     )
+
+/**
+ * Post-route metres when BEHIND: -(deficitS / ghostTpm) (negative = behind, like GapState.gapDistanceM).
+ * A null / non-positive / non-finite pace has no honest metres → NaN ("unavailable"). deficitS > 0.
+ */
+fun postRouteBehindMetres(deficitS: Double, ghostTpm: Double?): Double =
+    if (ghostTpm == null || !ghostTpm.isFinite() || ghostTpm <= 0.0) Double.NaN else -(deficitS / ghostTpm)

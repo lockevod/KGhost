@@ -65,6 +65,10 @@ class GapStreamDataType(
         /** Extra DataPoint field: 1.0 while the gap is an estimate (GPS loss / off-route), else 0.0. */
         const val FIELD_ESTIMATED = "estimated"
 
+        /** The value to stream, or null when it must not be (inactive / non-finite) → caller emits Searching. */
+        internal fun streamValue(state: GapState, select: (GapState) -> Double): Double? =
+            if (state.active) select(state).takeIf { it.isFinite() } else null
+
         /** The two instances [com.enderthor.kghost.extension.KGhostExtension.types] registers. */
         fun all() = listOf(
             // Engine convention is ahead ⇒ negative time; flip to the human positive-ahead here.
@@ -82,15 +86,16 @@ class GapStreamDataType(
                 // immediately, then one emission per ~1 Hz tick change — no extra throttling needed,
                 // and identical states are deduped by the StateFlow itself.
                 GapStateHolder.state.collect { state ->
+                    val v = streamValue(state, select)
                     emitter.onNext(
-                        if (!state.active) {
+                        if (v == null) {
                             StreamState.Searching
                         } else {
                             StreamState.Streaming(
                                 DataPoint(
                                     dataTypeId,
                                     values = mapOf(
-                                        DataType.Field.SINGLE to select(state),
+                                        DataType.Field.SINGLE to v,
                                         FIELD_ESTIMATED to if (state.estimated) 1.0 else 0.0,
                                     ),
                                     sourceId = extension,

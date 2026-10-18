@@ -16,7 +16,7 @@ const val CHECKPOINT_ELAPSED_SLACK_S = 30.0
  *  Keyed by [rideEpoch] (recordingStartedEpoch); a foreign/absent epoch → fresh start.
  *
  *  [leadS] is the RACE LEAD at checkpoint (= the integrator's `gapTimeS`, +ahead/−behind), NOT the raw
- *  accrued ghostTime: the rider-elapsed origin (`firstMoveElapsedS`) is re-stamped from zero on a resumed
+ *  accrued ghostTime: the rider-elapsed origin (`RaceStepState.moveStartS`) is re-stamped from zero on a resumed
  *  process, so persisting absolute ghostTime would publish a gap inflated by the whole ride elapsed. The
  *  integrator re-anchors to `elapsedS + leadS` at the first resumed tick, reproducing the lead exactly.
  *  [savedAtEpoch] (wall-clock ms) bounds how stale a checkpoint may be to count as a resume. */
