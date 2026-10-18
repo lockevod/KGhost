@@ -2,8 +2,10 @@ package com.enderthor.kghost.extension
 
 import com.enderthor.kghost.engine.GhostCheckpoint
 import com.enderthor.kghost.geo.atomicWriteText
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.File
 
@@ -25,7 +27,7 @@ internal class GhostCheckpointFile(
     private val write: (File, String) -> Unit = { f, s -> atomicWriteText(f, s, fsync = false) },
     private val beforeLock: suspend () -> Unit = {}, // test seam: runs in flush() before the lock is taken
 ) {
-    /** Latest snapshot, built on the Main tick (so the IO writer never reads the integrator's non-volatile
+    /** Latest snapshot, built on the tick (so the IO writer never reads the integrator's non-volatile
      *  scalars cross-thread). */
     @Volatile var pending: GhostCheckpoint? = null
 
@@ -46,9 +48,12 @@ internal class GhostCheckpointFile(
         }
     }
 
-    /** Drops the snapshot, then deletes the file under the writer's lock. Suspends; call on IO, awaited. */
+    /** Drops the snapshot, then deletes the file under the writer's lock. Suspends; call on IO, awaited.
+     *  The locked delete is [NonCancellable]: once invalidate() has started, a caller cancelled while waiting
+     *  for the lock (e.g. a reconnect cancelling the tick mid-race-end) still completes the delete, so the
+     *  ended race's lead can never survive on disk. */
     suspend fun invalidate() {
         pending = null
-        mutex.withLock { runCatching { file.delete() } }
+        withContext(NonCancellable) { mutex.withLock { runCatching { file.delete() } } }
     }
 }

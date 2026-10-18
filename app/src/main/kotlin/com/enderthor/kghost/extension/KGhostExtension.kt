@@ -447,6 +447,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private val rideState = MutableStateFlow<RideState?>(null)
     private var autoDiscovery: AutoDiscovery? = null
     private var tickJob: Job? = null
+    // A tick cancelled by onConnected but not yet joined; the next startTick's coroutine joins it first.
+    @Volatile private var retiredTickJob: Job? = null
     // GPS location consumer. Subscribed only while Recording (started in startTick, cancelled in
     // stopTick/stopTickAndJoin) so GPS fixes aren't consumed when the recorder/projector don't need
     // them. Owned by [scope].
@@ -557,7 +559,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // skipped entirely and the race continues. They are reset only on a genuine new ride (resetRideAnchor,
     // from the Idle ride-end handler and stopTick) and on a genuine route change (the in-tick block).
     // @Volatile because the relaunched tick coroutine may run on a different pool thread than the old one.
-    // (Named exactly as the former locals so the tick body needs no edits; reset by resetRideAnchor().)
+    // (Reset by resetRideAnchor(); the route-local ones also by the tick's route-generation gate.)
     @Volatile private var projectorRoute: PolylinePath? = null
     @Volatile private var projectorPolyline: String? = null
     // Clear generation: clearRouteMode() bumps it, the TICK alone resets the route-local state above when it
@@ -716,8 +718,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
 
     /** Fixed pace selected mid-ride: the B2 race ENDS (a later Your-rides route starts a fresh race at 0). Resets
      *  the integrator group, keeps the ride-level race clock (race.moveStartS — a new race anchors at 0 on its
-     *  first tick anyway), and AWAITS the serialized checkpoint invalidation so no stale lead can be resumed. */
+     *  first tick anyway), and AWAITS the serialized checkpoint invalidation so no stale lead can be resumed.
+     *  The invalidation runs FIRST: if the tick is cancelled before it completes (a reconnect), the integrator
+     *  survives and the next tick ends the race again (idempotent); once started, the delete is NonCancellable. */
     private suspend fun endB2Race(reason: String) {
+        withContext(Dispatchers.IO) { checkpointFile.invalidate() }
         integrator = null
         integPick = null
         integVpTpm = 0.0
@@ -730,7 +735,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         race.resetForNewRace()
         race.lastRiderDist = 0.0
         race.prevTickElapsedS = null
-        withContext(Dispatchers.IO) { checkpointFile.invalidate() }
         Timber.i("KVP B2 race ENDED ($reason)")
     }
 
@@ -753,8 +757,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
 
     /** Flushes the latest tick-built [pendingVpOrigin] atomically. Suspends; call on IO. */
     private suspend fun flushVpOrigin() {
-        val o = pendingVpOrigin ?: return
         checkpointMutex.withLock {
+            // Read INSIDE the lock (as GhostCheckpointFile.flush does) so a delete can't be undone by a stale read.
+            val o = pendingVpOrigin ?: return
             runCatching {
                 atomicWriteText(vpOriginFile, jsonForStorage.encodeToString(VpOrigin.serializer(), o), fsync = false)
             }.onFailure { Timber.w(it, "VP origin write failed") }
@@ -1211,6 +1216,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // rebuilds fresh streams against the new binding via startTick(). routeMode is in-memory and
         // binding-independent, so it is preserved (no needless re-match). On the FIRST connect both
         // jobs are null, so this is a no-op.
+        // Single tick owner: the cancelled job is NOT joined here (onConnected isn't suspending); it is parked
+        // in retiredTickJob and the replacement tick joins it before touching any state, so the old iteration's
+        // non-suspending tail can't write crossedFinish/race/integrator after the new tick's generation reset.
+        retiredTickJob = tickJob ?: retiredTickJob
         tickJob?.cancel()
         tickJob = null
         locationJob?.cancel()
@@ -1284,7 +1293,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Awaited and under the writer's lock: an in-flight flush can't resurrect it afterwards.
                     if (sawActiveRide) {
                         withContext(Dispatchers.IO) { checkpointFile.invalidate() }
-                        runCatching { vpOriginFile.delete() }
+                        withContext(Dispatchers.IO) { checkpointMutex.withLock { runCatching { vpOriginFile.delete() } } }
                     }
                     else Timber.i("KVP Idle before any active ride in this process — checkpoint kept for a resume")
                     GapStateHolder.clear()
@@ -2279,7 +2288,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // rider disabling the profile mid-ride is indistinguishable from a dead tick in the ride log.
         var lastGateLog: String? = null
 
+        val prev = retiredTickJob
+        retiredTickJob = null
         tickJob = scope.launch(Dispatchers.Default) {
+            prev?.join() // single tick owner: the reconnect-cancelled tick finishes before we touch any state
             // Probe the RAW DISTANCE arrivals here: combine()+sample(REFRESH_MS) below discards this
             // timing, and it is the timing that decides whether a repeated sampled value is a genuine
             // freeze or just a stream slower than the tick.
@@ -2727,8 +2739,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         //
                         // Route-change handling: a NEW polyline re-bootstraps only the route-SPECIFIC marker/finish
                         // state (the integrator + race clock are KEPT, so the accrued lead CARRIES — see the block
-                        // below); a same-route re-match (a mid-ride settings change, a new path instance for the
-                        // SAME polyline) changes nothing.
+                        // below); a same-route re-match from a mid-ride settings change (FULL_REMATCH) clears route mode, and the
+                        // generation gate resets the route-local marker/finish state when the re-matched mode arrives
+                        // (a pick-only REPICK keeps it; the integrator carries the lead either way).
                         // A route tick: the race's GradePace follows this route's model (null included), and a later
                         // route end re-enters post-route (invalidating the checkpoint again).
                         raceGradePace = rm.gradePace
@@ -2935,7 +2948,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         )
                         // Persist the scalar race state ~every CHECKPOINT_INTERVAL_MS so a mid-ride power-off /
                         // crash resumes with the LEAD (integ.gapTimeS), not the raw ghostTime. The snapshot is
-                        // built HERE (Main) so the IO writer never reads the integrator's non-volatile scalars
+                        // built HERE (on the tick) so the IO writer never reads the integrator's non-volatile scalars
                         // cross-thread; the actual write is off-Main + serialized.
                         // A pick-only repick preserves the integrator; keep checkpoint metadata
                         // aligned with the live settings so restart can restore the preserved lead.
@@ -3195,19 +3208,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // missing target blanks — EXCEPT after a sustained (~3 min) loss, where
                         // handleGpsLoss() gives up and we blank rather than show a wild extrapolation.
                         publishSegment(null, fireExit = false)
-                        // Belt: with no integrator the gate never raises the interstitial (inactiveTick snapshots
-                        // only a running race) and endB2Race clears it, so this only consumes a stray flag — the
-                        // rebase is a no-op without an integrator.
-                        if (gateResume(gateInterstitial, coast.pendingHold) == GateResume.REANCHOR) {
-                            val ms = race.moveStartS
-                            if (ms != null) {
-                                integrator?.rebase(coast.effectiveDistanceM, elapsedS - ms)
-                                race.lastRiderDist = coast.effectiveDistanceM
-                                race.prevTickElapsedS = elapsedS
-                            }
-                            gateInterstitial = false
-                            gateSnapshot = null
-                        }
                         mapGhostState = null // VP mode: no map ghost (the loop hides it)
                         // ① is reached ONLY with no route: this is the `else` of `if (rm != null)`, so the
                         // compiler proved the old `if (rm != null)` here always false. Under the path-

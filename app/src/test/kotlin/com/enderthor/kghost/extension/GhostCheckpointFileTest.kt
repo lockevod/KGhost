@@ -70,6 +70,39 @@ class GhostCheckpointFileTest {
     }
 
     @Test
+    fun `invalidate still deletes when its caller is cancelled while waiting for the lock`() = runBlocking {
+        val target = File(tmp.root, "cp.json")
+        val mutex = Mutex()
+        val store = GhostCheckpointFile(target, mutex)
+        store.pending = cp("A"); store.flush()
+        assertTrue(target.exists())
+        mutex.lock() // the test holds the shared writer lock
+        // UNDISPATCHED: runs here until it suspends at the held mutex, so the cancel below lands mid-wait.
+        val inv = launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) { store.invalidate() }
+        inv.cancel() // a reconnect cancelling the tick mid-race-end
+        mutex.unlock()
+        inv.join()
+        assertFalse(target.exists())
+    }
+
+    @Test
+    fun `a flush that read pending outside the lock would resurrect - reading inside prevents it`() = runBlocking {
+        val target = File(tmp.root, "cp.json")
+        val mutex = Mutex()
+        var beforeLockRan = false
+        val store = GhostCheckpointFile(target, mutex, beforeLock = { beforeLockRan = true })
+        store.pending = cp("A")
+        mutex.lock()
+        // UNDISPATCHED: beforeLock completes and flush suspends at the held mutex before we go on.
+        val flush = launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) { store.flush() }
+        assertTrue(beforeLockRan)
+        store.pending = null // what invalidate() does first
+        mutex.unlock()
+        flush.join()
+        assertFalse(target.exists())
+    }
+
+    @Test
     fun `invalidate is awaited before a newer checkpoint is published`() = runBlocking {
         val target = File(tmp.root, "cp.json")
         val store = GhostCheckpointFile(target, Mutex())

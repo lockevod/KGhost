@@ -2,8 +2,8 @@ package com.enderthor.kghost.engine
 
 import com.enderthor.kghost.data.sanitizeTargetMs
 
-/** The five fields the route branch mutates per race tick (today KGhostExtension fields
- *  firstMoveElapsedS, prevTickElapsedS, integLastRiderDist, integInitialised, historyVerdictSeen). */
+/** The five fields the route branch mutates per race tick: [moveStartS], [prevTickElapsedS],
+ *  [lastRiderDist], [initialised], [historyVerdictSeen]. */
 class RaceStepState {
     @Volatile var moveStartS: Double? = null
     @Volatile var prevTickElapsedS: Double? = null
