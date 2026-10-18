@@ -3558,10 +3558,15 @@ internal suspend fun awaitRetiredTicks(pending: List<Job>) {
     currentCoroutineContext().ensureActive()
 }
 
-/** Idle path: join every retired tick (NonCancellable, so a cancel can't skip one), then forget the finished. */
+/**
+ * Idle path: join every retired tick (NonCancellable, so a cancel can't skip one), then forget the finished.
+ * Then [ensureActive]: returning from a same-dispatcher withContext does not re-check cancellation, so
+ * without it a cancelled Idle handler would carry on and tear down the replacement ride's collectors.
+ */
 internal suspend fun drainRetiredTicks(retired: MutableList<Job>) {
     withContext(NonCancellable) { retired.toList().forEach { it.join() } }
     retired.removeAll { it.isCompleted }
+    currentCoroutineContext().ensureActive()
 }
 
 /** What a mid-ride settings change has to do to the current route match. */

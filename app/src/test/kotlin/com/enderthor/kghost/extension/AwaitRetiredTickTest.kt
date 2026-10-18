@@ -115,4 +115,25 @@ class AwaitRetiredTickTest {
         assertFalse(drainReturnedWhileARunning)
         assertTrue("finished ticks are forgotten", retired.isEmpty())
     }
+
+    /** A cancelled Idle drain must stop after the join, not run the teardown that follows it. */
+    @Test
+    fun cancelledDrainDoesNotRunWhatFollowsIt() = runTest {
+        val releaseA = CompletableDeferred<Unit>()
+        stubbornTick(releaseA) { }
+
+        var ranAfterDrain = false
+        val idle = launch { drainRetiredTicks(retired); ranAfterDrain = true }
+        advanceUntilIdle()
+        idle.cancel()
+        advanceUntilIdle()
+        try {
+            assertFalse("still draining while A runs", idle.isCompleted)
+        } finally {
+            releaseA.complete(Unit)
+        }
+        advanceUntilIdle()
+        assertTrue(idle.isCancelled)
+        assertFalse("a cancelled caller must not continue past the drain", ranAfterDrain)
+    }
 }
