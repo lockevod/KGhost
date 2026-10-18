@@ -31,4 +31,15 @@ object GapDisplayLogic {
         gapTimeS < 0.0 -> GapStatus.AHEAD   // ahead ⇒ negative time gap
         else -> GapStatus.BEHIND
     }
+
+    /**
+     * Ghost offset in the graphic window, -1..1: -[gapDistanceM] / [windowM], clamped. Non-finite metres
+     * (post-route, no pace known) → +1.0 (ghost at the AHEAD edge) when [gapTimeS] > 0 (engine sign:
+     * positive = behind), else 0.0.
+     */
+    fun ghostWindowFrac(gapDistanceM: Double, gapTimeS: Double, windowM: Double): Double = when {
+        gapDistanceM.isFinite() -> (-gapDistanceM / windowM).coerceIn(-1.0, 1.0)
+        gapTimeS > 0.0 -> 1.0
+        else -> 0.0
+    }
 }

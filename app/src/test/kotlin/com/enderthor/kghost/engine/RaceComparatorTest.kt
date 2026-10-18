@@ -135,4 +135,14 @@ class RaceComparatorTest {
         assertEquals(0.2, paceAfterInterstitial(RaceComparator.TARGET, true, 0.2)!!, 0.0)
         assertEquals(0.4, paceAfterInterstitial(RaceComparator.HISTORY, false, 0.4)!!, 0.0)
     }
+
+    @Test fun `post-route behind metres are deficit times ghost pace, negative`() {
+        assertEquals(-414.0, postRouteBehindMetres(60.0, 1 / 6.9), 0.5)
+    }
+
+    @Test fun `post-route behind metres are NaN without a usable pace`() {
+        assertTrue(postRouteBehindMetres(60.0, null).isNaN())
+        assertTrue(postRouteBehindMetres(60.0, 0.0).isNaN())
+        assertTrue(postRouteBehindMetres(60.0, Double.NaN).isNaN())
+    }
 }

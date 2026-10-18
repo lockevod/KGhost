@@ -39,4 +39,14 @@ class GapDisplayLogicTest {
         assertEquals(GapStatus.BEHIND, GapDisplayLogic.gapStatus(6.0, epsS = 5.0))
         assertEquals(GapStatus.AHEAD, GapDisplayLogic.gapStatus(-6.0, epsS = 5.0))
     }
+
+    @Test fun `ghost window fraction is the clamped negated metres over the window`() {
+        assertEquals(0.5, GapDisplayLogic.ghostWindowFrac(-100.0, 30.0, 200.0), 0.0)
+        assertEquals(-1.0, GapDisplayLogic.ghostWindowFrac(500.0, -30.0, 200.0), 0.0)
+    }
+
+    @Test fun `non-finite metres put the ghost at the ahead edge only when behind`() {
+        assertEquals(1.0, GapDisplayLogic.ghostWindowFrac(Double.NaN, 60.0, 200.0), 0.0)
+        assertEquals(0.0, GapDisplayLogic.ghostWindowFrac(Double.NaN, -5.0, 200.0), 0.0)
+    }
 }

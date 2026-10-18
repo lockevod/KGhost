@@ -140,3 +140,10 @@ fun inactiveTick(gateInterstitial: Boolean, hasIntegrator: Boolean, hasVpOrigin:
         refreshVpEvidence = hasVpOrigin,
         refreshCheckpoint = hasIntegrator && hasRoute,
     )
+
+/**
+ * Post-route metres when BEHIND: -(deficitS / ghostTpm) (negative = behind, like GapState.gapDistanceM).
+ * A null / non-positive / non-finite pace has no honest metres → NaN ("unavailable"). deficitS > 0.
+ */
+fun postRouteBehindMetres(deficitS: Double, ghostTpm: Double?): Double =
+    if (ghostTpm == null || !ghostTpm.isFinite() || ghostTpm <= 0.0) Double.NaN else -(deficitS / ghostTpm)

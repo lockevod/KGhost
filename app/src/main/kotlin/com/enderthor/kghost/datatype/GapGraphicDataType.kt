@@ -439,7 +439,7 @@ class GapGraphicDataType(
 
             // Your dot fixed at centre; ghost offset by gapDistanceM within ±WINDOW_M.
             // gapDistanceM > 0 means you are ahead → ghost is behind you (to the left).
-            val frac = (-state.gapDistanceM / WINDOW_M).coerceIn(-1.0, 1.0) // -1..1, 0 = centre
+            val frac = GapDisplayLogic.ghostWindowFrac(state.gapDistanceM, state.gapTimeS, WINDOW_M) // -1..1, 0 = centre
             val youX = left + span * 0.5f
             val ghostX = (left + span * (0.5 + 0.5 * frac)).toFloat()
 
