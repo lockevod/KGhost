@@ -49,6 +49,10 @@ import com.enderthor.kghost.engine.raceCheckpoint
 import com.enderthor.kghost.engine.GhostIntegrator
 import com.enderthor.kghost.engine.RaceStepState
 import com.enderthor.kghost.engine.advanceRace
+import com.enderthor.kghost.engine.NoRouteAction
+import com.enderthor.kghost.engine.noRouteAction
+import com.enderthor.kghost.engine.postRouteGap
+import com.enderthor.kghost.engine.postRouteStep
 import com.enderthor.kghost.engine.GradePace
 import com.enderthor.kghost.engine.PacePatch
 import com.enderthor.kghost.engine.PerRouteAggregate
@@ -612,8 +616,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // lap (not just its first half). Reset at ride end / route change.
     @Volatile private var lap2Started: Boolean = false
     // B2 path-following ghost race engine (accrues historical time per ridden metre on the ACTUAL path).
-    // Built lazily at first movement; nulled at ride end/stop. KEPT across a reroute — it is route-agnostic,
-    // so the accrued lead carries to the new polyline (only the route-specific marker anchor re-bootstraps).
+    // Built lazily at first movement; nulled at ride end/stop and when Fixed pace ends the race (endB2Race). KEPT
+    // across a reroute and after the route ends (post-route) — it is route-agnostic, so the accrued lead carries
+    // to the new polyline or to no route at all (only the route-specific marker anchor re-bootstraps).
     @Volatile private var integrator: GhostIntegrator? = null
     // race.lastRiderDist: the last odometer distance handed to the integrator this ride — persisted in the
     // checkpoint so a mid-ride power-off resumes with the accrued lead (GhostIntegrator keeps lastRiderDist private).
@@ -641,11 +646,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // Whether this race has published a live gap. The pendingHold freeze only holds a number THIS race
     // published — otherwise a restored lead (or the previous mode's stale value) would sit behind it.
     @Volatile private var integPublished: Boolean = false
-    // The VP branch raced while this integrator existed → its next onTick spans the interstitial (see
-    // paceAfterInterstitial). Cleared once an onTick has actually run.
-    @Volatile private var integAfterVp: Boolean = false
-    // The per-profile / master gate kept the extension inert while a route race was running → the next
-    // active route tick must re-anchor the integrator (see engine.gateResume) so the disabled stretch
+    // The GradePace model the race used on its last route tick (null included) — post-route HISTORY ticks race
+    // it (PacePatch is route-only). Reset with the integrator (resetRideAnchor, endB2Race).
+    @Volatile private var raceGradePace: GradePace? = null
+    // Whether the post-route race has started since the last route tick: its first tick invalidates the
+    // route-keyed checkpoint (no stale route lead survives into post-route). Re-armed by every route tick.
+    @Volatile private var postRouteEntered: Boolean = false
+    // The per-profile / master gate kept the extension inert while a B2 race was running → the next
+    // active race tick (route or post-route) must re-anchor the integrator (see engine.gateResume) so the disabled stretch
     // contributes 0. [gateSnapshot] = the last PUBLISHED gap (seconds AND route-derived metres), republished
     // while that re-anchor waits on an unresolved pending hold; null = keep the field blank ("---").
     @Volatile private var gateInterstitial: Boolean = false
@@ -697,12 +705,33 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         integVpTpm = 0.0
         integComparator = null
         integPublished = false
-        integAfterVp = false
         gateInterstitial = false
         gateSnapshot = null
         lastCheckpointMs = 0L
         checkpointFile.pending = null
         lastReliableGhostRouteDist = null
+        raceGradePace = null
+        postRouteEntered = false
+    }
+
+    /** Fixed pace selected mid-ride: the B2 race ENDS (a later Your-rides route starts a fresh race at 0). Resets
+     *  the integrator group, keeps the ride-level race clock (race.moveStartS — a new race anchors at 0 on its
+     *  first tick anyway), and AWAITS the serialized checkpoint invalidation so no stale lead can be resumed. */
+    private suspend fun endB2Race(reason: String) {
+        integrator = null
+        integPick = null
+        integVpTpm = 0.0
+        integComparator = null
+        integPublished = false
+        gateInterstitial = false
+        gateSnapshot = null
+        lastCheckpointMs = 0L
+        raceGradePace = null
+        race.resetForNewRace()
+        race.lastRiderDist = 0.0
+        race.prevTickElapsedS = null
+        withContext(Dispatchers.IO) { checkpointFile.invalidate() }
+        Timber.i("KVP B2 race ENDED ($reason)")
     }
 
     // ---- B2 ghost checkpoint (scalar resume state) ---------------------------------------------
@@ -1860,7 +1889,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // A cancellation (superseding route / teardown) must propagate, not be swallowed
                     // as a match failure — otherwise clearRouteMode() would wipe the NEW route's state.
                     if (e is kotlinx.coroutines.CancellationException) throw e
-                    Timber.w(e, "route matching failed; staying in ① VP mode")
+                    Timber.w(
+                        e,
+                        if (integrator != null) "route matching failed; the B2 race continues post-route"
+                        else "route matching failed; staying in ① VP mode",
+                    )
                     if (lastMatchedPolyline == mine) clearRouteMode()
                 }
             }
@@ -2537,6 +2570,45 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         mapGhostState = null
                         GapStateHolder.clear()
                     }
+                    // Back from a gate-inactive stretch (engine.gateResume), shared by the route and post-route
+                    // ticks. WAIT: a pending interval still straddles the gate → republish the last published
+                    // number and skip the race this tick. REANCHOR: the integrator got no ticks, so its next dd
+                    // would charge the whole stretch at one endpoint pace — rebase instead (lead kept in seconds
+                    // AND metres: the race is translated across the stretch, nothing earned or lost).
+                    fun republishGateSnapshot() {
+                        race.prevTickElapsedS = elapsedS
+                        gateSnapshot?.let { GapStateHolder.update(it) } ?: GapStateHolder.clear()
+                        // The snapshot's SEG tag too (the inert branch cleared it), as the PUBLISH path sets it.
+                        if (gateSnapshot != null && integComparator == RaceComparator.HISTORY) SegmentInfoHolder.set(B2_ON_HISTORY)
+                    }
+                    fun reanchorAfterGate(riderDist: Double, moveStart: Double) {
+                        integrator?.rebase(riderDist, elapsedS - moveStart)
+                        // Redundant today (prevTickElapsedS = elapsedS skips this tick's freeze check and the
+                        // race step re-sets it) — kept so the baseline never reads the pre-disable odometer.
+                        race.lastRiderDist = riderDist
+                        race.prevTickElapsedS = elapsedS // this tick must not freeze the race clock either
+                        // No race.initialised reset: rebase leaves no re-anchor pending, and REANCHOR implies
+                        // !pendingHold (gateResume), so the onTick guard passes anyway (rig + `pure decision`).
+                        // Redundant too (publication can't HOLD with !pendingHold); kept as a belt.
+                        integPublished = false
+                        gateInterstitial = false
+                        gateSnapshot = null
+                    }
+                    // The B2 race's publication, route and post-route alike. A HISTORY race that has not consumed a
+                    // single history metre shows "---", not a 0 that only means "nothing to compare" — ahead of the
+                    // hold, else the previous mode's stale number survives a VP → route switch. Otherwise freeze the
+                    // WHOLE published number while a hold is unresolved, once this race has published (so a
+                    // restored lead still shows on the first tick).
+                    fun publishRaceGap(cmp: RaceComparator, gap: GapState) {
+                        when (routeGapPublication(cmp, race.historyVerdictSeen, coast.pendingHold, integPublished)) {
+                            RouteGapPublication.INACTIVE -> GapStateHolder.clear()
+                            RouteGapPublication.HOLD -> Unit
+                            RouteGapPublication.PUBLISH -> {
+                                GapStateHolder.update(gap)
+                                integPublished = true
+                            }
+                        }
+                    }
                     // Computes the ① VP gap (ridden distance vs race-elapsed at the fixed target pace).
                     // [raceElapsedS] is elapsed since FIRST MOVEMENT, not ride-start, so the ghost-pace
                     // race begins when the rider actually rolls (fair start) — the caller only reaches
@@ -2657,6 +2729,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // state (the integrator + race clock are KEPT, so the accrued lead CARRIES — see the block
                         // below); a same-route re-match (a mid-ride settings change, a new path instance for the
                         // SAME polyline) changes nothing.
+                        // A route tick: the race's GradePace follows this route's model (null included), and a later
+                        // route end re-enters post-route (invalidating the checkpoint again).
+                        raceGradePace = rm.gradePace
+                        postRouteEntered = false
                         if (routeGen.needsReset(rm.clearGen)) {
                             // First route since a clear (even the IDENTICAL polyline: crossedFinish/lap2Started
                             // would otherwise hide the reloaded marker). Integrator, race and clock are kept.
@@ -2708,31 +2784,14 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             return@runCatching
                         }
                         val riderDist = coast.effectiveDistanceM
-                        // Back from a gate-inactive stretch: the integrator got no ticks, so its next dd would
-                        // charge the whole stretch at one endpoint pace — re-anchor instead (lead kept in seconds
-                        // AND metres: rebase translates the race across the stretch, nothing earned or lost), but
-                        // only once no pending interval straddles the gate.
+                        // Back from a gate-inactive stretch: re-anchor (see reanchorAfterGate), but only once no
+                        // pending interval straddles the gate.
                         when (gateResume(gateInterstitial, coast.pendingHold)) {
                             GateResume.WAIT_REPUBLISH -> {
-                                race.prevTickElapsedS = elapsedS
-                                gateSnapshot?.let { GapStateHolder.update(it) } ?: GapStateHolder.clear()
-                                // The snapshot's SEG tag too (the inert branch cleared it), as the PUBLISH path sets it.
-                                if (gateSnapshot != null && integComparator == RaceComparator.HISTORY) SegmentInfoHolder.set(B2_ON_HISTORY)
+                                republishGateSnapshot()
                                 return@runCatching
                             }
-                            GateResume.REANCHOR -> {
-                                integrator?.rebase(riderDist, elapsedS - moveStart0)
-                                // Redundant today (prevTickElapsedS = elapsedS skips this tick's freeze check and the
-                                // onTick below re-sets it) — kept so the baseline never reads the pre-disable odometer.
-                                race.lastRiderDist = riderDist
-                                race.prevTickElapsedS = elapsedS // this tick must not freeze the race clock either
-                                // No race.initialised reset: rebase leaves no re-anchor pending, and REANCHOR implies
-                                // !pendingHold (gateResume), so the onTick guard passes anyway (rig + `pure decision`).
-                                // Redundant too (publication can't HOLD with !pendingHold); kept as a belt.
-                                integPublished = false
-                                gateInterstitial = false
-                                gateSnapshot = null
-                            }
+                            GateResume.REANCHOR -> reanchorAfterGate(riderDist, moveStart0)
                             GateResume.NORMAL -> Unit
                         }
                         // Build the integrator ONCE, at first movement — snapshot the pick (integVpTpm is also
@@ -2749,7 +2808,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             // A fresh race races the route's comparator; a resumed one (below) its checkpoint's.
                             integComparator = rm.comparator
                             integPublished = false
-                            integAfterVp = false
                             lastCheckpointMs = 0L
                             // Resume an interrupted ride WITH the accrued lead: restore the persisted checkpoint
                             // iff same pick, RECENT enough, AND the same ride ([GhostCheckpoint.continuesRide]:
@@ -2874,11 +2932,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             fixAgeOk = fixAgeOk, gradeFresh = gradeFresh, targetSpeedMs = eff.targetSpeedMs,
                             historyPace = { patch?.pace(gLat, gLng, gHdg, eff.ghostPick) },
                             gradePace = { lastGradePct?.let { rm.gradePace?.pace(it, eff.ghostPick) } },
-                            neutralizeHistoryStep = integAfterVp,
                         )
-                        // Cleared only once an onTick actually RAN: clearing it on a skipped (pendingHold) tick would
-                        // let the next real onTick charge the whole interstitial at one history pace.
-                        if (result.ticked) integAfterVp = false
                         // Persist the scalar race state ~every CHECKPOINT_INTERVAL_MS so a mid-ride power-off /
                         // crash resumes with the LEAD (integ.gapTimeS), not the raw ghostTime. The snapshot is
                         // built HERE (Main) so the IO writer never reads the integrator's non-volatile scalars
@@ -3035,22 +3089,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             markerReliable -> ghostRouteDist
                             else -> lastReliableGhostRouteDist // off-route: hold the last reliable position
                         }
-                        // A HISTORY race that has not consumed a single history metre shows "---", not a 0 that
-                        // only means "nothing to compare" — ahead of the hold, else the previous mode's stale
-                        // number survives a VP → route switch. Otherwise freeze the WHOLE published number while
-                        // a hold is unresolved, once this race has published (so a restored lead still shows on
-                        // the first tick). Freezing gapTimeS alone is not enough: while BEHIND, gapDistM is
-                        // recomputed from rg.distanceAt(rg.timeAt(riderR) - gapTimeS), and a fresh fix moves
-                        // riderR, so the distance field would drift mid-hold. The marker is deliberately NOT
-                        // frozen — it keeps tracking the rider.
-                        when (routeGapPublication(raceCmp, race.historyVerdictSeen, coast.pendingHold, integPublished)) {
-                            RouteGapPublication.INACTIVE -> GapStateHolder.clear()
-                            RouteGapPublication.HOLD -> Unit
-                            RouteGapPublication.PUBLISH -> {
-                                GapStateHolder.update(gap)
-                                integPublished = true
-                            }
-                        }
+                        // Publication policy: see publishRaceGap. Freezing gapTimeS alone during a hold is not
+                        // enough: while BEHIND, gapDistM is recomputed from rg.distanceAt(rg.timeAt(riderR) - gapTimeS),
+                        // and a fresh fix moves riderR, so the distance field would drift mid-hold. The marker is
+                        // deliberately NOT frozen — it keeps tracking the rider.
+                        publishRaceGap(raceCmp, gap)
                         // SEG/GP tag names the race's COMPARATOR (SEG = racing your past self, GP = racing the
                         // Ghost-Pace target), not this tick's source: stable, no per-tick flicker, and it fixes
                         // 1.2.0 tagging target-paced ticks SEG. The field reads only non-null (SEG) — the label is
@@ -3085,19 +3128,73 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         }
                         return@runCatching
                     } else {
-                        // ① Ghost Pace mode — no route (or empty segments). coast was already
+                        // No route. The whole decision is engine.noRouteAction: an integrator that survived the route
+                        // (finish, cancel, match failure) keeps racing POST-ROUTE — same integrator, lead, latched
+                        // comparator and race clock, no jump — unless Fixed pace is now selected, which ENDS it.
+                        // With no integrator (a ride that never had a route) this is the whole-ride ① VP race.
+                        val noRoute = noRouteAction(integrator != null, eff.raceEnabled, gateInterstitial, coast.pendingHold)
+                        when (noRoute) {
+                            NoRouteAction.VP -> Unit
+                            NoRouteAction.END_RACE_THEN_VP -> endB2Race("fixed pace selected")
+                            NoRouteAction.POST_WAIT_REPUBLISH, NoRouteAction.POST_REANCHOR_THEN_STEP, NoRouteAction.POST_STEP -> {
+                                // First post-route tick: drop the route-keyed checkpoint (awaited, serialized with the
+                                // writer) BEFORE anything is stepped or published, so the crash boundary is the route
+                                // race's last state and no stale route lead is resumed later.
+                                if (!postRouteEntered) {
+                                    withContext(Dispatchers.IO) { checkpointFile.invalidate() }
+                                    postRouteEntered = true
+                                }
+                                if (noRoute == NoRouteAction.POST_WAIT_REPUBLISH) {
+                                    republishGateSnapshot()
+                                    return@runCatching
+                                }
+                                val integ = checkNotNull(integrator)
+                                val raceCmp = checkNotNull(integComparator) { "integrator without a latched comparator" }
+                                val moveStart = checkNotNull(race.moveStartS) { "integrator without a race clock" }
+                                val riderDist = coast.effectiveDistanceM
+                                if (noRoute == NoRouteAction.POST_REANCHOR_THEN_STEP) reanchorAfterGate(riderDist, moveStart)
+                                // Same fix/gradient inputs as the route branch (see its freshness-gate comments); the
+                                // gates themselves are applied inside the engine step, never here.
+                                val fix = lastFix
+                                val fixAgeOk = fix != null && SystemClock.elapsedRealtime() - fix.ms <= GPS_FIX_FRESH_MS
+                                val gradeFresh = SystemClock.elapsedRealtime() - lastGradeMs <= GPS_FIX_FRESH_MS
+                                val step = postRouteStep(
+                                    st = race, integ = integ, comparator = raceCmp, coast = coast,
+                                    riderDist = riderDist, elapsedS = elapsedS, speedMs = speedMs,
+                                    lat = fix?.lat ?: Double.NaN, lng = fix?.lng ?: Double.NaN, hdg = fix?.headingDeg ?: Double.NaN,
+                                    fixAgeOk = fixAgeOk, gradeFresh = gradeFresh, targetSpeedMs = eff.targetSpeedMs,
+                                    gradePace = { lastGradePct?.let { raceGradePace?.pace(it, eff.ghostPick) } },
+                                )
+                                val gap = postRouteGap(integ, raceCmp, step, riderDist, eff.targetSpeedMs,
+                                    estimated = coast.quality == CoastQuality.LONG_LOSS)
+                                publishRaceGap(raceCmp, gap)
+                                publishSegment(null, fireExit = false) // route gone: silent clear, as on route loss
+                                if (raceCmp == RaceComparator.HISTORY) SegmentInfoHolder.set(B2_ON_HISTORY) else SegmentInfoHolder.clear()
+                                mapGhostState = null // no route frame to place the marker in
+                                val nowMs = SystemClock.elapsedRealtime()
+                                if (nowMs - lastDiagLogMs >= diagLogMs) {
+                                    lastDiagLogMs = nowMs
+                                    Timber.d(
+                                        "KVP tick post-route(B2): gapT=${"%.0f".format(gap.gapTimeS)}s " +
+                                            "gapD=${"%.0f".format(gap.gapDistanceM)}m ${if (gap.ahead) "AHEAD" else "BEHIND"} " +
+                                            "seg=${step.tag} cmp=$raceCmp verdictSeen=${race.historyVerdictSeen} " +
+                                            "elapsed=${"%.0f".format(elapsedS)} fresh=${!gap.estimated} " +
+                                            "speed=${speedMs?.let { "%.1f".format(it) } ?: "null"}",
+                                    )
+                                }
+                                return@runCatching
+                            }
+                        }
+                        // ① Ghost Pace mode — no route and no B2 race. coast was already
                         // updated above; the helper coasts the DISTANCE stream at the last known speed
                         // during a GPS gap (keeping the gap accurate as an estimate) and treats a genuine
                         // stop as legitimate (frozen distance). It never blanks for a GPS loss — only a
                         // missing target blanks — EXCEPT after a sustained (~3 min) loss, where
                         // handleGpsLoss() gives up and we blank rather than show a wild extrapolation.
                         publishSegment(null, fireExit = false)
-                        // Re-enabled with no route: consume the gate interstitial HERE (the first active tick),
-                        // else it survives and a later route load REANCHORs over this VP stretch, discarding
-                        // what integAfterVp lets it earn. Translate the race across the disabled stretch only
-                        // and align the route clock/odometer with it, as the route branch's REANCHOR does — and,
-                        // like it, only once no pending interval straddles the gate (else its settled metres are
-                        // charged after a route reload); until then the flag stays for a later tick to consume.
+                        // Belt: with no integrator the gate never raises the interstitial (inactiveTick snapshots
+                        // only a running race) and endB2Race clears it, so this only consumes a stray flag — the
+                        // rebase is a no-op without an integrator.
                         if (gateResume(gateInterstitial, coast.pendingHold) == GateResume.REANCHOR) {
                             val ms = race.moveStartS
                             if (ms != null) {
@@ -3108,11 +3205,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             gateInterstitial = false
                             gateSnapshot = null
                         }
-                        // The VP branch now owns the holder: a route that loads next (the integrator survives
-                        // the interstitial) must publish before its hold may freeze anything, else this VP
-                        // number stays on screen for a whole stop (pendingHold persists while stationary).
-                        integPublished = false
-                        if (integrator != null) integAfterVp = true
                         mapGhostState = null // VP mode: no map ghost (the loop hides it)
                         // ① is reached ONLY with no route: this is the `else` of `if (rm != null)`, so the
                         // compiler proved the old `if (rm != null)` here always false. Under the path-

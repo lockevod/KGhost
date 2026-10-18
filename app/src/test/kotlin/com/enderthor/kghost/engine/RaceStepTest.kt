@@ -15,12 +15,12 @@ class RaceStepTest {
         /** Feeds coast then steps the race; returns the result. */
         fun tick(
             raw: Double, t: Double, speed: Double? = 5.0, fixOk: Boolean = true, gradeFresh: Boolean = true,
-            hist: Double? = null, grade: () -> Double? = { null }, target: Double = 5.0, neutralize: Boolean = false,
+            hist: Double? = null, grade: () -> Double? = { null }, target: Double = 5.0,
         ): RaceStepResult {
             coast.update(raw, speed, t)
             return advanceRace(
                 st, integ, cmp, coast, coast.effectiveDistanceM, t, speed, 0.0, 0.0, 0.0,
-                fixOk, gradeFresh, target, { hist }, grade, neutralize,
+                fixOk, gradeFresh, target, { hist }, grade,
             )
         }
     }
@@ -89,18 +89,6 @@ class RaceStepTest {
         val res = r.tick(50.0, 10.0, target = 5.0)
         assertEquals("TGT", res.tag)
         assertEquals(0.0, r.integ.gapTimeS, 0.01)
-    }
-
-    @Test fun `neutralizeHistoryStep neutral-fills one HISTORY step only`() {
-        val r = Rig()
-        r.tick(0.0, 0.0)
-        val first = r.tick(50.0, 10.0, hist = 0.1, neutralize = true)
-        assertNull(first.pace)
-        assertEquals(0.0, r.integ.gapTimeS, 1e-9)
-        assertFalse(r.st.historyVerdictSeen)
-        val second = r.tick(100.0, 20.0, hist = 0.1)
-        assertEquals(0.1, second.pace!!, 1e-12)
-        assertTrue(r.st.historyVerdictSeen)
     }
 
     @Test fun `ticked is true normally and pace is null under a stale fix`() {

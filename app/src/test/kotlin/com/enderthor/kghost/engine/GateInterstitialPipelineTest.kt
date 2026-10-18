@@ -14,9 +14,10 @@ import org.junit.Test
  *
  * [Rig] replicates the route tick in production order — coast.update BEFORE the gate, the gate's inactive
  * branch (snapshot + interstitial), then [gateResume], the shared race step [advanceRace] (freeze, pace
- * choice, guarded onTick, verdict latch) and [routeGapPublication]. The extension's wiring itself has no unit
- * harness: [Rig.tick] is its mirror, so the decision ([gateResume]), the race step and the publication policy
- * are shared with production, the field assignments around them are replicated.
+ * choice, guarded onTick, verdict latch) and [routeGapPublication]; with no route, [noRouteAction] and the
+ * post-route step [postRouteStep]. The extension's wiring itself has no unit harness: [Rig.tick] is its
+ * mirror, so the decisions, the race step and the publication policy are shared with production, the field
+ * assignments around them are replicated.
  */
 class GateInterstitialPipelineTest {
 
@@ -27,12 +28,12 @@ class GateInterstitialPipelineTest {
         private var published = false
         private var gateInterstitial = false
         private var snapshot: GapState? = null
-        private var afterVp = false
-        /** False = no route loaded: the active tick takes the VP branch (production's `else` of `rm != null`). */
+        /** False = no route loaded: the active tick takes the no-route branch (production's `else` of `rm != null`). */
         var routeLoaded = true
         /** What the field shows (GapStateHolder). gapDistanceM stands in for the route-derived metres. */
         var shown: GapState = GapState.inactive(); private set
         var lastDecision = GateResume.NORMAL; private set
+        var lastAction: NoRouteAction? = null; private set
 
         /** [hist] = the history tier's answer at this position (ignored by TARGET). */
         fun tick(raw: Double, t: Double, speed: Double?, hist: Double?, active: Boolean = true) {
@@ -46,25 +47,28 @@ class GateInterstitialPipelineTest {
                 return
             }
             if (st.moveStartS == null && speed != null && speed > StalenessLogic.MIN_MOVING_MS) st.moveStartS = t
-            if (!routeLoaded) {
-                // VP branch: consumes the interstitial once no pending interval straddles the gate (mirror of
-                // production, same gateResume decision), then hands off via afterVp.
-                if (gateResume(gateInterstitial, coast.pendingHold) == GateResume.REANCHOR) {
-                    st.moveStartS?.let { m ->
-                        g.rebase(coast.effectiveDistanceM, t - m)
-                        st.lastRiderDist = coast.effectiveDistanceM
-                        st.prevTickElapsedS = t
-                    }
-                    gateInterstitial = false
-                    snapshot = null
-                }
-                published = false
-                if (st.initialised) afterVp = true
-                shown = GapState.inactive() // stand-in for the VP number
-                return
-            }
             val ms = st.moveStartS ?: return
             val riderDist = coast.effectiveDistanceM
+            if (!routeLoaded) {
+                // No-route branch: an integrator exists, so the same race continues post-route, through the same
+                // gate decision (folded into noRouteAction). Display stand-in: the seconds only.
+                lastAction = noRouteAction(hasIntegrator = true, raceEnabled = true, gateInterstitial, coast.pendingHold)
+                when (lastAction) {
+                    NoRouteAction.POST_WAIT_REPUBLISH -> {
+                        st.prevTickElapsedS = t
+                        shown = snapshot ?: GapState.inactive()
+                        return
+                    }
+                    NoRouteAction.POST_REANCHOR_THEN_STEP -> reanchor(riderDist, t, ms)
+                    else -> Unit
+                }
+                postRouteStep(
+                    st, g, cmp, coast, riderDist, t, speed, 0.0, riderDist * 1e-5, 90.0,
+                    fixAgeOk = true, gradeFresh = true, targetSpeedMs = 1.0 / target, gradePace = { null },
+                )
+                publish(GapState(g.gapTimeS, g.gapDistM, riderDist, 0.0, g.gapTimeS > 0, false, true))
+                return
+            }
             lastDecision = gateResume(gateInterstitial, coast.pendingHold)
             when (lastDecision) {
                 GateResume.WAIT_REPUBLISH -> {
@@ -72,33 +76,38 @@ class GateInterstitialPipelineTest {
                     shown = snapshot ?: GapState.inactive()
                     return
                 }
-                GateResume.REANCHOR -> {
-                    g.rebase(riderDist, t - ms)
-                    st.lastRiderDist = riderDist
-                    st.prevTickElapsedS = t // load-bearing: without it the re-enable tick freezes/counts the whole stretch
-                    // No st.initialised reset (production dropped it): REANCHOR ⇒ !pendingHold, the guard passes.
-                    published = false
-                    gateInterstitial = false
-                    snapshot = null
-                }
+                // st.prevTickElapsedS = t inside is load-bearing: without it the re-enable tick freezes/counts
+                // the whole stretch. No st.initialised reset (production dropped it): REANCHOR ⇒ !pendingHold.
+                GateResume.REANCHOR -> reanchor(riderDist, t, ms)
                 GateResume.NORMAL -> Unit
             }
-            val result = advanceRace(
+            advanceRace(
                 st, g, cmp, coast, riderDist, t, speed, 0.0, riderDist * 1e-5, 90.0,
                 fixAgeOk = true, gradeFresh = true, targetSpeedMs = 1.0 / target,
-                historyPace = { hist }, gradePace = { null }, neutralizeHistoryStep = afterVp,
+                historyPace = { hist }, gradePace = { null },
             )
-            if (result.ticked) afterVp = false
-            // Display stand-in only (the metres below): this tick's un-neutralised pace, as before.
+            // Behind, production derives the metres from the route curve at the rider's position (not
+            // integ.gapDistM, which reads 0 there) — stand-in: the lead at this tick's pace.
             val paceNow = selectRacePace(cmp, verdictAllowed(true, coast.quality), 1.0 / target, { hist }, { null })
+            val metres = if (g.gapTimeS < 0 && paceNow != null) g.gapTimeS / paceNow else g.gapDistM
+            publish(GapState(g.gapTimeS, metres, riderDist, 0.0, g.gapTimeS > 0, false, true))
+        }
+
+        private fun reanchor(riderDist: Double, t: Double, ms: Double) {
+            g.rebase(riderDist, t - ms)
+            st.lastRiderDist = riderDist
+            st.prevTickElapsedS = t
+            published = false
+            gateInterstitial = false
+            snapshot = null
+        }
+
+        private fun publish(gap: GapState) {
             when (routeGapPublication(cmp, st.historyVerdictSeen, coast.pendingHold, published)) {
                 RouteGapPublication.INACTIVE -> shown = GapState.inactive()
                 RouteGapPublication.HOLD -> Unit
                 RouteGapPublication.PUBLISH -> {
-                    // Behind, production derives the metres from the route curve at the rider's position
-                    // (not integ.gapDistM, which reads 0 there) — stand-in: the lead at this tick's pace.
-                    val metres = if (g.gapTimeS < 0 && paceNow != null) g.gapTimeS / paceNow else g.gapDistM
-                    shown = GapState(g.gapTimeS, metres, riderDist, 0.0, g.gapTimeS > 0, false, true)
+                    shown = gap
                     published = true
                 }
             }
@@ -264,22 +273,26 @@ class GateInterstitialPipelineTest {
         }
     }
 
-    @Test fun `re-enabled with no route - the VP stretch still earns its TARGET lead on route reload`() {
+    @Test fun `re-enabled with no route - the post-route stretch is raced once, TARGET earns its lead`() {
         val r = Rig(RaceComparator.TARGET) // target speed 4 m/s = 0.25 s/m
         r.ride(100, 6.0, null)
         val before = r.lead
         r.ride(200, 6.0, null, active = false) // disabled: nothing earned
         r.routeLoaded = false
-        // Re-enabled with no route. The re-enable tick itself is folded into the rebase (as the route
-        // REANCHOR's tick is); the other 99 VP ticks are 594 m in 99 s at 0.25 s/m = +49.5 s.
-        r.ride(100, 6.0, null)
+        // Re-enabled with no route: the re-enable tick REANCHORs post-route (folded into the rebase, as the
+        // route REANCHOR's tick is); the other 99 ticks are RACED post-route: 594 m in 99 s at 0.25 s/m = +49.5 s.
+        r.ride(1, 6.0, null)
+        assertEquals(NoRouteAction.POST_REANCHOR_THEN_STEP, r.lastAction)
+        r.ride(99, 6.0, null)
+        assertEquals(NoRouteAction.POST_STEP, r.lastAction)
+        assertEquals("earned during the stretch, not on reload", before + 49.5, r.lead, 1e-6)
         r.routeLoaded = true
-        r.ride(1, 6.0, null) // route reloads: VP stretch + this tick charged at the target (+0.5 s), not re-anchored away
+        r.ride(1, 6.0, null) // route reloads: only this tick's 6 m are charged (+0.5 s), the stretch not again
         assertEquals(GateResume.NORMAL, r.lastDecision)
         assertEquals(before + 50.0, r.lead, 1e-6)
     }
 
-    @Test fun `a pending interval straddling the gate settles in VP and is not charged on route reload`() {
+    @Test fun `a pending interval straddling the gate settles post-route once and is not charged on route reload`() {
         val r = Rig(RaceComparator.TARGET) // target speed 4 m/s = 0.25 s/m
         r.ride(100, 6.0, null)
         val before = r.lead
@@ -287,13 +300,16 @@ class GateInterstitialPipelineTest {
         assertTrue(r.coast.pendingHold)
         r.stop(40, null, active = false) // stops inside the interval — the hold persists
         r.routeLoaded = false
-        r.stop(5, null) // re-enabled with no route, hold unresolved: VP must NOT consume the interstitial yet
+        r.stop(5, null) // re-enabled with no route, hold unresolved: wait, never consume the interstitial yet
+        assertEquals(NoRouteAction.POST_WAIT_REPUBLISH, r.lastAction)
         assertTrue(r.coast.pendingHold)
-        d += 12.0; t += 1.0; r.tick(d, t, 0.0, null) // the delayed sample settles (12 m) while in VP
+        d += 12.0; t += 1.0; r.tick(d, t, 0.0, null) // the delayed sample settles (12 m) post-route
         assertTrue(r.coast.settledPending)
+        assertEquals(NoRouteAction.POST_REANCHOR_THEN_STEP, r.lastAction)
+        assertEquals("the straddling 12 m are excluded (+0 s, not 3 s)", before, r.lead, 1e-9)
         r.routeLoaded = true
         r.stop(5, null) // route reloads while stopped
-        assertEquals("the straddling 12 m are excluded (+0 s, not 3 s)", before, r.lead, 1e-9)
+        assertEquals("nor charged on reload", before, r.lead, 1e-9)
     }
 
     @Test fun `a HISTORY race with no verdict stays blank while waiting`() {
