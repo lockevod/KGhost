@@ -1219,6 +1219,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // Single tick owner: the cancelled job is NOT joined here (onConnected isn't suspending); it is parked
         // in retiredTickJob and the replacement tick joins it before touching any state, so the old iteration's
         // non-suspending tail can't write crossedFinish/race/integrator after the new tick's generation reset.
+        // The join is NonCancellable (awaitRetiredTick), so a replacement cancelled by a SECOND reconnect still
+        // completes only after the job it inherited: whoever joins it transitively waits for the whole chain.
+        // A retired job no tick ever inherited (reconnect → Idle) is joined by stopTickAndJoin().
         retiredTickJob = tickJob ?: retiredTickJob
         tickJob?.cancel()
         tickJob = null
@@ -2291,7 +2294,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         val prev = retiredTickJob
         retiredTickJob = null
         tickJob = scope.launch(Dispatchers.Default) {
-            prev?.join() // single tick owner: the reconnect-cancelled tick finishes before we touch any state
+            awaitRetiredTick(prev) // single tick owner: see awaitRetiredTick
             // Probe the RAW DISTANCE arrivals here: combine()+sample(REFRESH_MS) below discards this
             // timing, and it is the timing that decides whether a repeated sampled value is a genuine
             // freeze or just a stream slower than the tick.
@@ -3363,6 +3366,11 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         pendingNavState = null
         tickJob?.cancelAndJoin()
         tickJob = null
+        // Single tick owner on the Idle path: a reconnect-retired tick no replacement inherited must also
+        // finish before finishAndSaveRecording()/resetRideAnchor() run. Already cancelled; done → no-op.
+        val retired = retiredTickJob
+        retiredTickJob = null
+        retired?.join()
         locationJob?.cancel()
         locationJob = null
         gradeJob?.cancel()
@@ -3504,6 +3512,17 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
  * one-line change if device testing ever shows the SDK delivers a different unit.
  */
 internal fun elapsedMsToSeconds(rawMs: Double): Double = rawMs / 1000.0
+
+/**
+ * Single tick owner: wait for the reconnect-retired tick [prev] to finish, even if the caller is
+ * cancelled meanwhile (NonCancellable), then stop if the caller was cancelled. A replacement cancelled
+ * by a second reconnect therefore completes only after [prev]; the next replacement joining it waits
+ * for the whole chain, so two tick bodies never run at once.
+ */
+internal suspend fun awaitRetiredTick(prev: Job?) {
+    withContext(NonCancellable) { prev?.join() }
+    currentCoroutineContext().ensureActive()
+}
 
 /** What a mid-ride settings change has to do to the current route match. */
 internal enum class RematchAction { NONE, REPICK, RESTART_MATCH, FULL_REMATCH }
