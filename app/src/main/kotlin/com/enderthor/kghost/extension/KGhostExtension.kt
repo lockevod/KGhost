@@ -26,6 +26,7 @@ import com.enderthor.kghost.engine.GhostCurve
 import com.enderthor.kghost.engine.GhostPick
 import com.enderthor.kghost.engine.LiveSegment
 import com.enderthor.kghost.engine.RenderPrefs
+import com.enderthor.kghost.engine.RouteGenGate
 import com.enderthor.kghost.engine.RouteGhost
 import com.enderthor.kghost.engine.SegmentInfoHolder
 import com.enderthor.kghost.engine.EffectiveProfile
@@ -555,6 +556,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // (Named exactly as the former locals so the tick body needs no edits; reset by resetRideAnchor().)
     @Volatile private var projectorRoute: PolylinePath? = null
     @Volatile private var projectorPolyline: String? = null
+    // Clear generation: clearRouteMode() bumps it, the TICK alone resets the route-local state above when it
+    // first sees a RouteMode of a newer generation (an in-flight tick holding the old mode can't write after it).
+    private val routeGen = RouteGenGate()
     // The B2 race step's per-ride state (see engine.RaceStepState / advanceRace). Reset only by resetRideAnchor.
     // race.moveStartS: ride-elapsed (s) at first movement — the B2 race clock origin. Nulled at ride end/stop;
     // PRESERVED across a reroute (the route-agnostic integrator carries the lead, so the clock must stay continuous).
@@ -791,6 +795,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
          * comparator, so they always race what the number races, across any reroute.
          */
         val comparator: RaceComparator,
+        /**
+         * [routeGen] clear generation at creation (default only for the test constructors). The tick resets
+         * the route-local marker/finish state when it first sees a newer one; [withPick] copies it (a repick
+         * is not a clear).
+         */
+        val clearGen: Long = 0L,
     ) {
         fun withPick(pick: GhostPick, fillSpeedMs: Double): RouteMode {
             val aggregate = aggregate ?: return this
@@ -1834,7 +1844,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // built under the OLD settings over the replacement's.
                     currentCoroutineContext().ensureActive()
                     if (matchStillOwns(mine, lastMatchedPolyline, generation, matchGeneration)) {
-                        routeMode = RouteMode(path, mine, state.name, matched, historyGhost, targetGhost, state.routeDistance, pacePatch, gradePace, agg, comparator)
+                        routeMode = RouteMode(path, mine, state.name, matched, historyGhost, targetGhost, state.routeDistance, pacePatch, gradePace, agg, comparator, clearGen = routeGen.current())
                         // Diagnostic for the scale question: the Karoo's own routeDistance vs the
                         // decoded-polyline length (the scale segments + the ghost curve live on). A large
                         // delta means the host and our polyline disagree about how long the route is,
@@ -1948,7 +1958,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private fun clearRouteMode() {
         // An explicit clear supersedes any pending debounced clear. The delayed clear path calls this
         // then sets clearJob = null itself, so we only cancel a still-active job here (a direct caller:
-        // onDestroy/stopTick teardown, or a match failure). Cancelling the very coroutine that is
+        // a settings-change re-match, or a match failure; onDestroy/stopTick use resetRideAnchor). Cancelling the very coroutine that is
         // running this is benign — there is no suspension point after this call — but the takeIf keeps
         // it tidy. We deliberately do NOT null clearJob here; the delayed path nulls it on its own.
         clearJob?.takeIf { it.isActive }?.cancel()
@@ -1958,6 +1968,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         repickJob?.cancel()
         lastMatchedPolyline = null
         routeMode = null
+        // Route-local marker/finish state is NOT reset here (an in-flight tick would write after it): the
+        // tick resets it when it sees the next route's newer generation.
+        routeGen.onClear()
         SegmentInfoHolder.clear()
         // Clear the map-loop snapshot AND hide directly. publishGhostMarker is internally synchronized
         // on mapLock, so it is safe to call from any caller thread (this can run on a Default coroutine
@@ -2644,6 +2657,19 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // state (the integrator + race clock are KEPT, so the accrued lead CARRIES — see the block
                         // below); a same-route re-match (a mid-ride settings change, a new path instance for the
                         // SAME polyline) changes nothing.
+                        if (routeGen.needsReset(rm.clearGen)) {
+                            // First route since a clear (even the IDENTICAL polyline: crossedFinish/lap2Started
+                            // would otherwise hide the reloaded marker). Integrator, race and clock are kept.
+                            projectorRoute = null
+                            projectorPolyline = null
+                            lastGoodRouteDistM = null
+                            distMAtLastGoodM = null
+                            emptyWindowTicks = 0
+                            prevSegStartM = null
+                            crossedFinish = false
+                            lap2Started = false
+                            lastReliableGhostRouteDist = null
+                        }
                         if (projectorRoute !== rm.path) {
                             val sameRoute = projectorPolyline == rm.polyline
                             projectorRoute = rm.path
