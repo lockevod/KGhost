@@ -447,8 +447,10 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     private val rideState = MutableStateFlow<RideState?>(null)
     private var autoDiscovery: AutoDiscovery? = null
     private var tickJob: Job? = null
-    // A tick cancelled by onConnected but not yet joined; the next startTick's coroutine joins it first.
-    @Volatile private var retiredTickJob: Job? = null
+    // Ticks cancelled by onConnected and not yet known to be finished. MAIN-CONFINED: touched only by
+    // onConnected, startTick and stopTickAndJoin, all on Main (never from the tick body, which receives a
+    // snapshot). A job leaves the list only once completed, so every later replacement snapshots it too.
+    private val retiredTicks = mutableListOf<Job>()
     // GPS location consumer. Subscribed only while Recording (started in startTick, cancelled in
     // stopTick/stopTickAndJoin) so GPS fixes aren't consumed when the recorder/projector don't need
     // them. Owned by [scope].
@@ -654,6 +656,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // Whether the post-route race has started since the last route tick: its first tick invalidates the
     // route-keyed checkpoint (no stale route lead survives into post-route). Re-armed by every route tick.
     @Volatile private var postRouteEntered: Boolean = false
+    // The post-route race has cleared the route's segment state (once, on its FIRST tick, regardless of navigation).
+    // Re-armed together with postRouteEntered.
+    @Volatile private var postRouteSegCleared: Boolean = false
     // The per-profile / master gate kept the extension inert while a B2 race was running → the next
     // active race tick (route or post-route) must re-anchor the integrator (see engine.gateResume) so the disabled stretch
     // contributes 0. [gateSnapshot] = the last PUBLISHED gap (seconds AND route-derived metres), republished
@@ -714,6 +719,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         lastReliableGhostRouteDist = null
         raceGradePace = null
         postRouteEntered = false
+        postRouteSegCleared = false
     }
 
     /** Fixed pace selected mid-ride: the B2 race ENDS (a later Your-rides route starts a fresh race at 0). Resets
@@ -894,7 +900,8 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // ride-profile switch would otherwise keep serving the old settings until the NEXT route load.
     // lastMatchSig is the signature of the resolved settings the last gate/match decision used; see
     // [rematchOnSettingsChange]. Both are touched only from collectors on [scope] (Main).
-    private var lastNavEvent: OnNavigationState? = null
+    // @Volatile: also read by the tick (Default) to tell a temporary re-match from a real route end.
+    @Volatile private var lastNavEvent: OnNavigationState? = null
     private var lastMatchSig: MatchSig? = null
     // Last compact nav summary logged, to dedup the noisy NavigatingRoute re-emits (see onNavigationState).
     private var lastNavLog: String? = null
@@ -1217,12 +1224,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // binding-independent, so it is preserved (no needless re-match). On the FIRST connect both
         // jobs are null, so this is a no-op.
         // Single tick owner: the cancelled job is NOT joined here (onConnected isn't suspending); it is parked
-        // in retiredTickJob and the replacement tick joins it before touching any state, so the old iteration's
-        // non-suspending tail can't write crossedFinish/race/integrator after the new tick's generation reset.
-        // The join is NonCancellable (awaitRetiredTick), so a replacement cancelled by a SECOND reconnect still
-        // completes only after the job it inherited: whoever joins it transitively waits for the whole chain.
-        // A retired job no tick ever inherited (reconnect → Idle) is joined by stopTickAndJoin().
-        retiredTickJob = tickJob ?: retiredTickJob
+        // in retiredTicks and every replacement tick joins ALL unfinished retired ticks before touching any
+        // state, so an old iteration's non-suspending tail can't write crossedFinish/race/integrator after the
+        // new tick's generation reset. A job stays listed until it completes, so a replacement cancelled by a
+        // SECOND reconnect before its body even started can't hide its predecessor from the next one. The
+        // Idle path (stopTickAndJoin) drains the list under NonCancellable.
+        tickJob?.let { retiredTicks += it }
         tickJob?.cancel()
         tickJob = null
         locationJob?.cancel()
@@ -1272,8 +1279,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Did THIS process see the ride active? A fresh process (ride-app restart, reboot, OOM)
                     // receives Idle FIRST while the host restores the ride (Idle → Paused → Recording with
                     // ELAPSED_TIME carrying on), so that Idle is not a ride end.
+                    // ridePaused is cleared only AFTER the checkpoint cleanup below: a cancel (reconnect) before it
+                    // then leaves sawActiveRide true for the replayed Idle, so the deletes still happen.
                     val sawActiveRide = wasRecording || ridePaused
-                    ridePaused = false
                     // Order matters: fully stop+join the tick FIRST so the recorder is quiescent
                     // (no onSample racing build/reset) before finishAndSaveRecording() touches it.
                     // The tick never reads recordingStartedEpoch, and stopTickAndJoin() does not
@@ -1294,11 +1302,16 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // restore gates (6 h age, routeKey, pick, GhostCheckpoint.continuesRide's odometer + ride
                     // clock continuity) keep a new ride from taking it.
                     // Awaited and under the writer's lock: an in-flight flush can't resurrect it afterwards.
+                    // Both deletes in one NonCancellable block: a cancel can't run one and skip the other. Not nested:
+                    // invalidate() takes and releases the lock itself before the VP delete takes it.
                     if (sawActiveRide) {
-                        withContext(Dispatchers.IO) { checkpointFile.invalidate() }
-                        withContext(Dispatchers.IO) { checkpointMutex.withLock { runCatching { vpOriginFile.delete() } } }
+                        withContext(NonCancellable + Dispatchers.IO) {
+                            checkpointFile.invalidate()
+                            checkpointMutex.withLock { runCatching { vpOriginFile.delete() } }
+                        }
                     }
                     else Timber.i("KVP Idle before any active ride in this process — checkpoint kept for a resume")
+                    ridePaused = false
                     GapStateHolder.clear()
                     SegmentInfoHolder.clear()
                     publishGhostMarker(null)
@@ -2291,10 +2304,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         // rider disabling the profile mid-ride is indistinguishable from a dead tick in the ride log.
         var lastGateLog: String? = null
 
-        val prev = retiredTickJob
-        retiredTickJob = null
+        val pending = snapshotRetiredTicks(retiredTicks)
         tickJob = scope.launch(Dispatchers.Default) {
-            awaitRetiredTick(prev) // single tick owner: see awaitRetiredTick
+            awaitRetiredTicks(pending) // single tick owner: see awaitRetiredTicks
             // Probe the RAW DISTANCE arrivals here: combine()+sample(REFRESH_MS) below discards this
             // timing, and it is the timing that decides whether a repeated sampled value is a genuine
             // freeze or just a stream slower than the tick.
@@ -2480,6 +2492,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         }
                     }
                     if (!eff.active) {
+                        // Fixed pace via a disabled profile / master off: end the race here, since this branch returns
+                        // before noRouteAction. endB2Race nulls the integrator, so nothing below snapshots it.
+                        if (integrator != null && !eff.raceEnabled) endB2Race("fixed pace selected (inactive profile)")
                         val integ0 = integrator
                         val rm0 = routeMode
                         val cmp0 = integComparator
@@ -2749,6 +2764,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         // route end re-enters post-route (invalidating the checkpoint again).
                         raceGradePace = rm.gradePace
                         postRouteEntered = false
+                        postRouteSegCleared = false
                         if (routeGen.needsReset(rm.clearGen)) {
                             // First route since a clear (even the IDENTICAL polyline: crossedFinish/lap2Started
                             // would otherwise hide the reloaded marker). Integrator, race and clock are kept.
@@ -3153,16 +3169,27 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             NoRouteAction.VP -> Unit
                             NoRouteAction.END_RACE_THEN_VP -> endB2Race("fixed pace selected")
                             NoRouteAction.POST_WAIT_REPUBLISH, NoRouteAction.POST_REANCHOR_THEN_STEP, NoRouteAction.POST_STEP -> {
-                                // First post-route tick: drop the route-keyed checkpoint (awaited, serialized with the
-                                // writer) BEFORE anything is stepped or published, so the crash boundary is the route
-                                // race's last state and no stale route lead is resumed later.
-                                // Also clear the route's segment state once, silently (as on route loss). Once, not per
-                                // tick: clearing then re-setting the SEG tag every second would churn the field's render
-                                // trigger. Before the WAIT republish below, which sets the snapshot's tag.
-                                if (!postRouteEntered) {
+                                // Once navigation is no longer a route: drop the route-keyed checkpoint (awaited,
+                                // serialized with the writer) BEFORE anything is stepped or published, so the crash
+                                // boundary is the route race's last state and no stale route lead is resumed later.
+                                // Checked every post-route tick: while the host still navigates the route this is a
+                                // temporary re-match (FULL_REMATCH clears routeMode; a cold re-match can take ~1 min),
+                                // and a process death in that window must still resume the lead from the checkpoint.
+                                // A later nav Idle triggers it. Accepted residual: a match FAILURE while still
+                                // navigating keeps the old checkpoint (until nav leaves the route or the ride ends).
+                                if (!postRouteEntered &&
+                                    lastNavEvent?.state !is OnNavigationState.NavigationState.NavigatingRoute
+                                ) {
                                     withContext(Dispatchers.IO) { checkpointFile.invalidate() }
-                                    publishSegment(null, fireExit = false)
                                     postRouteEntered = true
+                                }
+                                // First post-route tick, regardless of navigation: clear the route's segment state once,
+                                // silently (as on route loss). Once, not per tick: clearing then re-setting the SEG tag
+                                // every second would churn the field's render trigger. Before the WAIT republish below,
+                                // which sets the snapshot's tag.
+                                if (!postRouteSegCleared) {
+                                    publishSegment(null, fireExit = false)
+                                    postRouteSegCleared = true
                                 }
                                 if (noRoute == NoRouteAction.POST_WAIT_REPUBLISH) {
                                     republishGateSnapshot()
@@ -3368,9 +3395,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         tickJob = null
         // Single tick owner on the Idle path: a reconnect-retired tick no replacement inherited must also
         // finish before finishAndSaveRecording()/resetRideAnchor() run. Already cancelled; done → no-op.
-        val retired = retiredTickJob
-        retiredTickJob = null
-        retired?.join()
+        drainRetiredTicks(retiredTicks)
         locationJob?.cancel()
         locationJob = null
         gradeJob?.cancel()
@@ -3514,14 +3539,29 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
 internal fun elapsedMsToSeconds(rawMs: Double): Double = rawMs / 1000.0
 
 /**
- * Single tick owner: wait for the reconnect-retired tick [prev] to finish, even if the caller is
- * cancelled meanwhile (NonCancellable), then stop if the caller was cancelled. A replacement cancelled
- * by a second reconnect therefore completes only after [prev]; the next replacement joining it waits
- * for the whole chain, so two tick bodies never run at once.
+ * Single tick owner: the retired ticks a new tick must wait for. Drops the completed ones but KEEPS the
+ * unfinished ones listed, so a replacement that is itself cancelled before its body starts can't hide
+ * them from the next replacement. Caller-confined list (Main in production).
  */
-internal suspend fun awaitRetiredTick(prev: Job?) {
-    withContext(NonCancellable) { prev?.join() }
+internal fun snapshotRetiredTicks(retired: MutableList<Job>): List<Job> {
+    retired.removeAll { it.isCompleted }
+    return retired.toList()
+}
+
+/**
+ * Single tick owner: wait for every retired tick in [pending] to finish, even if the caller is
+ * cancelled meanwhile (NonCancellable), then stop if the caller was cancelled. Two tick bodies
+ * therefore never run at once.
+ */
+internal suspend fun awaitRetiredTicks(pending: List<Job>) {
+    withContext(NonCancellable) { pending.forEach { it.join() } }
     currentCoroutineContext().ensureActive()
+}
+
+/** Idle path: join every retired tick (NonCancellable, so a cancel can't skip one), then forget the finished. */
+internal suspend fun drainRetiredTicks(retired: MutableList<Job>) {
+    withContext(NonCancellable) { retired.toList().forEach { it.join() } }
+    retired.removeAll { it.isCompleted }
 }
 
 /** What a mid-ride settings change has to do to the current route match. */
