@@ -36,7 +36,6 @@ import com.enderthor.kghost.engine.GhostPaceSource
 import com.enderthor.kghost.engine.toInfo
 import com.enderthor.kghost.engine.AGG_MIN_LAPS
 import com.enderthor.kghost.engine.CorridorSeeder
-import com.enderthor.kghost.engine.GhostCheckpoint
 import com.enderthor.kghost.engine.VpOrigin
 import com.enderthor.kghost.engine.startVpOrigin
 import com.enderthor.kghost.engine.VpOriginDecision
@@ -649,10 +648,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     @Volatile private var gateSnapshot: GapState? = null
     // Monotonic (elapsedRealtime ms) of the last checkpoint write — throttles the ~5 s periodic persist.
     @Volatile private var lastCheckpointMs: Long = 0L
-    // Latest checkpoint SNAPSHOT, built on the Main tick (so the IO writer never reads the integrator's
-    // non-volatile scalars cross-thread) and serialized by [checkpointMutex] (so the ~5 s tick write and
-    // the Paused write can't clobber the shared temp file).
-    @Volatile private var pendingCheckpoint: GhostCheckpoint? = null
+    // Serializes the ghost checkpoint's writes AND deletes with the VP-origin writes (shared temp-file pattern).
     private val checkpointMutex = Mutex()
     // Serializes maybeAlertMissingPermission()'s load-decide-dispatch-write across concurrent
     // RideState.Recording emissions (e.g. a host reconnect storm firing it twice in quick
@@ -701,7 +697,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
         gateInterstitial = false
         gateSnapshot = null
         lastCheckpointMs = 0L
-        pendingCheckpoint = null
+        checkpointFile.pending = null
         lastReliableGhostRouteDist = null
     }
 
@@ -709,30 +705,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
     // A tiny file persisted periodically so a mid-ride power-off / crash / service kill resumes the
     // race WITH the accrued lead instead of restarting from a 0 gap. Deleted at a clean ride end, so a
     // file present on the next start means the previous ride was interrupted → a candidate to resume.
-    private val ghostCheckpointFile: File get() = File(applicationContext.filesDir, GHOST_CHECKPOINT_FILE)
-
-    /** Reads the persisted checkpoint, or null if absent/corrupt (never throws). */
-    private fun loadGhostCheckpoint(): GhostCheckpoint? = runCatching {
-        val f = ghostCheckpointFile
-        if (!f.exists()) null
-        else jsonForStorage.decodeFromString(GhostCheckpoint.serializer(), f.readText())
-    }.getOrNull()
-
-    /** Flushes the latest Main-built [pendingCheckpoint] snapshot atomically. Suspends; call on IO. The
-     *  mutex serializes the ~5 s tick write and the Paused write so they can't clobber the shared temp.
-     *  fsync off — a lost/torn checkpoint just means resume-from-zero (safe), not corruption. */
-    private suspend fun flushGhostCheckpoint() {
-        val cp = pendingCheckpoint ?: return
-        checkpointMutex.withLock {
-            runCatching {
-                atomicWriteText(ghostCheckpointFile, jsonForStorage.encodeToString(GhostCheckpoint.serializer(), cp), fsync = false)
-            }.onFailure { Timber.w(it, "ghost checkpoint write failed") }
-        }
-    }
-
-    /** Deletes the checkpoint at a clean ride end so the next ride starts fresh. */
-    private fun deleteGhostCheckpoint() {
-        runCatching { ghostCheckpointFile.delete() }
+    // Lazy, never a plain initializer: applicationContext is null before the Service attaches.
+    private val checkpointFile by lazy {
+        GhostCheckpointFile(File(applicationContext.filesDir, GHOST_CHECKPOINT_FILE), checkpointMutex)
     }
 
     // ---- VP origin (Ghost-Pace race clock + start odometer) — same pattern as the ghost checkpoint.
@@ -1240,7 +1215,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // Flush the latest checkpoint snapshot on entering a pause: the tick stops emitting while
                     // paused, so this persists the most recent Main-built state (≤ CHECKPOINT_INTERVAL_MS old)
                     // before a possible power-off during a long café stop. No-op if nothing has been built yet.
-                    scope.launch(Dispatchers.IO) { flushGhostCheckpoint() }
+                    scope.launch(Dispatchers.IO) { checkpointFile.flush() }
                 }
                 is RideState.Idle -> {
                     // Did THIS process see the ride active? A fresh process (ride-app restart, reboot, OOM)
@@ -1267,8 +1242,9 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     // A checkpoint left by a ride that really ended while we were dead stays behind; the
                     // restore gates (6 h age, routeKey, pick, GhostCheckpoint.continuesRide's odometer + ride
                     // clock continuity) keep a new ride from taking it.
+                    // Awaited and under the writer's lock: an in-flight flush can't resurrect it afterwards.
                     if (sawActiveRide) {
-                        deleteGhostCheckpoint()
+                        withContext(Dispatchers.IO) { checkpointFile.invalidate() }
                         runCatching { vpOriginFile.delete() }
                     }
                     else Timber.i("KVP Idle before any active ride in this process — checkpoint kept for a resume")
@@ -2427,7 +2403,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                         val nowCp = SystemClock.elapsedRealtime()
                         if (nowCp - lastCheckpointMs >= CHECKPOINT_INTERVAL_MS) {
                             lastCheckpointMs = nowCp
-                            pendingCheckpoint = raceCheckpoint(
+                            checkpointFile.pending = raceCheckpoint(
                                 rideEpoch = recordingStartedEpoch,
                                 leadS = integ.gapTimeS,
                                 lastRiderDist = lastRiderDist,
@@ -2439,7 +2415,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 comparator = cmp,
                                 historyVerdictSeen = race.historyVerdictSeen,
                             )
-                            scope.launch(Dispatchers.IO) { flushGhostCheckpoint() }
+                            scope.launch(Dispatchers.IO) { checkpointFile.flush() }
                         }
                     }
                     if (!eff.active) {
@@ -2602,7 +2578,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                     ) {
                         // A fresh process mid-ride (ride-app restart, power-off) lands here with the whole-ride
                         // odometer: ADOPT the persisted origin iff recent + same ride (the ghost checkpoint's
-                        // rule), else start fresh here. Tiny file read, once per ride (as loadGhostCheckpoint) —
+                        // rule), else start fresh here. Tiny file read, once per ride (as checkpointFile.load()) —
                         // a DEFER (odometer carries on, ELAPSED_TIME still stale) keeps the read and waits, bounded.
                         val distNow = coast.effectiveDistanceM
                         val nowMono = SystemClock.elapsedRealtime()
@@ -2754,7 +2730,7 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                             // the SAME recordingStartedEpoch, or — a power-off / ride-app restart mints a fresh
                             // epoch — odometer AND ride clock both carrying on from the checkpoint).
                             // restore() takes the LEAD, re-anchored on the next tick (no whole-ride inflation).
-                            val cp = loadGhostCheckpoint()
+                            val cp = checkpointFile.load()
                             val riderDistNow = coast.effectiveDistanceM
                             val curKey = routeKeyOf(rm.routeName, rm.path.totalM)
                             // routeKey match is REQUIRED: it deterministically blocks restoring a previous route's
