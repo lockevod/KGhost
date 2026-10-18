@@ -101,13 +101,15 @@ class RecordingIdleRecordingFakeKarooTest {
     }
 
     @Test
-    fun `a reconnect during the Idle drain does not break the next ride's collectors`() {
+    fun `a host reconnect around ride end leaves the next ride's collectors working`() {
         val gap = rideWithRoute()
 
         karoo.system.setNavigation(OnNavigationState.NavigationState.Idle)
         karoo.system.setRideState(RideState.Idle)
-        // Let the Idle handler start (it suspends joining the tick), then rebind the host under it:
-        // onConnected cancels the ride collector mid-drain and the replayed Idle runs again.
+        // Rebind the host right after ride end: onConnected runs again on the same instance, the replayed
+        // Idle hides the ghost, and the next ride's collectors work. This does NOT pin a2b52b3's drain
+        // window (the reconnect is not guaranteed to land inside stopTickAndJoin/drainRetiredTicks; that
+        // needs a main-code seam). AwaitRetiredTickTest covers that path at unit level.
         RobolectricPump.pumpMainLooper()
         kghost.reconnect()
         karoo.awaitValue { true.takeIf { RideState.Params in karoo.system.consumerParams } }
@@ -118,6 +120,7 @@ class RecordingIdleRecordingFakeKarooTest {
         val values = rideWithoutRoute(gap)
         assertTrue("the second ride's gap must change over time, got $values", values.size >= 2)
         assertFalse("no first-ride ghost on the map during the second ride", ghostVisible())
+        assertEquals(emptyMap<String, Any>(), kghost.host.visibleSymbols())
     }
 
     private companion object {

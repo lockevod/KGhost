@@ -36,6 +36,7 @@ class KGhostFakeKarooRule(val karoo: FakeKarooRule) : ExternalResource() {
 
     override fun before() {
         // Process-wide statics survive between tests in the same Robolectric sandbox.
+        // FileLogTree's started/appContext also leak across tests; harmless only because fileLogging=false.
         GapStateHolder.clear()
         SegmentInfoHolder.clear()
         RenderPrefs.setGapDisplay(GapDisplay.BOTH)
@@ -69,6 +70,8 @@ class KGhostFakeKarooRule(val karoo: FakeKarooRule) : ExternalResource() {
      * ServiceConnection sees onServiceDisconnected then onServiceConnected, so the extension's
      * connect{} callback (and its onConnected) runs a second time. The system end drops the dead
      * binding's consumers; the SDK re-registers its listeners on reconnect.
+     * Fidelity gaps: disconnect and connect run back to back (the real seconds-long controller == null
+     * window is not exercised), the same binder object comes back, and onBindingDied is not modelled.
      */
     fun reconnect() {
         val component = ComponentName(KAROO_SYSTEM_PACKAGE, KAROO_SYSTEM_SERVICE)
