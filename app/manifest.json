@@ -3,9 +3,9 @@
   "packageName": "com.enderthor.kghost",
   "latestApkUrl": "https://github.com/lockevod/KGhost/releases/latest/download/kghost.apk",
   "iconUrl": "https://github.com/lockevod/KGhost/releases/latest/download/kghost.png",
-  "latestVersion": "1.4.0",
-  "latestVersionCode": 2026101101,
+  "latestVersion": "1.5.0",
+  "latestVersionCode": 2026101801,
   "developer": "github.com/lockevod",
   "description": "Race against a ghost on your Karoo: a fixed-pace Ghost Pace or your own past self on a route, stitched into one continuous ghost. Shows the live time/distance gap on graphical and numeric data fields and draws the ghost's position on the map. Records each ride automatically and can import GPX/FIT ghosts dropped in /sdcard/KGhost. Keeps estimating during GPS dropouts. Needs All files access: grant it in the KGhost app so it can find your past rides.",
-  "releaseNotes": "KGhost now finds the rides already on your Karoo by itself (no Import button) and learns your pace on every gradient from your whole ride history, ignoring sessions where the Karoo sat at home or rode in a car, so on roads you have never ridden the ghost climbs and descends at your real pace instead of freezing the gap; BEST and LAST now come from real rides, not from a few odd metres. On a route you barely know it races your Ghost Pace target instead of sitting at 0, and the gap survives a Karoo or ride-app restart and switching KGhost off and on mid-ride. Less background work after each ride."
+  "releaseNotes": "When you finish a route or cancel navigation mid-ride, the gap now keeps the same race going: same lead, same clock, no more jumping to a whole-ride number (a 1-minute deficit could suddenly read hours ahead). After the route KGhost keeps judging you against your pace on each gradient, or your Ghost Pace target, and when you are behind the distance shows how far ahead the ghost is at its pace. Switching to Fixed pace mid-ride now ends the race cleanly, the map ghost reappears when you reload a route you just finished, and the gap and its resume file stay consistent when the ride app reconnects."
 }

@@ -107,6 +107,19 @@ against your past self that hasn't yet compared any ridden metres with your road
 loss (see below). Fields are designed for sunlight
 readability and respect the Karoo's day/night theme.
 
+### When the route ends
+
+Finish a route or cancel navigation mid-ride and the gap keeps **the same race** going: same lead,
+same clock, same comparison — it never jumps to a different number. On the roads after the route
+KGhost keeps judging you against your pace on each gradient (*Your rides*) or your Ghost Pace target;
+with no gradient history to use, the number simply holds. The map ghost is hidden after the route
+(there is no route to place it on), and when you are behind the distance shows how far ahead the
+ghost would be at its own pace (`---` when it has no pace to use). Reload a route and the same race
+carries on along it.
+
+Loading a route partway through a ride that had none starts a **fresh race at 0** from that moment,
+and switching to **Fixed pace** mid-ride ends the current race.
+
 ### Stops and GPS dropouts
 
 The race runs on **moving time**: when you **stop** (a red light, a photo, the finish line) the gap
