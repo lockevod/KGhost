@@ -3140,8 +3140,12 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 // First post-route tick: drop the route-keyed checkpoint (awaited, serialized with the
                                 // writer) BEFORE anything is stepped or published, so the crash boundary is the route
                                 // race's last state and no stale route lead is resumed later.
+                                // Also clear the route's segment state once, silently (as on route loss). Once, not per
+                                // tick: clearing then re-setting the SEG tag every second would churn the field's render
+                                // trigger. Before the WAIT republish below, which sets the snapshot's tag.
                                 if (!postRouteEntered) {
                                     withContext(Dispatchers.IO) { checkpointFile.invalidate() }
+                                    publishSegment(null, fireExit = false)
                                     postRouteEntered = true
                                 }
                                 if (noRoute == NoRouteAction.POST_WAIT_REPUBLISH) {
@@ -3168,7 +3172,6 @@ class KGhostExtension : KarooExtension("kghost", BuildConfig.VERSION_NAME) {
                                 val gap = postRouteGap(integ, raceCmp, step, riderDist, eff.targetSpeedMs,
                                     estimated = coast.quality == CoastQuality.LONG_LOSS)
                                 publishRaceGap(raceCmp, gap)
-                                publishSegment(null, fireExit = false) // route gone: silent clear, as on route loss
                                 if (raceCmp == RaceComparator.HISTORY) SegmentInfoHolder.set(B2_ON_HISTORY) else SegmentInfoHolder.clear()
                                 mapGhostState = null // no route frame to place the marker in
                                 val nowMs = SystemClock.elapsedRealtime()
