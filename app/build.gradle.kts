@@ -8,9 +8,8 @@ plugins {
     kotlin("plugin.serialization") version "2.0.0"
 }
 
-// Diagnostic-log delivery credentials, read from local.properties (gitignored) at compile time so
-// they never appear in the repository or any settings screen. Absent keys fall back to "" and
-// LogReporter then skips sending — a build without them simply never uploads.
+// Diagnostic-log relay URL, read from local.properties (gitignored) at compile time. An absent key falls
+// back to "" and LogReporter then skips sending — a build without it simply never uploads.
 val localProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) FileInputStream(f).use { load(it) }
@@ -26,8 +25,9 @@ android {
         versionCode = 2026101801
         versionName = "1.5.0"
 
-        buildConfigField("String", "CALIB_BOT_TOKEN", "\"${localProps.getProperty("calib.bot_token", "")}\"")
-        buildConfigField("String", "CALIB_CHAT_ID", "\"${localProps.getProperty("calib.chat_id", "")}\"")
+        // Write-only log relay (Cloudflare Worker holding the bot token + chat id as secrets). Only the
+        // URL ships in the APK: whoever extracts it can drop documents into the dev chat and nothing else.
+        buildConfigField("String", "LOG_RELAY_URL", "\"${localProps.getProperty("calib.relay_url", "")}\"")
     }
     buildTypes {
         release {
