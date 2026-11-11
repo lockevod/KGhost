@@ -2,7 +2,7 @@
   "label": "KGhost",
   "packageName": "com.enderthor.kghost",
   "latestApkUrl": "https://github.com/lockevod/KGhost/releases/latest/download/kghost.apk",
-  "iconUrl": "https://github.com/lockevod/KGhost/releases/latest/download/kghost.png",
+  "iconUrl": "https://raw.githubusercontent.com/lockevod/KGhost/main/app/kghost.png",
   "latestVersion": "1.5.0",
   "latestVersionCode": 2026101801,
   "developer": "github.com/lockevod",
