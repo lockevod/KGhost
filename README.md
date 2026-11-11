@@ -238,7 +238,10 @@ Device-level switches and recorded-track-library management (not per profile):
   (periodically and at ride end) to help diagnose problems — but **GPS coordinates are stripped before
   sending, so no location data leaves your Karoo**, and the upload is tagged only with a random
   **Anon tag** (no personal or device identifier), shown in this screen so you can quote it in a bug
-  report. Turn the diagnostic log off and nothing is ever sent.
+  report. The upload goes over HTTPS through a write-only relay (a Cloudflare Worker) that forwards it
+  to the developer's private Telegram chat; the bot token lives only on that relay, never in the APK, so
+  nobody can extract it to read the chat or other riders' logs. Turn the diagnostic log off and nothing
+  is ever sent.
 
 > **How it works under the hood:** two developer docs, neither needed to use the app —
 > [`docs/route-ghost-model.md`](docs/route-ghost-model.md) covers the position/ghost/alert model (route
